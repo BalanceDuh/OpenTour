@@ -467,6 +467,7 @@ class LiveStreamApp {
     private interruptLogs: string[] = [];
     private readonly debugLogs: string[] = [];
     private sourceMode: SourceMode = 'server';
+    private sourceConfirmed = false;
     private selectedLocalManifest: LiveManifest | null = null;
     private timerHandle: number | null = null;
     private startedAtMs = 0;
@@ -492,13 +493,12 @@ class LiveStreamApp {
         this.sceneHost.setDebugLogger((message, detail) => this.logDebug(message, detail));
         await this.sceneHost.init();
         this.bindEvents();
-        this.connectLiveEvents();
-        await this.tryResumeServerSession();
         if (!this.active) this.setPhase('IDLE', 'Ready for live stream.');
         this.applySubtitleStyle();
         this.updateSourceSummary();
         this.updatePlayPauseUi();
         this.updateTimer();
+        this.syncPanelInset();
         this.render();
     }
 
@@ -513,10 +513,12 @@ class LiveStreamApp {
             if (target.closest('button,input,select,textarea,label,a')) return;
             this.debugConsole.classList.remove('collapsed');
             this.debugToggleBtn.title = 'Collapse Debug';
+            this.syncPanelInset();
         });
         this.debugToggleBtn.addEventListener('click', () => {
             this.debugConsole.classList.toggle('collapsed');
             this.debugToggleBtn.title = this.debugConsole.classList.contains('collapsed') ? 'Expand Debug' : 'Collapse Debug';
+            this.syncPanelInset();
         });
         this.configBtn.addEventListener('click', () => this.openConfigModal());
         this.chooseFolderBtn.addEventListener('click', () => this.openSourceModal());
@@ -533,9 +535,13 @@ class LiveStreamApp {
         this.configCloseBtn.addEventListener('click', () => this.closeConfigModal());
         this.sourceModeInputs.forEach((input) => input.addEventListener('change', () => {
             this.sourceMode = input.value === 'local' ? 'local' : 'server';
+            this.sourceConfirmed = false;
             this.syncSourceModal();
         }));
-        this.pathInput.addEventListener('input', () => this.updateSourceSummary());
+        this.pathInput.addEventListener('input', () => {
+            this.sourceConfirmed = false;
+            this.updateSourceSummary();
+        });
         this.queueFilterChatBtn.addEventListener('click', () => { this.queueFilter = 'CHAT'; this.renderQueues(); });
         this.queueFilterSystemBtn.addEventListener('click', () => { this.queueFilter = 'SYSTEM'; this.renderQueues(); });
         this.queueFilterAllBtn.addEventListener('click', () => { this.queueFilter = 'ALL'; this.renderQueues(); });
@@ -549,9 +555,11 @@ class LiveStreamApp {
             if (files.length < 1) return;
             this.selectedLocalManifest = this.buildLocalManifest(files);
             this.sourceMode = 'local';
+            this.sourceConfirmed = false;
             this.syncSourceModal();
             this.updateSourceSummary();
             this.appendTranscript('system', `Local folder ready: ${this.selectedLocalManifest.rootLabel}`);
+            this.setStatus('Local folder selected. Confirm source, then click Play.');
         });
         this.stopBtn.addEventListener('click', () => {
             this.stopLive();
@@ -663,12 +671,18 @@ class LiveStreamApp {
     }
 
     private updateSourceSummary() {
+        const statusTag = this.sourceConfirmed ? 'confirmed' : 'pending';
         const text = this.sourceMode === 'local'
-            ? (this.selectedLocalManifest ? `Local | ${this.selectedLocalManifest.rootLabel}` : 'Local | No folder selected')
-            : `Server | ${this.pathInput.value.trim() || DEFAULT_SERVER_PATH}`;
+            ? (this.selectedLocalManifest ? `Local | ${this.selectedLocalManifest.rootLabel} (${statusTag})` : 'Local | No folder selected (pending)')
+            : `Server | ${this.pathInput.value.trim() || DEFAULT_SERVER_PATH} (${statusTag})`;
         this.sourceSummaryEl.textContent = text;
         this.sourceModalSummaryEl.textContent = text;
         return;
+    }
+
+    private syncPanelInset() {
+        const inset = this.debugConsole.classList.contains('collapsed') ? 52 : 240;
+        this.panel.style.bottom = `${inset}px`;
     }
 
     private openSourceModal() {
@@ -702,11 +716,14 @@ class LiveStreamApp {
 
     private async confirmSourceSelection() {
         if (this.sourceMode === 'local' && !this.selectedLocalManifest) {
+            this.sourceConfirmed = false;
             this.setStatus('Choose a local folder before confirming.');
             return;
         }
+        this.sourceConfirmed = true;
         this.updateSourceSummary();
         this.closeSourceModal();
+        this.setStatus('Source confirmed. Click Play to start live stream.');
     }
 
     private async fetchServerManifest() {
@@ -726,6 +743,11 @@ class LiveStreamApp {
             else this.pauseLive();
             return;
         }
+        if (!this.sourceConfirmed) {
+            this.setStatus('Confirm source folder first.');
+            this.openSourceModal();
+            return;
+        }
         try {
             const manifest = this.sourceMode === 'local'
                 ? this.selectedLocalManifest
@@ -734,7 +756,7 @@ class LiveStreamApp {
                 this.setStatus(this.sourceMode === 'local' ? 'Choose a local folder first.' : 'Select a server folder first.');
                 return;
             }
-            await this.startLive(manifest);
+            await this.startLive(manifest, false, true);
         } catch (error) {
             this.logDebug('playback.start.error', { error: error instanceof Error ? error.message : String(error) });
             this.setStatus(`Live start failed: ${String(error)}`);
@@ -758,9 +780,21 @@ class LiveStreamApp {
         if (!this.active || !this.paused) return;
         this.paused = false;
         this.startedAtMs = Date.now();
-        if (this.phase === 'INTRO') void this.introVideo.play().catch((): void => undefined);
-        if (this.phase === 'TOUR') void this.bgmAudio?.play().catch((): void => undefined);
-        if (this.currentTaskAudio) void this.currentTaskAudio.play().catch((): void => undefined);
+        if (this.phase === 'INTRO') {
+            void this.introVideo.play().catch((error): void => {
+                this.logDebug('intro.resume.play.error', { error: error instanceof Error ? error.message : String(error) });
+            });
+        }
+        if (this.phase === 'TOUR') {
+            void this.bgmAudio?.play().catch((error): void => {
+                this.logDebug('bgm.resume.play.error', { error: error instanceof Error ? error.message : String(error) });
+            });
+        }
+        if (this.currentTaskAudio) {
+            void this.currentTaskAudio.play().catch((error): void => {
+                this.logDebug('task.audio.resume.play.error', { error: error instanceof Error ? error.message : String(error) });
+            });
+        }
         if ('speechSynthesis' in window) window.speechSynthesis.resume();
         this.setStatus(`Resuming ${worldLabelFromModel(this.currentModel?.displayName) || 'live stream'}`);
         this.updatePlayPauseUi();
@@ -836,7 +870,7 @@ class LiveStreamApp {
         return { source: 'local', rootLabel: rootName, intros, models };
     }
 
-    private async startLive(manifest: LiveManifest, silent = false) {
+    private async startLive(manifest: LiveManifest, silent = false, autoplay = true) {
         if (silent && this.active && manifest.source === 'server' && manifest.sessionId && manifest.sessionId === this.currentServerSessionId) {
             return;
         }
@@ -862,25 +896,39 @@ class LiveStreamApp {
         this.order = [];
         this.orderCursor = 0;
         this.roundsCompleted = 0;
-        this.active = true;
-        this.stopRequested = false;
+        this.active = autoplay;
+        this.stopRequested = !autoplay;
         this.paused = false;
         this.playbackToken += 1;
-        this.startedAtMs = Date.now();
+        this.startedAtMs = autoplay ? Date.now() : 0;
         this.elapsedBeforePauseMs = 0;
-        this.startTimer();
+        if (autoplay) this.startTimer();
+        else this.stopTimer(true);
         this.updatePlayPauseUi();
-        this.prepareNextRound();
+        if (autoplay) this.prepareNextRound();
+        else {
+            this.playlistState.forEach((item) => {
+                if (item.model.valid) {
+                    item.status = 'ready';
+                    item.note = 'Armed. Click Play to start.';
+                }
+            });
+        }
         this.render();
-        this.appendTranscript('system', `Live stream armed: ${manifest.rootLabel}`);
+        this.appendTranscript('system', autoplay
+            ? `Live stream started: ${manifest.rootLabel}`
+            : `Live stream armed: ${manifest.rootLabel}. Click Play to start.`);
         this.logDebug('live.start', {
             source: manifest.source,
             rootLabel: manifest.rootLabel,
             modelCount: manifest.models.length,
-            introCount: manifest.intros.length
+            introCount: manifest.intros.length,
+            autoplay
         });
-        this.setStatus(`Live stream started from ${manifest.rootLabel}`);
-        void this.runLoop(this.playbackToken);
+        this.setStatus(autoplay
+            ? `Live stream started from ${manifest.rootLabel}`
+            : `Live stream armed from ${manifest.rootLabel}. Click Play to begin.`);
+        if (autoplay) void this.runLoop(this.playbackToken);
     }
 
     private prepareNextRound() {
@@ -998,7 +1046,10 @@ class LiveStreamApp {
         let ended = false;
         this.introVideo.onended = () => { ended = true; };
         this.introVideo.onerror = () => { ended = true; };
-        void this.introVideo.play().catch(() => { ended = true; });
+        void this.introVideo.play().catch((error) => {
+            this.logDebug('intro.play.error', { error: error instanceof Error ? error.message : String(error), intro: intro.name });
+            ended = true;
+        });
         const limit = this.settings.introDurationSec > 0 ? this.settings.introDurationSec : Number.POSITIVE_INFINITY;
         while (!ended && this.introVideo.currentTime < limit && !this.stopRequested && token === this.playbackToken) {
             await this.waitWhilePaused(token);
@@ -1180,11 +1231,24 @@ class LiveStreamApp {
             const audioUrl = asText(task.content?.audio_url);
             if (audioUrl) {
                 await new Promise<void>((resolve) => {
-                    const audio = new Audio(audioUrl);
+                    const audio = new Audio();
                     this.currentTaskAudio = audio;
+                    audio.preload = 'auto';
+                    audio.crossOrigin = 'anonymous';
+                    audio.src = audioUrl;
                     audio.onended = () => resolve();
-                    audio.onerror = () => resolve();
-                    void audio.play().catch(() => resolve());
+                    audio.onerror = () => {
+                        this.logDebug('task.audio.play.error', {
+                            audioUrl,
+                            code: audio.error?.code || null,
+                            message: audio.error?.message || 'audio-element-error'
+                        });
+                        resolve();
+                    };
+                    void audio.play().catch((error) => {
+                        this.logDebug('task.audio.play.rejected', { audioUrl, error: error instanceof Error ? error.message : String(error) });
+                        resolve();
+                    });
                 });
                 this.currentTaskAudio = null;
                 return;
@@ -1276,7 +1340,9 @@ class LiveStreamApp {
         this.bgmAudio.loop = true;
         this.bgmAudio.volume = this.bgmBaseVolume;
         this.bgmAudio.crossOrigin = 'anonymous';
-        await this.bgmAudio.play().catch((): void => undefined);
+        await this.bgmAudio.play().catch((error): void => {
+            this.logDebug('bgm.play.error', { url, error: error instanceof Error ? error.message : String(error) });
+        });
     }
 
     private stopBgm() {
@@ -1495,7 +1561,7 @@ const bootstrap = () => {
                     <div class="live-debug-right">
                         <div class="live-source-summary compact" data-role="source-summary">Server | /Users/duheng/Development/OpenCode/OpenTour/Live</div>
                         <button type="button" class="live-icon-btn folder" data-act="choose-folder" aria-label="Choose source" title="Choose source"><span class="icon-folder"></span></button>
-                        <button type="button" class="live-icon-btn config" data-act="open-config" aria-label="Playback settings" title="Playback settings"><span class="icon-gear"></span></button>
+                        <button type="button" class="live-icon-btn config" data-act="open-config" aria-label="Playback settings" title="Playback settings"><svg class="live-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9.3a2.7 2.7 0 1 0 0 5.4 2.7 2.7 0 0 0 0-5.4z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1.2 1.2 0 0 1 0 1.7l-1.2 1.2a1.2 1.2 0 0 1-1.7 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V21a1.2 1.2 0 0 1-1.2 1.2h-1.7A1.2 1.2 0 0 1 10 21v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a1.2 1.2 0 0 1-1.7 0l-1.2-1.2a1.2 1.2 0 0 1 0-1.7l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H3a1.2 1.2 0 0 1-1.2-1.2v-1.7A1.2 1.2 0 0 1 3 10h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a1.2 1.2 0 0 1 0-1.7l1.2-1.2a1.2 1.2 0 0 1 1.7 0l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V3A1.2 1.2 0 0 1 10 1.8h1.7A1.2 1.2 0 0 1 13 3v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a1.2 1.2 0 0 1 1.7 0l1.2 1.2a1.2 1.2 0 0 1 0 1.7l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6h.2a1.2 1.2 0 0 1 1.2 1.2v1.7a1.2 1.2 0 0 1-1.2 1.2h-.2a1 1 0 0 0-.9.6z" /></svg></button>
                         <button type="button" class="live-icon-btn stack" data-act="toggle-panel" aria-label="Hide Panel" title="Hide Panel"><span class="icon-panel"></span></button>
                         <button type="button" class="live-icon-btn broom" data-act="clear-debug" aria-label="Clear Debug" title="Clear Debug"><span class="icon-clear"></span></button>
                         <button type="button" class="live-icon-btn eyeoff" data-act="toggle-debug" aria-label="Hide Debug" title="Hide Debug"><span class="icon-chevron"></span></button>
@@ -1550,6 +1616,7 @@ const injectStyle = () => {
             --live-accent: #d4b483;
             --live-danger: #d66d5c;
         }
+        #live-app, #live-app * { box-sizing: border-box; }
         html, body { margin: 0; min-height: 100%; background: radial-gradient(circle at top, #16131a 0%, #090a0f 42%, #040507 100%); color: var(--live-text); font-family: Georgia, "Times New Roman", serif; overflow: hidden; }
         #live-app { min-height: 100vh; }
         #live-stage-shell { position: fixed; left: 18px; top: 18px; width: calc(100vw - 432px); height: calc((100vw - 432px) * 9 / 16); min-width: 0; z-index: 1; }
@@ -1583,8 +1650,6 @@ const injectStyle = () => {
         .live-icon-btn.transport[data-state="playing"] .icon-play::before { left: 3px; border: 0; }
         .live-icon-btn.transport[data-state="playing"] .icon-play::after { right: 3px; }
         .live-icon-btn.stop .icon-stop::before { content: ''; position: absolute; left: 2px; top: 2px; width: 10px; height: 10px; background: currentColor; border-radius: 2px; }
-        .live-icon-btn.config .icon-gear::before { content: ''; position: absolute; inset: 3px; border: 1.4px solid currentColor; border-radius: 50%; }
-        .live-icon-btn.config .icon-gear::after { content: ''; position: absolute; left: 5px; top: 5px; width: 4px; height: 4px; border-radius: 50%; border: 1.4px solid currentColor; box-shadow: 0 -6px 0 -1px #17202e, 0 -6px 0 0 currentColor, 0 6px 0 -1px #17202e, 0 6px 0 0 currentColor, 6px 0 0 -1px #17202e, 6px 0 0 0 currentColor, -6px 0 0 -1px #17202e, -6px 0 0 0 currentColor; }
         .live-icon-btn.stack .icon-panel::before { content: ''; position: absolute; inset: 1px; border: 1.35px solid currentColor; border-radius: 2px; }
         .live-icon-btn.stack .icon-panel::after { content: ''; position: absolute; top: 1px; bottom: 1px; right: 3px; width: 3px; background: currentColor; border-radius: 1px; }
         .live-icon-btn.broom .icon-clear::before { content: ''; position: absolute; left: 5px; top: 1px; width: 1.5px; height: 12px; background: currentColor; transform: rotate(45deg); transform-origin: center; }
@@ -1594,13 +1659,14 @@ const injectStyle = () => {
         .live-icon-btn.enter .icon-enter::after { content: ''; position: absolute; left: 7px; top: 3px; width: 5px; height: 5px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); }
         #live-debug-console.collapsed .live-icon-btn.eyeoff .icon-chevron::before { top: 2px; transform: rotate(-135deg); }
         .live-icon-btn:hover { border-color: rgba(221,230,243,0.4); background: linear-gradient(180deg, rgba(28,38,53,0.98), rgba(19,28,41,0.98)); }
+        .live-icon-btn .live-icon { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
         .live-source-summary, .live-timer { min-height: 30px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: 8px; border: 1px solid rgba(137,156,181,0.18); background: rgba(255,255,255,0.035); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
         .live-source-summary { min-width: 210px; max-width: 330px; font-size: 10px; color: #aab5c6; }
         .live-source-summary.compact { min-width: 0; max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .live-timer { min-width: 84px; justify-content: center; font-size: 10px; color: #ff6a5c; border-color: rgba(255,106,92,0.26); }
         .live-mini-input { height: 38px; border-radius: 12px; border: 1px solid var(--live-line); background: rgba(255,255,255,0.04); color: var(--live-text); padding: 0 10px; min-width: 90px; }
         .live-color-input { width: 44px; height: 38px; border-radius: 12px; border: 1px solid var(--live-line); background: transparent; }
-        #live-panel { position: fixed; top: 0; right: 0; width: 360px; bottom: 0; padding: 18px 18px 18px 0; display: flex; flex-direction: column; gap: 12px; overflow: auto; transition: opacity 300ms ease; z-index: 3; color: #e2e2e9; font-family: "Segoe UI", "Noto Sans", sans-serif; }
+        #live-panel { position: fixed; top: 0; right: 0; width: 360px; bottom: 240px; padding: 18px 18px 18px 0; display: flex; flex-direction: column; gap: 12px; overflow: auto; transition: opacity 300ms ease; z-index: 3; color: #e2e2e9; font-family: "Segoe UI", "Noto Sans", sans-serif; }
         #live-panel.collapsed { width: 0; opacity: 0; padding-left: 0; padding-right: 0; overflow: hidden; }
         #live-debug-console { position: fixed; left: 0; right: 0; bottom: 0; overflow: hidden; display: flex; flex-direction: column; border-color: rgba(255,255,255,0.16); min-height: 52px; max-height: 228px; padding: 10px 12px 12px; z-index: 6; border-radius: 14px 14px 0 0; border-left: 0; border-right: 0; border-bottom: 0; }
         #live-debug-console.collapsed { min-height: 40px; max-height: 40px; padding-top: 8px; padding-bottom: 8px; }
@@ -1613,7 +1679,7 @@ const injectStyle = () => {
         .live-panel-section:not([open]) .live-section-summary::after { content: '+'; font-size: 16px; line-height: 1; }
         .live-chat-bar { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 8px; background: #23232a; border-top: 1px solid #33333e; }
         .live-badge { font-size: 10px; color: #8b8b99; padding: 2px 6px; border-radius: 999px; border: 1px solid #33333e; background: #151519; }
-        .live-queue-filter-row { display:flex; align-items:center; justify-content:space-between; width:100%; gap:10px; padding:8px 12px; border-bottom:1px solid #33333e; background:#23232a; }
+        .live-queue-filter-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; border-bottom:1px solid #33333e; background:#23232a; }
         .live-transcript-tools { display:flex; align-items:center; gap:8px; margin-left:auto; }
         .live-tabs { display:flex; gap:4px; padding:2px; border:1px solid #33333e; border-radius:8px; background:#151519; }
         .live-tab { border:none; background:transparent; color:#8b8b99; font-size:10px; height:22px; border-radius:6px; padding:0 8px; cursor:pointer; }
@@ -1663,7 +1729,7 @@ const injectStyle = () => {
         .live-config-modal-row .range { flex: 1 1 auto; }
         @media (max-width: 1280px) {
             #live-stage-shell { left: 12px; top: 12px; width: calc(100vw - 24px); height: calc((100vw - 24px) * 9 / 16); }
-            #live-panel { left: 0; right: 0; top: auto; width: auto; bottom: 0; max-height: 240px; padding: 12px; }
+            #live-panel { left: 0; right: 0; top: auto; width: auto; bottom: 52px; max-height: 240px; padding: 12px; }
             #live-panel.collapsed { display: none; }
             #live-debug-console { left: 0; right: 0; bottom: 0; }
             .live-debug-toolbar { flex-direction: column; align-items: stretch; }
