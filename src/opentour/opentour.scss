@@ -1,0 +1,468 @@
+* {
+    box-sizing: border-box;
+    user-select: none;
+}
+
+html,
+body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: radial-gradient(circle at 20% 20%, #1f2d3f 0%, #0f141b 70%);
+    color: #d6dde6;
+    font-family: "Segoe UI", "Noto Sans", sans-serif;
+}
+
+#opentour-app,
+#canvas-container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+}
+
+#canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+#opentour-spinner-container {
+    position: absolute;
+    inset: 0;
+    background-color: rgba(3, 8, 16, 0.65);
+    pointer-events: all;
+    cursor: progress;
+    z-index: 120;
+}
+
+#opentour-spinner-container.hidden {
+    display: none;
+}
+
+#opentour-spinner-container .spinner::before,
+#opentour-spinner-container .spinner::after {
+    border: 3px solid #aab6c3;
+    border-left: none;
+    box-sizing: border-box;
+    content: '';
+    display: block;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translateY(-50%);
+    transform-origin: 0% 50%;
+    animation: opentour-spinner-spin 1s linear 0s infinite;
+}
+
+#opentour-spinner-container .spinner::before {
+    width: 15px;
+    height: 30px;
+    border-radius: 0 30px 30px 0;
+}
+
+#opentour-spinner-container .spinner::after {
+    width: 8px;
+    height: 16px;
+    border-radius: 0 16px 16px 0;
+    animation-direction: reverse;
+}
+
+@keyframes opentour-spinner-spin {
+    0% {
+        transform: translateY(-50%) rotate(0deg);
+    }
+
+    100% {
+        transform: translateY(-50%) rotate(360deg);
+    }
+}
+
+#opentour-hud {
+    position: absolute;
+    right: 16px;
+    top: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 10px;
+    pointer-events: none;
+}
+
+#opentour-axis-mount {
+    width: 120px;
+    height: 120px;
+    pointer-events: auto;
+}
+
+#opentour-axis-mount.hidden {
+    display: none;
+}
+
+#view-cube-container.opentour-hidden {
+    display: none !important;
+}
+
+#opentour-axis-mount #view-cube-container {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    right: auto;
+    top: auto;
+    pointer-events: auto;
+}
+
+#opentour-axis-mount #view-cube-svg text {
+    fill: #ffffff;
+    font-family: "Segoe UI", "Noto Sans", sans-serif;
+}
+
+#opentour-toolbar {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 10px;
+    border-radius: 14px;
+    background: rgba(16, 20, 28, 0.78);
+    border: 1px solid rgba(127, 143, 160, 0.38);
+    backdrop-filter: blur(6px);
+    pointer-events: auto;
+}
+
+#opentour-toolbar.hidden {
+    display: none;
+}
+
+.opentour-tool {
+    width: 42px;
+    height: 42px;
+    border: 1px solid rgba(127, 143, 160, 0.45);
+    border-radius: 10px;
+    background: rgba(34, 42, 56, 0.95);
+    color: #e8eef5;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+.opentour-tool.opentour-tool-text {
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+
+.opentour-tool-icon {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: #e8eef5;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.opentour-tool.active {
+    border-color: #9cb8d6;
+}
+
+.opentour-tool:disabled {
+    cursor: default;
+    color: #8a96a6;
+}
+
+.opentour-tool[aria-busy='true'] {
+    opacity: 0.65;
+}
+
+#opentour-load-panel {
+    width: 260px;
+    padding: 12px;
+    border-radius: 12px;
+    border: 1px solid rgba(127, 143, 160, 0.4);
+    background: rgba(16, 20, 28, 0.92);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: auto;
+}
+
+#opentour-load-panel.hidden {
+    display: none;
+}
+
+#opentour-load-panel .panel-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #f2f6fb;
+}
+
+#opentour-open-file {
+    border: 0;
+    border-radius: 8px;
+    background: #2f435e;
+    color: #ffffff;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+
+#opentour-load-panel .panel-hint,
+#opentour-status {
+    font-size: 12px;
+    color: #a9b7c8;
+    line-height: 1.35;
+    word-break: break-word;
+}
+
+#opentour-step3-panel {
+    position: fixed;
+    left: 16px;
+    top: 112px;
+    z-index: 95;
+    width: min(1140px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: hidden;
+    border: 1px solid rgba(106, 129, 151, 0.5);
+    border-radius: 14px;
+    background: rgba(10, 14, 22, 0.96);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    padding: 12px;
+    pointer-events: auto;
+}
+
+#opentour-step3-panel.hidden {
+    display: none;
+}
+
+#opentour-step3-panel .opentour-step3-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+    cursor: move;
+}
+
+#opentour-step3-panel .opentour-step3-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #eef4fc;
+}
+
+#opentour-step3-panel .opentour-step3-close {
+    width: 34px;
+    height: 34px;
+    border: 1px solid rgba(123, 143, 166, 0.5);
+    background: rgba(31, 43, 58, 0.95);
+    color: #e5edf8;
+    border-radius: 8px;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#opentour-step3-panel .opentour-step3-close:hover {
+    border-color: rgba(162, 187, 216, 0.72);
+    background: rgba(45, 61, 82, 0.98);
+}
+
+#opentour-step3-panel .opentour-step3-close svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+#opentour-step3-panel .opentour-step3-status {
+    font-size: 12px;
+    color: #9cb1c9;
+    margin-bottom: 10px;
+}
+
+#opentour-step3-panel .opentour-step3-body {
+    width: 100%;
+    max-height: calc(100vh - 128px);
+    overflow: auto;
+    border: 1px solid rgba(89, 113, 139, 0.4);
+    border-radius: 10px;
+    background: rgba(7, 11, 18, 0.9);
+    padding: 10px;
+    display: grid;
+    grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
+    gap: 10px;
+}
+
+#opentour-step3-panel .opentour-step3-card {
+    border: 1px solid rgba(95, 120, 146, 0.4);
+    background: #0b111b;
+    border-radius: 10px;
+    padding: 10px;
+}
+
+#opentour-step3-panel .opentour-step3-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #d5e0ed;
+}
+
+#opentour-step3-panel canvas {
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    border: 1px solid rgba(85, 109, 132, 0.35);
+    background: #03070f;
+    display: block;
+}
+
+#opentour-step3-gimi-panel {
+    position: fixed;
+    left: 16px;
+    top: 112px;
+    z-index: 96;
+    width: min(1140px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: hidden;
+    border: 1px solid rgba(106, 129, 151, 0.5);
+    border-radius: 14px;
+    background: rgba(10, 14, 22, 0.96);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    padding: 12px;
+    pointer-events: auto;
+}
+
+#opentour-step3-gimi-panel.hidden {
+    display: none;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    cursor: move;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #eef4fc;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-close {
+    width: 34px;
+    height: 34px;
+    border: 1px solid rgba(123, 143, 166, 0.5);
+    background: rgba(31, 43, 58, 0.95);
+    color: #e5edf8;
+    border-radius: 8px;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-close:hover {
+    border-color: rgba(162, 187, 216, 0.72);
+    background: rgba(45, 61, 82, 0.98);
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-close svg {
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-meta,
+#opentour-step3-gimi-panel .opentour-step3-gimi-status {
+    font-size: 12px;
+    color: #9cb1c9;
+    margin-bottom: 8px;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-body {
+    width: 100%;
+    max-height: calc(100vh - 156px);
+    overflow: auto;
+    border: 1px solid rgba(89, 113, 139, 0.4);
+    border-radius: 10px;
+    background: rgba(7, 11, 18, 0.9);
+    padding: 10px;
+    display: grid;
+    grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
+    gap: 10px;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-card {
+    border: 1px solid rgba(95, 120, 146, 0.4);
+    background: #0b111b;
+    border-radius: 10px;
+    padding: 10px;
+}
+
+#opentour-step3-gimi-panel .opentour-step3-gimi-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #d5e0ed;
+}
+
+#opentour-step3-gimi-panel canvas {
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    border: 1px solid rgba(85, 109, 132, 0.35);
+    background: #03070f;
+    display: block;
+}
+
+@media (max-width: 800px) {
+    #opentour-hud {
+        right: 10px;
+        top: 10px;
+        gap: 8px;
+    }
+
+    #opentour-axis-mount {
+        width: 96px;
+        height: 96px;
+    }
+
+    #opentour-toolbar {
+        padding: 8px;
+    }
+
+    .opentour-tool {
+        width: 38px;
+        height: 38px;
+        font-size: 11px;
+    }
+
+    #opentour-load-panel {
+        width: min(250px, calc(100vw - 24px));
+    }
+
+    #opentour-step3-panel .opentour-step3-body {
+        max-height: calc(100vh - 170px);
+        grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+        padding: 10px;
+        gap: 10px;
+    }
+
+    #opentour-step3-gimi-panel .opentour-step3-gimi-body {
+        max-height: calc(100vh - 180px);
+        grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+        padding: 10px;
+        gap: 10px;
+    }
+}

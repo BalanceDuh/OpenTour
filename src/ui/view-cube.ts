@@ -8,8 +8,27 @@ const vecy = new Vec3();
 const vecz = new Vec3();
 const mat4 = new Mat4();
 
+type AxisMode = 'combo-1' | 'combo-2' | 'combo-3' | 'combo-4';
+
+const worldToComboVec = (mode: AxisMode, src: Vec3, dst: Vec3) => {
+    if (mode === 'combo-1') {
+        dst.set(src.x, src.y, src.z);
+        return;
+    }
+    if (mode === 'combo-2') {
+        dst.set(src.x, -src.y, src.z);
+        return;
+    }
+    if (mode === 'combo-3') {
+        dst.set(src.x, src.z, src.y);
+        return;
+    }
+    dst.set(src.x, -src.z, src.y);
+};
+
 class ViewCube extends Container {
     update: (cameraMatrix: Mat4) => void;
+    setAxisMode: (mode: AxisMode) => void;
 
     constructor(events: Events, args = {}) {
         args = {
@@ -105,6 +124,15 @@ class ViewCube extends Container {
 
         let cw = 0;
         let ch = 0;
+        let axisMode: AxisMode = 'combo-1';
+
+        this.setAxisMode = (mode: AxisMode) => {
+            axisMode = mode;
+        };
+
+        const cvecx = new Vec3();
+        const cvecy = new Vec3();
+        const cvecz = new Vec3();
 
         this.update = (cameraMatrix: Mat4) => {
             const w = this.dom.clientWidth;
@@ -125,6 +153,10 @@ class ViewCube extends Container {
                 mat4.getY(vecy);
                 mat4.getZ(vecz);
 
+                worldToComboVec(axisMode, vecx, cvecx);
+                worldToComboVec(axisMode, vecy, cvecy);
+                worldToComboVec(axisMode, vecz, cvecz);
+
                 const transform = (group: SVGElement, x: number, y: number) => {
                     group.setAttribute('transform', `translate(${x * 40}, ${y * 40})`);
                 };
@@ -134,25 +166,25 @@ class ViewCube extends Container {
                     line.setAttribute('y2', (y * 40).toString());
                 };
 
-                transform(shapes.px, vecx.x, -vecx.y);
-                transform(shapes.nx, -vecx.x, vecx.y);
-                transform(shapes.py, vecy.x, -vecy.y);
-                transform(shapes.ny, -vecy.x, vecy.y);
-                transform(shapes.pz, vecz.x, -vecz.y);
-                transform(shapes.nz, -vecz.x, vecz.y);
+                transform(shapes.px, cvecx.x, -cvecx.y);
+                transform(shapes.nx, -cvecx.x, cvecx.y);
+                transform(shapes.py, cvecy.x, -cvecy.y);
+                transform(shapes.ny, -cvecy.x, cvecy.y);
+                transform(shapes.pz, cvecz.x, -cvecz.y);
+                transform(shapes.nz, -cvecz.x, cvecz.y);
 
-                x2y2(shapes.xaxis, vecx.x, -vecx.y);
-                x2y2(shapes.yaxis, vecy.x, -vecy.y);
-                x2y2(shapes.zaxis, vecz.x, -vecz.y);
+                x2y2(shapes.xaxis, cvecx.x, -cvecx.y);
+                x2y2(shapes.yaxis, cvecy.x, -cvecy.y);
+                x2y2(shapes.zaxis, cvecz.x, -cvecz.y);
 
                 // reorder dom for the mighty svg painter's algorithm
                 const order = [
-                    { n: ['xaxis', 'px'], value: vecx.z },
-                    { n: ['yaxis', 'py'], value: vecy.z },
-                    { n: ['zaxis', 'pz'], value: vecz.z },
-                    { n: ['nx'], value: -vecx.z },
-                    { n: ['ny'], value: -vecy.z },
-                    { n: ['nz'], value: -vecz.z }
+                    { n: ['xaxis', 'px'], value: cvecx.z },
+                    { n: ['yaxis', 'py'], value: cvecy.z },
+                    { n: ['zaxis', 'pz'], value: cvecz.z },
+                    { n: ['nx'], value: -cvecx.z },
+                    { n: ['ny'], value: -cvecy.z },
+                    { n: ['nz'], value: -cvecz.z }
                 ].sort((a, b) => a.value - b.value);
 
                 const fragment = document.createDocumentFragment();
