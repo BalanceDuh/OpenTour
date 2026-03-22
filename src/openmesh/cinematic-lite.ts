@@ -8,6 +8,7 @@ import { createRealtimeLiveSession } from './realtime-live-session';
 import type { RealtimeContextSnapshot, RealtimeLiveEvent, RealtimeLiveSession } from './realtime-live-session';
 import { createRealtimeVoiceStream } from './realtime-voice-stream';
 import type { RealtimeVoiceStream, VoiceStreamEvent } from './realtime-voice-stream';
+import { mountRtcRecordingModule, type RtcRecordingModuleController } from './rtc-recording-module';
 
 const DEFAULT_SIMPLE_PROMPT = '请把铜车马作为完整三维文物来拍摄，镜头必须形成一轮明显的360度环绕，不要只盯住单一面。要根据讲解词语义与六面截图、模型空间范围来判断该看车顶、车底、轮、马头、车厢等关键部位；每句讲解前先移动到机位，再讲解。';
 const DEFAULT_STYLE_GUIDANCE = '镜头风格偏博物馆导览，沉稳、清晰、空间感强。整体展示时完成大范围环绕，讲车顶时飞到上方俯视，讲底厢与车轮时飞到低机位或下方，讲马头与动态时飞到前侧近景。';
@@ -215,7 +216,8 @@ class CinematicLiteApp {
         onState: (state) => this.handlePlayerState(state),
         onTime: (seconds) => this.renderPlayTime(seconds),
         onQueueChange: (snapshot) => this.renderQueueSnapshot(snapshot.mainQueue, snapshot.priorityQueue, snapshot.current),
-        resolveAudioUrl: (segment) => this.resolveSegmentAudio(segment)
+        resolveAudioUrl: (segment) => this.resolveSegmentAudio(segment),
+        onAudioChange: (audio) => this.recordingModule?.setPlaybackAudioElement(audio)
     });
 
     private loadedModelId: string | null = null;
@@ -379,6 +381,10 @@ class CinematicLiteApp {
     private readonly currentQueueLabelEl = document.getElementById('cinelite-current-queue-label') as HTMLDivElement;
     private readonly mainQueueListEl = document.getElementById('cinelite-main-queue-list') as HTMLDivElement;
     private readonly priorityQueueListEl = document.getElementById('cinelite-priority-queue-list') as HTMLDivElement;
+    private readonly rtcRecordTimerEl = document.getElementById('cinelite-rtc-record-timer') as HTMLSpanElement;
+    private readonly rtcRecordOpenBtn = document.getElementById('cinelite-rtc-record-open-btn') as HTMLButtonElement;
+    private readonly rtcRecordPauseBtn = document.getElementById('cinelite-rtc-record-pause-btn') as HTMLButtonElement;
+    private readonly rtcRecordStopBtn = document.getElementById('cinelite-rtc-record-stop-btn') as HTMLButtonElement;
 
     private ttsVoicesByModel: Record<string, string[]> = {};
     private dragActive = false;
@@ -394,6 +400,7 @@ class CinematicLiteApp {
     private realtimeDragBaseLeft = 0;
     private realtimeDragBaseTop = 0;
     private realtimeMinimalMode = true;
+    private recordingModule: RtcRecordingModuleController | null = null;
 
     private readonly syncCapturesFromServer = () => {
         if (!this.loadedModelId) return;
@@ -406,6 +413,7 @@ class CinematicLiteApp {
         this.complexEditor.value = this.complexPrompt;
         this.modelUploadMetaEl.textContent = '未上传本地模型';
         this.bindEvents();
+        this.mountRecordingModule();
         this.renderCaptureCards();
         this.renderManualButtons();
         this.renderChatLog();
@@ -900,7 +908,40 @@ class CinematicLiteApp {
         this.manualGrid.querySelectorAll<HTMLButtonElement>('[data-manual-view]').forEach((button) => button.addEventListener('click', () => { void this.captureManualView(button.dataset.manualView as ViewId); }));
     }
 
-    private renderActiveSegment(_segment: SegmentPlan | null) {}
+    private mountRecordingModule() {
+        this.recordingModule = mountRtcRecordingModule({
+            getModelFilename: () => this.modelFilename,
+            getCaptureCanvas: () => this.viewer.getCanvas(),
+            requestCaptureRender: () => {
+                void this.viewer.settle().catch(() => {
+                    // ignore render refresh failures during detached recording verification flows
+                });
+            },
+            isPlaybackActive: () => this.playerState === 'playing' || this.playerState === 'paused',
+            isPlaybackPaused: () => this.playerState === 'paused',
+            playPlayback: () => {
+                if (this.playerState === 'paused') this.player.resume();
+                else if (this.playerState !== 'playing') void this.player.play();
+            },
+            pausePlayback: () => this.player.pause(),
+            disableInterrupts: (disabled) => {
+                this.chatInputEl.disabled = disabled;
+                this.sendChatBtnEl.disabled = disabled;
+                this.recordBtnEl.disabled = disabled;
+            },
+            getCurrentPlaybackAudio: () => this.player.getCurrentAudioElement(),
+            setStatus: (text) => this.realtimeStatusEl.textContent = text,
+            recordOpenBtn: this.rtcRecordOpenBtn,
+            recordPauseBtn: this.rtcRecordPauseBtn,
+            recordStopBtn: this.rtcRecordStopBtn,
+            recordTimerEl: this.rtcRecordTimerEl
+        });
+        (window as Window & { __cineliteRecordingModule?: RtcRecordingModuleController | null }).__cineliteRecordingModule = this.recordingModule;
+    }
+
+    private renderActiveSegment(segment: SegmentPlan | null) {
+        this.recordingModule?.setSubtitleText(segment?.text || '');
+    }
 
     private renderQueueSnapshot(mainQueue: SegmentPlan[], priorityQueue: SegmentPlan[], current: SegmentPlan | null) {
         this.mainQueueCountEl.textContent = String(mainQueue.length);
@@ -1412,6 +1453,7 @@ class CinematicLiteApp {
 
     private handlePlayerState(state: 'idle' | 'playing' | 'paused' | 'stopped' | 'completed') {
         this.playerState = state;
+        this.recordingModule?.handlePlaybackStateChange(state);
         if (state === 'playing') {
             this.syncMainPlaybackToggle(PAUSE_ICON, '暂停');
             this.syncRealtimePlaybackToggle(true);

@@ -22,6 +22,8 @@ export class CinematicLitePlayer {
 
     private readonly resolveAudioUrl?: (segment: SegmentPlan) => Promise<string | null>;
 
+    private readonly onAudioChange?: (audio: HTMLAudioElement | null) => void;
+
     private playbackRate = 1;
 
     private normalizeSegment(segment: SegmentPlan): SegmentPlan {
@@ -66,6 +68,7 @@ export class CinematicLitePlayer {
         onTime?: (seconds: number) => void;
         onQueueChange?: (snapshot: { mainQueue: SegmentPlan[]; priorityQueue: SegmentPlan[]; current: SegmentPlan | null; }) => void;
         resolveAudioUrl?: (segment: SegmentPlan) => Promise<string | null>;
+        onAudioChange?: (audio: HTMLAudioElement | null) => void;
     }) {
         this.viewer = viewer;
         this.onStatus = onStatus;
@@ -74,6 +77,11 @@ export class CinematicLitePlayer {
         this.onTime = hooks?.onTime;
         this.onQueueChange = hooks?.onQueueChange;
         this.resolveAudioUrl = hooks?.resolveAudioUrl;
+        this.onAudioChange = hooks?.onAudioChange;
+    }
+
+    getCurrentAudioElement() {
+        return this.currentAudio;
     }
 
     setPlaybackRate(rate: number) {
@@ -215,6 +223,7 @@ export class CinematicLitePlayer {
         this.interruptToken += 1;
         stopHtmlAudio(this.currentAudio);
         this.currentAudio = null;
+        this.onAudioChange?.(null);
     }
 
     private estimateSpeechMs(text: string) {
@@ -287,6 +296,7 @@ export class CinematicLitePlayer {
                         playbackRate: this.playbackRate
                     });
                     this.currentAudio = audio;
+                    this.onAudioChange?.(audio);
                     await waitForHtmlAudioMetadata(audio);
                     if (Number.isFinite(audio.duration) && audio.duration > 0) {
                         audioDurationMs = (audio.duration * 1000) / this.playbackRate;
@@ -307,6 +317,7 @@ export class CinematicLitePlayer {
                 if (this.currentAudio) {
                     stopHtmlAudio(this.currentAudio);
                     this.currentAudio = null;
+                    this.onAudioChange?.(null);
                 }
                 this.currentSegment = null;
                 this.onSegment(null);
@@ -318,6 +329,7 @@ export class CinematicLitePlayer {
             const completed = !this.stopped && this.mainQueue.length < 1 && this.priorityQueue.length < 1 && !this.replaySegment;
             this.loopRunning = false;
             this.currentAudio = null;
+            this.onAudioChange?.(null);
             this.currentSegment = null;
             this.currentSource = null;
             this.onSegment(null);
