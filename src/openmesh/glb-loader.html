@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>GLB Loader</title>
+        <link rel="icon" href="data:," />
+        <style>
+            :root {
+                color-scheme: dark;
+                --bg0: #081018;
+                --bg1: #0f1822;
+                --bg2: #17222d;
+                --panel: rgba(9, 14, 20, 0.84);
+                --line: rgba(255, 255, 255, 0.1);
+                --text: #eef4fa;
+                --muted: #b7c6d6;
+                --accent: #d7b37c;
+            }
+            * { box-sizing: border-box; }
+            html, body {
+                width: 100%;
+                height: 100%;
+                margin: 0;
+                overflow: hidden;
+                color: var(--text);
+                background:
+                    radial-gradient(circle at 50% 18%, rgba(214,179,124,0.12), transparent 24%),
+                    radial-gradient(circle at 50% 46%, rgba(255,255,255,0.04), transparent 36%),
+                    linear-gradient(180deg, #13202c 0%, #09111a 100%);
+                font-family: "Segoe UI", "Noto Sans SC", sans-serif;
+            }
+            #glb-loader-root { position: relative; width: 100%; height: 100%; }
+            #glb-loader-canvas {
+                position: absolute;
+                inset: 0;
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
+            #glb-loader-vignette {
+                position: absolute;
+                inset: 0;
+                pointer-events: none;
+                background:
+                    radial-gradient(circle at 50% 42%, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0) 28%),
+                    linear-gradient(180deg, rgba(255,255,255,0.04), rgba(0,0,0,0.14)),
+                    radial-gradient(circle at 50% 52%, transparent 44%, rgba(0,0,0,0.42) 100%);
+            }
+            #glb-loader-title {
+                position: absolute;
+                top: 34px;
+                left: 50%;
+                transform: translateX(-50%);
+                text-align: center;
+                pointer-events: none;
+            }
+            #glb-loader-title h1 {
+                margin: 0;
+                font-size: 38px;
+                font-weight: 600;
+                letter-spacing: 0.08em;
+            }
+            #glb-loader-title p {
+                margin: 10px 0 0;
+                color: var(--muted);
+                font-size: 12px;
+                letter-spacing: 0.16em;
+                text-transform: uppercase;
+            }
+            #glb-loader-loader {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                background: rgba(7, 12, 18, 0.58);
+                backdrop-filter: blur(8px);
+                transition: opacity 220ms ease;
+                z-index: 4;
+            }
+            #glb-loader-loader.hidden { opacity: 0; pointer-events: none; }
+            #glb-loader-loader-card {
+                min-width: 300px;
+                padding: 18px 20px;
+                border-radius: 16px;
+                border: 1px solid var(--line);
+                background: linear-gradient(180deg, rgba(25,32,40,0.96), rgba(11,16,22,0.96));
+                box-shadow: 0 30px 60px rgba(0,0,0,0.42);
+            }
+            #glb-loader-loader-card strong {
+                display: block;
+                margin-bottom: 10px;
+                color: var(--accent);
+                font-size: 13px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+            }
+            #glb-loader-loader-card p { margin: 0; color: var(--muted); font-size: 13px; }
+            #glb-loader-help {
+                position: absolute;
+                right: 22px;
+                bottom: 22px;
+                padding: 10px 12px;
+                border-radius: 12px;
+                border: 1px solid var(--line);
+                color: var(--muted);
+                font-size: 12px;
+                background: rgba(15, 20, 27, 0.72);
+                backdrop-filter: blur(8px);
+                pointer-events: none;
+            }
+            #glb-loader-debug {
+                position: absolute;
+                left: 18px;
+                right: 18px;
+                bottom: 18px;
+                height: 180px;
+                border-radius: 14px;
+                border: 1px solid var(--line);
+                background: var(--panel);
+                backdrop-filter: blur(8px);
+                box-shadow: 0 24px 50px rgba(0,0,0,0.35);
+                overflow: hidden;
+                z-index: 3;
+            }
+            #glb-loader-debug-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                padding: 10px 12px;
+                border-bottom: 1px solid rgba(255,255,255,0.08);
+                font-size: 12px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+            }
+            #glb-loader-debug-status { color: var(--muted); letter-spacing: normal; text-transform: none; }
+            #glb-loader-debug-log {
+                height: calc(100% - 42px);
+                overflow: auto;
+                padding: 10px 12px 14px;
+                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                color: #dce7f2;
+                white-space: pre-wrap;
+            }
+            .glb-loader-log-line { padding: 2px 0; }
+            .glb-loader-log-time { color: #91a3b6; margin-right: 10px; }
+            .glb-loader-log-error { color: #ff9a9a; }
+            .glb-loader-log-warn { color: #f5cf84; }
+            @media (max-width: 768px) {
+                #glb-loader-title h1 { font-size: 28px; }
+                #glb-loader-title p { font-size: 11px; }
+                #glb-loader-help { display: none; }
+            }
+        </style>
+    </head>
+    <body>
+        <div id="glb-loader-root">
+            <canvas id="glb-loader-canvas"></canvas>
+            <div id="glb-loader-vignette"></div>
+            <div id="glb-loader-title">
+                <h1 id="glb-loader-title-text">GLB Loader</h1>
+                <p id="glb-loader-subtitle-text">PlayCanvas Container Viewer</p>
+            </div>
+            <div id="glb-loader-loader">
+                <div id="glb-loader-loader-card">
+                    <strong>GLB Loader</strong>
+                    <p id="glb-loader-loader-text">Preparing PlayCanvas GLB viewer...</p>
+                </div>
+            </div>
+            <div id="glb-loader-help">Drag to orbit · Wheel to zoom</div>
+            <div id="glb-loader-debug">
+                <div id="glb-loader-debug-head">
+                    <strong>Debug Console</strong>
+                    <span id="glb-loader-debug-status">Booting...</span>
+                </div>
+                <div id="glb-loader-debug-log"></div>
+            </div>
+        </div>
+        <script type="module" src="./glb-loader.js"></script>
+    </body>
+</html>

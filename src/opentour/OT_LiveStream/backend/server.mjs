@@ -1,9 +1,44 @@
-import { createReadStream } from 'node:fs';
+import { createReadStream, mkdirSync } from 'node:fs';
 import { access, readdir, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { basename, extname, join, normalize, resolve } from 'node:path';
+import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import Database from 'better-sqlite3';
 
 const port = Number(process.env.OT_LIVE_STREAM_PORT || 3035);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const repoRoot = resolve(__dirname, '../../../../');
+const dataDir = join(repoRoot, 'data');
+mkdirSync(dataDir, { recursive: true });
+
+const db = new Database(join(dataDir, 'opentour.db'));
+db.exec(`
+CREATE TABLE IF NOT EXISTS ot_live_stream_source_config (
+    Id INTEGER PRIMARY KEY CHECK (Id = 1),
+    SourceMode TEXT NOT NULL CHECK (SourceMode IN ('server','local')),
+    ServerFolderPath TEXT,
+    Confirmed INTEGER NOT NULL CHECK (Confirmed IN (0,1)) DEFAULT 0,
+    UpdatedAt TEXT NOT NULL
+);
+`);
+
+const getSourceConfigStmt = db.prepare(`
+SELECT SourceMode, ServerFolderPath, Confirmed, UpdatedAt
+FROM ot_live_stream_source_config
+WHERE Id = 1
+`);
+
+const upsertSourceConfigStmt = db.prepare(`
+INSERT INTO ot_live_stream_source_config (Id, SourceMode, ServerFolderPath, Confirmed, UpdatedAt)
+VALUES (1, @source_mode, @server_folder_path, @confirmed, @updated_at)
+ON CONFLICT(Id) DO UPDATE SET
+    SourceMode = excluded.SourceMode,
+    ServerFolderPath = excluded.ServerFolderPath,
+    Confirmed = excluded.Confirmed,
+    UpdatedAt = excluded.UpdatedAt
+`);
 
 const MODEL_EXTS = new Set(['.ply', '.splat', '.ksplat', '.spz', '.sog', '.lcc']);
 const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov', '.m4v']);
@@ -18,7 +53,7 @@ const json = (res, status, body) => {
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Length': Buffer.byteLength(payload),
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS',
+        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type'
     });
     res.end(payload);
@@ -58,6 +93,36 @@ const fileMime = (filePath) => {
 };
 
 const safeName = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+const readSourceConfig = () => {
+    const row = getSourceConfigStmt.get();
+    if (!row) {
+        return {
+            sourceMode: 'server',
+            serverFolderPath: null,
+            confirmed: false,
+            updatedAt: null
+        };
+    }
+    return {
+        sourceMode: row.SourceMode === 'local' ? 'local' : 'server',
+        serverFolderPath: row.ServerFolderPath ? String(row.ServerFolderPath) : null,
+        confirmed: Number(row.Confirmed) === 1,
+        updatedAt: row.UpdatedAt || null
+    };
+};
+
+const saveSourceConfig = ({ sourceMode, serverFolderPath, confirmed }) => {
+    const normalizedMode = sourceMode === 'local' ? 'local' : 'server';
+    const normalizedPath = String(serverFolderPath || '').trim();
+    upsertSourceConfigStmt.run({
+        source_mode: normalizedMode,
+        server_folder_path: normalizedMode === 'server' ? (normalizedPath || null) : null,
+        confirmed: confirmed ? 1 : 0,
+        updated_at: new Date().toISOString()
+    });
+    return readSourceConfig();
+};
 
 const maybeFile = async (filePath) => {
     try {
@@ -234,6 +299,22 @@ const server = createServer(async (req, res) => {
 
         if (url.pathname === '/api/ot-live-stream/health' && req.method === 'GET') {
             json(res, 200, { ok: true, service: 'ot-live-stream' });
+            return;
+        }
+
+        if (url.pathname === '/api/ot-live-stream/source-config' && req.method === 'GET') {
+            json(res, 200, { ok: true, config: readSourceConfig() });
+            return;
+        }
+
+        if (url.pathname === '/api/ot-live-stream/source-config' && req.method === 'PUT') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const config = saveSourceConfig({
+                sourceMode: safeName(body.sourceMode).toLowerCase() === 'local' ? 'local' : 'server',
+                serverFolderPath: safeName(body.serverFolderPath),
+                confirmed: Boolean(body.confirmed)
+            });
+            json(res, 200, { ok: true, config });
             return;
         }
 

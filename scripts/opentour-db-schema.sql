@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS ot_workflow_snapshot (
     UpdatedAt TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS ot_live_stream_source_config (
+    Id INTEGER PRIMARY KEY CHECK (Id = 1),
+    SourceMode TEXT NOT NULL CHECK (SourceMode IN ('server','local')),
+    ServerFolderPath TEXT,
+    Confirmed INTEGER NOT NULL CHECK (Confirmed IN (0,1)) DEFAULT 0,
+    UpdatedAt TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_ot_model_updated_at
     ON ot_model(UpdatedAt);
 
@@ -52,3 +60,6 @@ CREATE INDEX IF NOT EXISTS idx_ot_model_calibration_updated_at
 
 CREATE INDEX IF NOT EXISTS idx_ot_workflow_snapshot_updated_at
     ON ot_workflow_snapshot(UpdatedAt);
+
+CREATE INDEX IF NOT EXISTS idx_ot_live_stream_source_config_updated_at
+    ON ot_live_stream_source_config(UpdatedAt);

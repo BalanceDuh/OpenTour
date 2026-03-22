@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>OpenMesh Showcase2</title>
+        <link rel="icon" href="data:," />
+        <style>
+            :root {
+                color-scheme: dark;
+                --bg0: #0b1016;
+                --bg1: #121820;
+                --bg2: #191f28;
+                --text: #edf3fa;
+                --muted: #b7c4d3;
+                --line: rgba(255,255,255,0.1);
+            }
+            * { box-sizing: border-box; }
+            html, body {
+                width: 100%; height: 100%; margin: 0; overflow: hidden;
+                background:
+                    radial-gradient(circle at 50% 20%, rgba(255,255,255,0.04), transparent 30%),
+                    linear-gradient(180deg, #11161d 0%, #0a0f15 100%);
+                color: var(--text);
+                font-family: "Segoe UI", "Noto Sans SC", sans-serif;
+            }
+            #showcase2-root { position: relative; width: 100%; height: 100%; }
+            #showcase2-canvas {
+                position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+                background: transparent;
+            }
+            #showcase2-vignette {
+                position: absolute; inset: 0; pointer-events: none;
+                background:
+                    radial-gradient(circle at 50% 42%, rgba(255,255,255,0.03) 0%, rgba(255,255,255,0) 34%),
+                    linear-gradient(180deg, rgba(255,255,255,0.03), rgba(0,0,0,0.12)),
+                    radial-gradient(circle at 50% 50%, transparent 45%, rgba(0,0,0,0.32) 100%);
+            }
+            #showcase2-title {
+                position: absolute; top: 42px; left: 50%; transform: translateX(-50%);
+                text-align: center; pointer-events: none;
+            }
+            #showcase2-title h1 {
+                margin: 0; font-size: 38px; font-weight: 600; letter-spacing: 0.06em;
+                text-shadow: 0 12px 28px rgba(0, 0, 0, 0.42);
+            }
+            #showcase2-title p {
+                margin: 10px 0 0; color: var(--muted); font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase;
+            }
+            #showcase2-loader {
+                position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+                background: rgba(10, 14, 20, 0.62); backdrop-filter: blur(8px); z-index: 5;
+                transition: opacity 220ms ease;
+            }
+            #showcase2-loader.hidden { opacity: 0; pointer-events: none; }
+            #showcase2-loader-card {
+                min-width: 280px; padding: 18px 20px; border-radius: 16px; border: 1px solid var(--line);
+                background: linear-gradient(180deg, rgba(25,31,40,0.96), rgba(13,18,24,0.95));
+                box-shadow: 0 30px 60px rgba(0,0,0,0.4);
+            }
+            #showcase2-loader-card strong { display: block; margin-bottom: 10px; font-size: 13px; letter-spacing: 0.12em; text-transform: uppercase; }
+            #showcase2-loader-card p { margin: 0; color: var(--muted); font-size: 13px; }
+            #showcase2-caption {
+                position: absolute; left: 50%; bottom: 54px; transform: translateX(-50%);
+                width: min(78vw, 360px); height: 58px; border-radius: 999px;
+                background:
+                    radial-gradient(circle at 50% 50%, rgba(255,255,255,0.08), rgba(255,255,255,0) 62%),
+                    linear-gradient(180deg, rgba(71,56,56,0.92), rgba(20,15,18,0.98));
+                box-shadow:
+                    0 24px 30px rgba(0,0,0,0.45),
+                    inset 0 1px 0 rgba(255,255,255,0.08),
+                    inset 0 -6px 24px rgba(0,0,0,0.45);
+                pointer-events: none;
+            }
+            #showcase2-caption::after {
+                content: '';
+                position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+                width: min(65vw, 300px); height: 16px; border-radius: 999px;
+                background: rgba(0,0,0,0.28);
+                box-shadow: inset 0 1px 1px rgba(255,255,255,0.04);
+            }
+            #showcase2-help {
+                position: absolute; right: 22px; bottom: 22px; padding: 10px 12px; border-radius: 12px;
+                border: 1px solid var(--line); color: var(--muted); font-size: 12px;
+                background: rgba(15, 20, 27, 0.72); backdrop-filter: blur(8px); pointer-events: none;
+            }
+            #showcase2-debug {
+                position: absolute; left: 18px; right: 18px; bottom: 18px; height: 180px;
+                border-radius: 14px; border: 1px solid var(--line);
+                background: rgba(9, 12, 18, 0.84); backdrop-filter: blur(8px);
+                box-shadow: 0 24px 50px rgba(0,0,0,0.35); overflow: hidden; z-index: 4;
+            }
+            #showcase2-debug-head {
+                display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08);
+                font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase;
+            }
+            #showcase2-debug-status { color: var(--muted); letter-spacing: normal; text-transform: none; }
+            #showcase2-debug-log {
+                height: calc(100% - 42px); overflow: auto; padding: 10px 12px 14px;
+                font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                color: #d9e5f2; white-space: pre-wrap;
+            }
+            .showcase2-log-line { padding: 2px 0; }
+            .showcase2-log-time { color: #90a2b7; margin-right: 10px; }
+            .showcase2-log-error { color: #ff9a9a; }
+            .showcase2-log-warn { color: #f5cf84; }
+            @media (max-width: 768px) {
+                #showcase2-title h1 { font-size: 28px; }
+                #showcase2-title p { font-size: 11px; }
+                #showcase2-help { display: none; }
+            }
+        </style>
+    </head>
+    <body>
+        <div id="showcase2-root">
+            <canvas id="showcase2-canvas"></canvas>
+            <div id="showcase2-vignette"></div>
+            <div id="showcase2-title">
+                <h1 id="showcase2-title-text">东汉铜车马</h1>
+                <p id="showcase2-subtitle-text">Stable Bronze Presentation Viewer</p>
+            </div>
+            <div id="showcase2-loader">
+                <div id="showcase2-loader-card">
+                    <strong>Showcase2</strong>
+                    <p id="showcase2-loader-text">Preparing stable bronze presentation...</p>
+                </div>
+            </div>
+            <div id="showcase2-caption"></div>
+            <div id="showcase2-help">Drag to orbit · Wheel to zoom</div>
+            <div id="showcase2-debug">
+                <div id="showcase2-debug-head">
+                    <strong>Debug Console</strong>
+                    <span id="showcase2-debug-status">Booting...</span>
+                </div>
+                <div id="showcase2-debug-log"></div>
+            </div>
+        </div>
+        <script type="module" src="./showcase2.js"></script>
+    </body>
+</html>

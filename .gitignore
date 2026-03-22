@@ -1,6 +1,7 @@
 node_modules
 dist
 dist-opentour
+dist-openmesh
 .DS_Store
 .npmrc
 .vscode
@@ -17,6 +18,9 @@ test-results/
 tmp-*.csv
 tmp-*.json
 *.db
+openmesh-*.png
+showcase2-*.png
+static/glb-loader/**/.derived-textures/
 nul
 dummy.ply
 ot_tourloader_export.csv

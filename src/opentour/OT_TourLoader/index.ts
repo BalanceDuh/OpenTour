@@ -2,6 +2,15 @@ import {
     OT_TOUR_CSV_HEADERS,
     OT_TOUR_CSV_VERSION
 } from './OT_TL_FieldStandard';
+import {
+    createHotspotController,
+    normalizeHotspot,
+    type EmbeddedMediaSpec,
+    type HotspotController,
+    type HotspotRecord,
+    type HotspotWorldPoint,
+    type ProjectedScreenPoint
+} from './hotspot';
 
 type CameraPose = {
     eye: { x: number; y: number; z: number };
@@ -29,6 +38,7 @@ type TourPoi = {
     screenshotUpdatedAt?: string;
     contentUpdatedAt?: string;
     promptUpdatedAt?: string;
+    hotspots?: HotspotRecord[];
 };
 
 type LlmProvider = 'gemini' | 'qwen';
@@ -56,7 +66,13 @@ type TourLoaderOptions = {
     getWorldSamplePoints?: () => WorldPoint[];
     getLiveCameraPose?: () => { pose: CameraPose; fovDeg: number } | null;
     setLiveCameraPose?: (pose: CameraPose, fovDeg: number) => Promise<void> | void;
+    getCaptureCanvas?: () => HTMLCanvasElement | null;
+    requestCaptureRender?: () => void;
     captureScreenshotPng?: () => Promise<string>;
+    pickWorldPointAtScreen?: (x: number, y: number) => Promise<HotspotWorldPoint | null>;
+    projectWorldToScreen?: (point: HotspotWorldPoint) => ProjectedScreenPoint | null;
+    showEmbeddedMedia?: (spec: EmbeddedMediaSpec | null) => void;
+    resolveAssetUrl?: (value: string) => string;
     apiBaseUrl?: string;
     onModelLoaded?: (callback: (modelFilename: string | null) => void) => (() => void);
 };
@@ -65,6 +81,8 @@ type TourLoaderController = {
     open: () => void;
     close: () => void;
     toggle: () => void;
+    openCinematicWorkspace: () => Promise<void>;
+    closeCinematicWorkspace: () => void;
 };
 
 type JobState = {
@@ -126,21 +144,227 @@ type CsvTimingSummary = {
     estimatedDurationSec: number | null;
 };
 
+type CinematicKeyframe = {
+    keyframeId: string;
+    shotId: string;
+    t: number;
+    x: number;
+    y: number;
+    z: number;
+    yaw: number;
+    pitch: number;
+    fov: number;
+    moveSpeedMps: number;
+    mediaObject?: CinematicMediaObjectConfig | null;
+    cameraBehavior?: CinematicCameraBehavior | null;
+};
+
+type CinematicCameraBehavior = {
+    type: 'orbit' | 'approach' | 'reveal' | 'follow';
+    target: 'mediaObject';
+    radius?: number;
+    angleDeg?: number;
+    heightOffset?: number;
+};
+
+type CinematicMediaObjectConfig = {
+    enabled: boolean;
+    src: string;
+    fileName: string;
+    anchorWorld: HotspotWorldPoint | null;
+    scale: number;
+    yaw: number;
+    pitch: number;
+    roll: number;
+    depthOffset: number;
+    placeholder?: boolean;
+    placeholderLabel?: string;
+};
+
+type CinematicShot = {
+    shotId: string;
+    label: string;
+    intent: string;
+    durationSec: number;
+    speechText: string;
+    speechMode: 'INTERRUPTIBLE' | 'BLOCKING';
+    speechMatchEnabled?: boolean;
+    speechAudioUrl?: string | null;
+    speechMetrics?: {
+        durationSec: number;
+        charsPerSecond: number;
+        measuredChars: number;
+        updatedAt: string;
+        ttsModel?: string;
+        ttsVoice?: string;
+    } | null;
+    keyframes: CinematicKeyframe[];
+};
+
+type CinematicBgmConfig = {
+    audioPath: string;
+    audioStartSeconds: number;
+    audioEndSeconds: number;
+    audioPlaybackRate: number;
+    targetMusicDurationSeconds: number | null;
+    audioDisplayName?: string;
+};
+
+type CinematicPlan = {
+    version: string;
+    modelFilename: string;
+    selectedPoiIds: string[];
+    sceneDescription: string;
+    storyBackground: string;
+    styleText: string;
+    targetDurationSec: number;
+    bgm: CinematicBgmConfig | null;
+    bounds: {
+        top: { xMin: number; xMax: number; zMin: number; zMax: number };
+        front: { xMin: number; xMax: number; yMin: number; yMax: number };
+    };
+    shots: CinematicShot[];
+};
+
+type CinematicBgmLibraryItem = {
+    id: string;
+    name: string;
+    audioPath: string;
+    audioUrl: string;
+    source: 'folder' | 'path';
+};
+
+type CinematicVersionSummary = {
+    id: number;
+    modelFilename: string;
+    versionNo: number;
+    status: string;
+    source: string;
+    createdAt: string;
+    updatedAt: string;
+    confirmedAt: string | null;
+    planChars: number;
+};
+
+type CinematicVersionDetail = CinematicVersionSummary & {
+    simplePrompt: string;
+    plannerPrompt: string;
+    sceneDescription: string;
+    storyBackground: string;
+    styleText: string;
+    targetDurationSec: number | null;
+    selectedPoiIds: string[];
+    plan: CinematicPlan | null;
+    csvText: string;
+};
+
+type Mp4CompressionPreset = 'original' | 'fast_export' | 'balanced' | 'archive_smallest' | 'target_10mb';
+
+type CinematicRecordingSettings = {
+    frameRate: number;
+    videoBitsPerSecond: number;
+    audioBitsPerSecond: number;
+    mp4CompressionPreset: Mp4CompressionPreset;
+    includeTts: boolean;
+    autoPlay: boolean;
+    stopWithPlayback: boolean;
+    hidePanelDuringRecording: boolean;
+    disableInterrupts: boolean;
+    masterVolume: number;
+    ttsVolume: number;
+    bgmVolume: number;
+    subtitlesEnabled: boolean;
+    subtitleFont: string;
+    subtitleFontSize: number;
+    subtitleColor: string;
+};
+
+type CinematicRecordingRuntime = {
+    settings: CinematicRecordingSettings;
+    recorder: MediaRecorder;
+    stream: MediaStream;
+    displayStream: MediaStream | null;
+    chunks: BlobPart[];
+    startedAt: number;
+    mimeType: string;
+    extension: string;
+    bytesWritten: number;
+    lastProgressLogAt: number;
+    paused: boolean;
+};
+
+type CinematicRecordingAudioMixRuntime = {
+    context: AudioContext;
+    destination: MediaStreamAudioDestinationNode;
+    masterGain: GainNode;
+    bgmGain: GainNode;
+    duckGain: GainNode;
+    speechGain: GainNode;
+    compressor: DynamicsCompressorNode;
+    sources: WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>;
+};
+
+type CinematicStoredRecordingEntry = {
+    id: string;
+    name: string;
+    status: 'processing' | 'ready' | 'mp4_failed';
+    transcodeJobId?: string;
+    transcodePercent?: number;
+    transcodeEtaSec?: number | null;
+    transcodeHeartbeatAt?: number | null;
+    transcodePhase?: string;
+    mimeType: string;
+    extension: string;
+    size: number;
+    durationSec: number;
+    width: number;
+    height: number;
+    createdAt: number;
+    thumbnailDataUrl: string;
+    note?: string;
+    blob: Blob;
+};
+
 const iconSvg = (paths: string, viewBox = '0 0 24 24') => `
-    <svg viewBox="${viewBox}" aria-hidden="true" focusable="false">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         ${paths}
     </svg>
 `;
 
-const CSV_ICON_TIMING = iconSvg('<path d="M12 7v5l3 2"/><path d="M12 3.5a8.5 8.5 0 1 1 0 17a8.5 8.5 0 0 1 0-17Z"/><path d="M9 2h6"/>');
-const CSV_ICON_VOICE = iconSvg('<path d="M4.5 14.5V9.5h4l5-4v13l-5-4h-4Z"/><path d="M16.5 9a4 4 0 0 1 0 6"/><path d="M18.7 6.8a7 7 0 0 1 0 10.4"/>');
-const CSV_ICON_GENERATE = iconSvg('<path d="M12 3v7"/><path d="m8.5 6.5 3.5-3.5 3.5 3.5"/><path d="M5 14.5v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"/><path d="M7.5 13h9"/>');
-const CSV_ICON_SAVE = iconSvg('<path d="M5 4.5h11l3 3v12H5Z"/><path d="M8 4.5v5h7v-5"/><path d="M8.5 18h7"/>');
-const CSV_ICON_SAVE_AS = iconSvg('<path d="M6 4.5h9l3 3v11H6Z"/><path d="M9 4.5v5h6v-5"/><path d="M10 15.5h5"/><path d="M17.5 16v4"/><path d="M15.5 18h4"/>');
-const CSV_ICON_DELETE = iconSvg('<path d="M5.5 7.5h13"/><path d="M9 7.5v10"/><path d="M15 7.5v10"/><path d="M8 4.5h8"/><path d="M7 7.5l.8 11a1 1 0 0 0 1 .9h6.4a1 1 0 0 0 1-.9L17 7.5"/>');
-const CSV_ICON_DOWNLOAD = iconSvg('<path d="M12 4v10"/><path d="m8.5 10.5 3.5 3.5 3.5-3.5"/><path d="M5 18.5h14"/>');
-const CSV_ICON_FULLSCREEN = iconSvg('<path d="M8 4.5H4.5V8"/><path d="M16 4.5h3.5V8"/><path d="M8 19.5H4.5V16"/><path d="M16 19.5h3.5V16"/>');
-const CSV_ICON_CLOSE = iconSvg('<path d="M6 6l12 12"/><path d="M18 6 6 18"/>');
+const CSV_ICON_TIMING = iconSvg('<path d="M12 2v4"/><path d="M10 2h4"/><path d="M15.5 5.5l1.5-1.5"/><circle cx="12" cy="14" r="8"/><path d="M12 10v4l2 2"/>');
+const CSV_ICON_VOICE = iconSvg('<path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>');
+const CSV_ICON_GENERATE = iconSvg('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>');
+const CSV_ICON_SAVE = iconSvg('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>');
+const CSV_ICON_SAVE_AS = iconSvg('<path d="M15 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v5"/><polyline points="13 21 13 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/><line x1="20" y1="16" x2="20" y2="22"/><line x1="17" y1="19" x2="23" y2="19"/>');
+const CSV_ICON_DELETE = iconSvg('<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>');
+const CSV_ICON_DOWNLOAD = iconSvg('<path d="M21 15v4a2 2 0 0 1-2-2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
+const CSV_ICON_FULLSCREEN = iconSvg('<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>');
+const CSV_ICON_CLOSE = iconSvg('<line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/>');
+const CINE_ICON_PLAY = iconSvg('<polygon points="5 3 19 12 5 21 5 3"/>');
+const CINE_ICON_SAVE = CSV_ICON_SAVE;
+const CINE_ICON_SAVE_AS = CSV_ICON_SAVE_AS;
+const CINE_ICON_COMPILE = iconSvg('<path d="M6 6.5h9l3 3v8H6Z"/><path d="M9 6.5v5h6v-5"/><path d="M9 16h6"/><path d="M18.5 13H22"/><path d="M20.2 10.8 22.4 13l-2.2 2.2"/>');
+const CINE_ICON_PROMPT = iconSvg('<path d="M7 7.5h10"/><path d="M7 11.5h10"/><path d="M7 15.5h6"/><path d="M5.5 4.5h13a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1Z"/>');
+const CINE_ICON_MAGIC = iconSvg('<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275Z"/><path d="M5 3v4"/><path d="M7 5H3"/><path d="M19 17v4"/><path d="M21 19h-4"/>');
+const CINE_ICON_GEAR = iconSvg('<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>');
+const CINE_ICON_LIST = iconSvg('<path d="M8 7h10"/><path d="M8 12h10"/><path d="M8 17h10"/><path d="M5.5 7h.01"/><path d="M5.5 12h.01"/><path d="M5.5 17h.01"/>');
+const CINE_ICON_SLIDERS = iconSvg('<path d="M6 7h12"/><path d="M6 17h12"/><path d="M10 12h8"/><path d="M9 7a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0Z"/><path d="M15 17a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0Z"/><path d="M13 12a1.5 1.5 0 1 1-3 0a1.5 1.5 0 0 1 3 0Z"/>');
+const CINE_ICON_MAP = iconSvg('<path d="M6 5.5 12 3l6 2.5v13L12 16l-6 2.5Z"/><path d="M12 3v13"/>');
+const CINE_ICON_REFRESH = iconSvg('<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>');
+const CINE_ICON_CHEVRON = iconSvg('<path d="m8 10 4 4 4-4"/>');
+const CINE_ICON_LOCK = iconSvg('<path d="M8 10V8a4 4 0 1 1 8 0v2"/><rect x="6" y="10" width="12" height="9" rx="2"/>');
+const CINE_ICON_EYE = iconSvg('<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/>');
+const CINE_ICON_VOLUME = iconSvg('<path d="M5 14h3l4 4V6L8 10H5Z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M17.8 6.8a7 7 0 0 1 0 10.4"/>');
+const CINE_ICON_MUSIC = iconSvg('<path d="M9 18V6l11-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>');
+const CINE_ICON_TARGET = iconSvg('<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>');
+const CINE_ICON_WAND = iconSvg('<path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/>');
+const CINE_ICON_FOCUS = iconSvg('<circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>');
+const CINE_ICON_MINUS = iconSvg('<line x1="5" x2="19" y1="12" y2="12"/>');
+const CINE_ICON_PLUS = iconSvg('<line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/>');
+const CINE_ICON_MINI = iconSvg('<path d="M4.5 8.5h15"/><path d="M4.5 15.5h9"/>');
+const CINE_ICON_PAUSE = iconSvg('<rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/>');
+const CINE_ICON_FOLDER = iconSvg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 10h18"/>');
+const CINE_ICON_FILE_PLUS = iconSvg('<path d="M14 3v5h5"/><path d="M5 3h9l5 5v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M10 14v6"/><path d="M7 17h6"/>');
 
 const STYLE_ID = 'ot-tour-loader-style';
 const PANEL_ID = 'ot-tour-loader-panel';
@@ -171,6 +395,31 @@ Rules:
 
 Output format:
 {"moves":[{"seq":1,"content":"我们从起点前往大厅，向前移动约6米。"}]}`;
+const DEFAULT_CINEMATIC_SIMPLE_PROMPT = [
+    '1. 随手需求：请用一句话描述你想拍什么，例如“做一个一镜到底的山路探索镜头”“从入口走到观景点再回望收束”。',
+    '2. 空间是什么：请描述空间类型与关键路径，例如“山径 / 洞穴 / 展厅 / 街巷 / 室内长廊 / 高台边缘”。',
+    '3. 故事背景：请说明观众为什么要这样看、情绪是什么，例如“独自探索”“发现线索”“被景观吸引”“完成一次抵达与回望”。',
+    '4. 风格（可选其一或组合）：电影感、纪录片感、神秘、史诗、宁静、治愈、悬疑、梦幻、克制、展览导览、游戏过场。',
+    '5. 节奏要求（可选其一或组合）：慢推进、匀速巡游、先抑后扬、先扬后稳、渐进揭示、快速切入后放缓、平稳克制、结尾停驻、全程不停顿。',
+    '6. 如果需要 3D Media Object，请明确说明：它位于哪里、在哪个镜头阶段或关键帧附近出现、镜头是否需要围绕它飞行；如果暂时没有视频内容，也可以先只要求生成一个空的 3D Media 占位位置。'
+].join('\n');
+const DEFAULT_CINEMATIC_PLANNER_PROMPT = `你是电影级运镜设计师。
+请基于选中 POI 的空间范围 图像参考 场景描述 故事背景和目标时长，生成连续不间断的一镜到底运镜方案。
+
+硬性规则：
+1. 输出 JSON only。
+2. POI 只是空间锚点，可以生成中间 keyframe。
+3. 运镜必须连续，shots 至少 4 段，每段至少 2 个 keyframes。
+4. keyframe 必须停留在输入 bounds 内。
+5. 优先使用推进 抬升 reveal 侧移 回望 俯仰变化形成节奏。
+6. 每个 shot 需要 label intent durationSec speechText speechMode keyframes。
+7. speechMode 仅可为 INTERRUPTIBLE 或 BLOCKING。
+8. keyframe 需要 t x y z yaw pitch fov moveSpeedMps。
+9. total duration 接近 targetDurationSec。
+10. 如果复杂提示词明确要求 3D Media Object，则必须在相关 keyframe 上生成 mediaObject 字段，至少说明 enabled anchorWorld scale yaw pitch roll depthOffset，并通过后续 keyframe 的相机位置表现围绕它、靠近它、掠过它或回望它。
+11. 如果提示词提到 3D Media Object 但没有视频内容，也允许生成 placeholder 形式的 mediaObject，占位后续再绑定视频。
+12. 可以为未来镜头语义预留 cameraBehavior 字段，但当前仍然要输出可直接播放的关键帧相机位置。
+13. 除 JSON 外不要输出任何说明。`;
 const GEMINI_MODELS = [
     'gemini-2.5-pro',
     'gemini-2.5-flash',
@@ -223,10 +472,36 @@ const MAX_POI_FOV = 120;
 
 const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
 const degToRad = (v: number) => v * Math.PI / 180;
+const radToDeg = (v: number) => v * 180 / Math.PI;
 const clampFov = (v: number, fallback = DEFAULT_POI_FOV) => {
     const n = Number.isFinite(v) ? v : fallback;
     return clamp(n, MIN_POI_FOV, MAX_POI_FOV);
 };
+const normalizeCwMediaObjectConfig = (input: unknown): CinematicMediaObjectConfig => {
+    const source = input && typeof input === 'object' ? input as Partial<CinematicMediaObjectConfig> : {};
+    const anchor = source.anchorWorld;
+    const safeAnchor = anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y) && Number.isFinite(anchor.z)
+        ? { x: Number(anchor.x), y: Number(anchor.y), z: Number(anchor.z) }
+        : null;
+    const src = String(source.src || '').trim();
+    const fileName = String(source.fileName || (src ? src.split('/').pop() || src : '')).trim();
+    return {
+        enabled: source.enabled !== false,
+        src,
+        fileName,
+        anchorWorld: safeAnchor,
+        scale: clamp(Number(source.scale) || 1.6, 0.1, 120),
+        yaw: Number(source.yaw) || 0,
+        pitch: Number(source.pitch) || 0,
+        roll: Number(source.roll) || 0,
+        depthOffset: clamp(Number(source.depthOffset) || 0.06, -2, 2),
+        placeholder: source.placeholder === true,
+        placeholderLabel: String(source.placeholderLabel || '').trim()
+    };
+};
+
+const plannerPromptRequestsMediaObject = (text: string) => /3d\s*media|media object|media project|video screen|天幕|视频屏|空屏|占位|3d媒体/i.test(String(text || ''));
+const plannerPromptRequestsOrbitLikeCamera = (text: string) => /围绕|环绕|orbit|围着|掠过|回望|围绕.*3d\s*media|围绕.*天幕/i.test(String(text || ''));
 
 const ensureStyle = () => {
     const existing = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -246,6 +521,7 @@ const ensureStyle = () => {
             --otl-danger: #ef4444;
             --otl-border: #33333e;
             --otl-border-light: #454552;
+            --otl-font-ui: 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
         }
         #${PANEL_ID} {
             position: fixed;
@@ -259,13 +535,35 @@ const ensureStyle = () => {
             border-radius: 12px;
             box-shadow: 0 20px 40px rgba(0,0,0,0.6);
             color: var(--otl-text-main);
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-family: var(--otl-font-ui);
             display: flex;
             flex-direction: column;
             z-index: 170;
             pointer-events: auto;
         }
         #${PANEL_ID}.hidden { display: none; }
+        #${PANEL_ID}.cinematic-only {
+            width: 0;
+            height: 0;
+            max-height: none;
+            background: transparent;
+            border: 0;
+            box-shadow: none;
+            overflow: visible;
+        }
+        #${PANEL_ID}.cinematic-only > .otl-header,
+        #${PANEL_ID}.cinematic-only > .otl-content,
+        #${PANEL_ID}.cinematic-only > .otl-footer,
+        #${PANEL_ID}.cinematic-only > [data-role="run-settings-modal"],
+        #${PANEL_ID}.cinematic-only > [data-role="batch-modal"],
+        #${PANEL_ID}.cinematic-only > [data-role="llm-popover"],
+        #${PANEL_ID}.cinematic-only > [data-role="prompt-modal"],
+        #${PANEL_ID}.cinematic-only > [data-role="csv-prompt-modal"],
+        #${PANEL_ID}.cinematic-only > [data-role="move-prompt-modal"],
+        #${PANEL_ID}.cinematic-only > [data-role="csv-workspace-modal"],
+        #${PANEL_ID}.cinematic-only > [data-role="csv-content-modal"] {
+            display: none !important;
+        }
         #${PANEL_ID} * { box-sizing: border-box; }
         .otl-header {
             padding: 12px 16px;
@@ -341,6 +639,23 @@ const ensureStyle = () => {
         }
         .otl-row { display:flex; gap:8px; align-items:center; }
         .otl-row > * { min-width: 0; }
+        .otl-cinematic-duration-label {
+            margin: 12px 0 8px;
+            font-size: 12px;
+            font-weight: 700;
+            color: #8ea3cf;
+        }
+        .otl-cinematic-duration-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+            margin: 0 0 14px;
+            width: 100%;
+        }
+        .otl-cinematic-duration-row > * {
+            width: 100%;
+            min-width: 0;
+        }
         .otl-input, .otl-select {
             width: 100%;
             border: 1px solid var(--otl-border);
@@ -350,6 +665,7 @@ const ensureStyle = () => {
             padding: 8px 10px;
             font-size: 12px;
             outline: none;
+            font-family: var(--otl-font-ui);
         }
         .otl-btn {
             height: 32px;
@@ -361,6 +677,7 @@ const ensureStyle = () => {
             font-size: 12px;
             font-weight: 600;
             cursor: pointer;
+            font-family: var(--otl-font-ui);
         }
         .otl-btn:hover:not(:disabled) { border-color: var(--otl-border-light); }
         .otl-btn:disabled { opacity: 0.45; cursor:not-allowed; }
@@ -747,6 +1064,7 @@ const ensureStyle = () => {
             font-size: 12px;
             line-height: 1.45;
             outline: none;
+            font-family: var(--otl-font-ui);
         }
         .otl-csv-workspace-panel {
             width: min(1080px, calc(100vw - 40px));
@@ -763,6 +1081,7 @@ const ensureStyle = () => {
         }
         .otl-csv-workspace-panel.floating {
             position: fixed;
+            z-index: 10001;
         }
         .otl-csv-workspace-panel.fullscreen {
             position: fixed;
@@ -808,6 +1127,1476 @@ const ensureStyle = () => {
         .otl-csv-version-item.active {
             border-color: #4b73ff;
             box-shadow: inset 0 0 0 1px rgba(75, 115, 255, 0.35);
+        }
+        .otl-cinematic-shell {
+            background: linear-gradient(180deg, rgba(4, 6, 12, 0.08), rgba(4, 6, 12, 0.24));
+            justify-content: flex-end;
+            align-items: stretch;
+            padding: 14px 14px 14px 92px;
+            pointer-events: none;
+            z-index: 10000;
+        }
+        .otl-cinematic-shell .otl-csv-workspace-panel {
+            width: min(1240px, calc(100vw - 106px));
+            height: min(860px, calc(100vh - 28px));
+            max-height: calc(100vh - 28px);
+            pointer-events: auto;
+            position: relative;
+            z-index: 1;
+            background:
+                radial-gradient(circle at top left, rgba(95, 108, 176, 0.12), transparent 28%),
+                linear-gradient(180deg, rgba(11, 13, 20, 0.985), rgba(7, 8, 12, 0.985));
+            border-color: rgba(53, 58, 82, 0.9);
+            border-radius: 18px;
+            box-shadow: 0 28px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.03);
+            padding: 16px;
+            overflow: hidden;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr);
+            gap: 14px;
+        }
+        .otl-cinematic-shell .otl-csv-workspace-panel.floating {
+            position: fixed;
+            z-index: 10001;
+        }
+        .otl-cinematic-shell .otl-csv-workspace-panel.fullscreen {
+            position: fixed !important;
+            left: 12px !important;
+            top: 12px !important;
+            width: calc(100vw - 24px) !important;
+            height: calc(100vh - 24px) !important;
+            max-height: none !important;
+            gap: 12px;
+            z-index: 10003;
+        }
+        .otl-cinematic-main {
+            display: grid;
+            grid-template-columns: 310px minmax(0, 1fr);
+            grid-template-rows: minmax(0, 1fr) auto;
+            gap: 14px;
+            min-height: 0;
+            min-width: 0;
+            flex: 1;
+        }
+        .otl-cinematic-left {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            min-height: 0;
+            min-width: 0;
+            grid-row: 1;
+        }
+        .otl-cinematic-left .otl-cinematic-pane {
+            display: flex;
+            flex-direction: column;
+        }
+        .otl-cinematic-left .otl-cinematic-pane.control-pane {
+            position: relative;
+            overflow: visible;
+            z-index: 14;
+            flex: 1;
+        }
+        .otl-cinematic-left .otl-cinematic-pane.control-pane [data-role="cinematic-workspace-status"] {
+            padding-top: 12px;
+        }
+        .otl-cinematic-right {
+            display: grid;
+            grid-template-rows: minmax(0, 1fr);
+            gap: 14px;
+            min-height: 0;
+            min-width: 0;
+            grid-row: 1;
+        }
+        .otl-cinematic-bottom-dock {
+            grid-column: 1 / -1;
+            grid-row: 2;
+            min-width: 0;
+            align-self: end;
+        }
+        .otl-cinematic-timeline-frame {
+            position: relative;
+            min-height: 0;
+        }
+        .otl-cinematic-ruler-zoom {
+            position: absolute;
+            top: 4px;
+            left: 10px;
+            z-index: 7;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 4px 6px;
+            border-radius: 8px;
+            border: 1px solid rgba(58, 64, 90, 0.9);
+            background: rgba(17, 18, 26, 0.96);
+            box-shadow: 0 10px 18px rgba(0,0,0,0.22);
+            pointer-events: auto;
+        }
+        .otl-cinematic-ruler-zoom .otl-cinematic-icon-btn {
+            width: 24px;
+            height: 24px;
+            border-radius: 7px;
+        }
+        .otl-cinematic-zoom-range {
+            width: 58px;
+            accent-color: #7166ff;
+        }
+        .otl-cinematic-middle {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 14px;
+            min-height: 0;
+            min-width: 0;
+            align-items: stretch;
+        }
+        .otl-cinematic-pane {
+            border: 1px solid rgba(45, 50, 70, 0.92);
+            border-radius: 16px;
+            background:
+                linear-gradient(180deg, rgba(17,19,28,0.96), rgba(11,12,18,0.98));
+            padding: 16px;
+            min-height: 0;
+            min-width: 0;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 14px 32px rgba(0,0,0,0.2);
+        }
+        .otl-cinematic-pane.timeline-pane {
+            border: 1px solid rgba(45, 50, 70, 0.96);
+            border-radius: 16px;
+            background: linear-gradient(180deg, rgba(17,19,27,0.98), rgba(7,8,12,0.98));
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 18px 34px rgba(0,0,0,0.25);
+            padding: 0;
+            overflow: hidden;
+        }
+        .otl-cinematic-pane.map-pane,
+        .otl-cinematic-pane.preview-pane,
+        .otl-cinematic-pane.parameters-pane {
+            display: flex;
+            flex-direction: column;
+        }
+        .otl-cinematic-pane.preview-pane,
+        .otl-cinematic-pane.map-pane {
+            min-height: 0;
+        }
+        .otl-cinematic-pane.parameters-pane {
+            overflow: hidden;
+            display: none;
+        }
+        .otl-cinematic-parameter-scroll {
+            min-height: 0;
+            overflow: auto;
+            padding-right: 4px;
+        }
+        .otl-cinematic-parameter-card {
+            display: grid;
+            grid-template-rows: repeat(3, auto);
+            gap: 10px;
+        }
+        .otl-cinematic-parameter-top {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 8px 10px;
+            align-items: start;
+        }
+        .otl-cinematic-parameter-bottom {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px 10px;
+        }
+        .otl-cinematic-parameter-speech-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto auto;
+            gap: 8px 10px;
+            align-items: end;
+        }
+        .otl-cinematic-speech-play-btn {
+            height: 30px;
+            min-width: 36px;
+            padding: 0 10px;
+        }
+        .otl-cinematic-speech-metric {
+            min-width: 96px;
+            height: 30px;
+            border-radius: 10px;
+            border: 1px solid rgba(43, 61, 100, 0.56);
+            background: rgba(10, 15, 27, 0.84);
+            color: #dce7ff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 10px;
+            font-size: 11px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .otl-cinematic-editor-modal {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: flex-start;
+            justify-content: flex-end;
+            z-index: 30;
+            padding: 72px 18px 18px;
+            pointer-events: none;
+        }
+        .otl-cinematic-editor-modal.hidden { display: none; }
+        .otl-cinematic-editor-panel {
+            width: min(760px, calc(100% - 24px));
+            max-height: calc(100% - 24px);
+            overflow: auto;
+            border-radius: 16px;
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            background:
+                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
+                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
+            box-shadow: 0 22px 42px rgba(0,0,0,0.36);
+            padding: 18px;
+            pointer-events: auto;
+        }
+        .otl-cinematic-editor-body {
+            display: grid;
+            gap: 16px;
+        }
+        .otl-cinematic-editor-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 14px 16px;
+        }
+        .otl-cinematic-editor-grid.shot {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+        }
+        .otl-cinematic-editor-speech {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+            gap: 10px;
+            align-items: end;
+        }
+        .otl-cinematic-check {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #dce7ff;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .otl-cinematic-speech-track {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 112px;
+        }
+        .otl-cinematic-speech-row-lane {
+            position: relative;
+            height: 52px;
+            margin-top: 0;
+            border-top: 1px solid rgba(42, 45, 61, 0.72);
+        }
+        .otl-cinematic-speech-chip {
+            position: absolute;
+            top: 11px;
+            height: 28px;
+            border-radius: 9px;
+            border: 1px solid rgba(73, 166, 119, 0.4);
+            background: linear-gradient(180deg, rgba(26, 64, 48, 0.9), rgba(13, 33, 24, 0.96));
+            color: #d8ffea;
+            font-size: 10px;
+            padding: 0 10px;
+            display: inline-flex;
+            align-items: center;
+            overflow: hidden;
+            white-space: nowrap;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+        }
+        .otl-cinematic-poi-list {
+            max-height: 220px;
+            overflow: auto;
+        }
+        .otl-cinematic-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 0;
+            min-height: 52px;
+        }
+        .otl-cinematic-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .otl-cinematic-title-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .otl-cinematic-mini-toggle {
+            height: 28px;
+            padding: 0 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(72, 92, 135, 0.58);
+            background: rgba(18, 24, 40, 0.92);
+            color: #d6e2ff;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            font-family: var(--otl-font-ui);
+            cursor: pointer;
+        }
+        .otl-cinematic-badge {
+            border-radius: 7px;
+            background: rgba(86, 110, 160, 0.34);
+            color: #f0f5ff;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.12em;
+            padding: 6px 9px;
+        }
+        .otl-cinematic-title {
+            font-size: 15px;
+            font-weight: 800;
+            color: #f5f7ff;
+        }
+        .otl-cinematic-actions {
+            display: flex;
+            gap: 8px;
+        }
+        .otl-cinematic-icon-btn {
+            width: 38px;
+            height: 38px;
+            border-radius: 12px;
+            border: 1px solid rgba(72, 92, 135, 0.6);
+            background: rgba(20, 28, 46, 0.95);
+            color: #eef4ff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+        }
+        .otl-cinematic-icon-btn svg,
+        .otl-cinematic-section-title svg,
+        .otl-cinematic-poi-trigger svg,
+        .otl-cinematic-mini-play svg {
+            width: 18px;
+            height: 18px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 1.9;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex: 0 0 auto;
+        }
+        .otl-cinematic-icon-btn:hover {
+            border-color: rgba(103, 141, 255, 0.95);
+            background: rgba(26, 39, 67, 1);
+            transform: translateY(-1px);
+        }
+        .otl-cinematic-icon-btn.primary {
+            border-color: rgba(74, 122, 255, 0.75);
+            box-shadow: 0 0 0 1px rgba(74,122,255,0.18) inset;
+        }
+        .otl-cinematic-section-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 14px;
+        }
+        .otl-cinematic-section-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #eef3ff;
+        }
+        .otl-cinematic-step-badge {
+            border-radius: 999px;
+            border: 1px solid rgba(72, 92, 135, 0.65);
+            padding: 5px 12px;
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.14em;
+            color: #cad8ff;
+        }
+        .otl-cinematic-subactions {
+            display: flex;
+            gap: 8px;
+        }
+        .otl-cinematic-poi-box {
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            border-radius: 14px;
+            background: rgba(12, 13, 20, 0.92);
+            overflow: visible;
+            position: relative;
+            z-index: 20;
+        }
+        .otl-cinematic-poi-trigger {
+            width: 100%;
+            border: 0;
+            background: transparent;
+            color: #eaf1ff;
+            padding: 14px 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+            font-family: var(--otl-font-ui);
+        }
+        .otl-cinematic-poi-items {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: calc(100% + 6px);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 10px 12px 12px;
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            border-radius: 12px;
+            background: rgba(12, 13, 20, 0.98);
+            box-shadow: 0 18px 28px rgba(0,0,0,0.36);
+        }
+        .otl-cinematic-poi-items.hidden {
+            display: none;
+        }
+        .otl-cinematic-poi-row {
+            display: grid;
+            grid-template-columns: 18px 1fr auto;
+            gap: 10px;
+            align-items: center;
+            padding: 10px 12px;
+            border: 1px solid rgba(42, 57, 95, 0.55);
+            border-radius: 12px;
+            background: rgba(13, 18, 31, 0.88);
+            color: #edf3ff;
+        }
+        .otl-cinematic-poi-row .otl-muted { color: #8e9ec2; }
+        .otl-cinematic-grid-inputs {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 14px;
+        }
+        .otl-cinematic-field {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .otl-cinematic-field label {
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #7f92ba;
+        }
+        .otl-cinematic-media-box {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(51, 70, 109, 0.48);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .otl-cinematic-media-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .otl-cinematic-media-right {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+        .otl-cinematic-media-path-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: end;
+        }
+        .otl-cinematic-media-anchor-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px;
+            align-items: end;
+        }
+        .otl-cinematic-media-icon-btn {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+            border: 1px solid rgba(72, 92, 135, 0.6);
+            background: rgba(20, 28, 46, 0.95);
+            color: #eef4ff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+        }
+        .otl-cinematic-media-icon-btn:hover {
+            border-color: rgba(103, 141, 255, 0.95);
+            background: rgba(26, 39, 67, 1);
+            transform: translateY(-1px);
+        }
+        .otl-cinematic-media-icon-btn svg {
+            width: 16px;
+            height: 16px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 1.9;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .otl-cinematic-media-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        .otl-cinematic-media-note {
+            font-size: 11px;
+            color: #8ea0c9;
+        }
+        .otl-cinematic-timeline {
+            position: relative;
+            height: 308px;
+            overflow: hidden;
+            border: 0;
+            border-radius: 0;
+            background:
+                linear-gradient(180deg, rgba(15, 17, 24, 0.98), rgba(7, 8, 13, 0.99)),
+                linear-gradient(90deg, rgba(100,120,255,0.025), rgba(255,255,255,0));
+            min-width: 0;
+            box-shadow: none;
+        }
+        .otl-cinematic-timeline-shell {
+            display: grid;
+            grid-template-columns: 224px minmax(0, 1fr);
+            height: 100%;
+            min-width: 0;
+        }
+        .otl-cinematic-timeline-side {
+            border-right: 1px solid rgba(42, 45, 61, 0.95);
+            background: linear-gradient(180deg, rgba(22,24,33,0.98), rgba(15,16,23,0.98));
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .otl-cinematic-sequence-head {
+            height: 36px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 14px;
+            border-bottom: 1px solid rgba(42, 45, 61, 0.95);
+            color: #d9e4ff;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .otl-cinematic-sequence-head.empty {
+            color: transparent;
+        }
+        .otl-cinematic-sequence-pill {
+            height: 18px;
+            min-width: 18px;
+            border-radius: 6px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(69, 98, 168, 0.18);
+            color: #8ea9ff;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        .otl-cinematic-lane-side {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .otl-cinematic-lane-title,
+        .otl-cinematic-lane-audio {
+            position: relative;
+            padding: 0 16px;
+            border-bottom: 1px solid rgba(42, 45, 61, 0.95);
+            color: #8d9ab9;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .otl-cinematic-lane-title { height: 112px; }
+        .otl-cinematic-lane-audio { height: 52px; }
+        .otl-cinematic-lane-dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.22);
+        }
+        .otl-cinematic-lane-tools {
+            margin-left: auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .otl-cinematic-lane-tool {
+            width: 18px;
+            height: 18px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #667493;
+            opacity: 0.82;
+        }
+        .otl-cinematic-timeline-main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .otl-cinematic-ruler-wrap {
+            position: relative;
+            height: 36px;
+            overflow: auto hidden;
+            border-bottom: 1px solid rgba(42, 45, 61, 0.95);
+            background: linear-gradient(180deg, rgba(22,24,33,0.98), rgba(15,16,22,0.98));
+            scrollbar-width: none;
+        }
+        .otl-cinematic-ruler-wrap::-webkit-scrollbar { display: none; }
+        .otl-cinematic-ruler-inner,
+        .otl-cinematic-track-scroll {
+            position: relative;
+            min-width: 760px;
+        }
+        .otl-cinematic-ruler-inner { height: 36px; }
+        .otl-cinematic-track-wrap {
+            flex: 1;
+            position: relative;
+            overflow: auto;
+            background:
+                linear-gradient(180deg, rgba(11,12,17,0.98), rgba(7,8,12,0.99)),
+                linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
+        }
+        .otl-cinematic-track-scroll {
+            min-height: 138px;
+        }
+        .otl-cinematic-time-ruler {
+            position: absolute;
+            inset: 0;
+        }
+        .otl-cinematic-tick {
+            position: absolute;
+            bottom: 0;
+            width: 1px;
+            height: 9px;
+            background: rgba(112, 118, 148, 0.28);
+        }
+        .otl-cinematic-tick.major {
+            height: 21px;
+            background: rgba(143, 152, 196, 0.72);
+        }
+        .otl-cinematic-tick.mid {
+            height: 15px;
+            background: rgba(126, 135, 171, 0.5);
+        }
+        .otl-cinematic-tick-label {
+            position: absolute;
+            top: 5px;
+            transform: translateX(8px);
+            font-size: 10px;
+            color: #949ab8;
+            letter-spacing: 0.02em;
+        }
+        .otl-cinematic-track-grid {
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+        }
+        .otl-cinematic-grid-line {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 1px;
+            background: rgba(255,255,255,0.035);
+        }
+        .otl-cinematic-grid-line.major {
+            background: rgba(255,255,255,0.06);
+        }
+        .otl-cinematic-grid-line.mid {
+            background: rgba(255,255,255,0.045);
+        }
+        .otl-cinematic-shot-row {
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 0;
+            height: 112px;
+            border-bottom: 1px solid rgba(42, 45, 61, 0.72);
+        }
+        .otl-cinematic-shot-bar {
+            position: absolute;
+            top: 16px;
+            height: 54px;
+            border-radius: 12px;
+            border: 1px solid rgba(88, 92, 111, 0.75);
+            background:
+                linear-gradient(180deg, rgba(70, 72, 86, 0.18), rgba(29, 31, 40, 0.72)),
+                repeating-linear-gradient(135deg, rgba(255,255,255,0.038) 0 4px, rgba(255,255,255,0.012) 4px 8px);
+            color: #e5ecff;
+            font-size: 11px;
+            padding: 15px 12px 8px;
+            overflow: visible;
+            min-width: 0;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 8px 18px rgba(0,0,0,0.16);
+        }
+        .otl-cinematic-shot-bar.active {
+            border-color: rgba(118, 102, 255, 0.95);
+            background:
+                linear-gradient(180deg, rgba(99, 87, 214, 0.34), rgba(35, 32, 66, 0.78)),
+                repeating-linear-gradient(135deg, rgba(145,139,255,0.09) 0 4px, rgba(255,255,255,0.022) 4px 8px);
+            box-shadow: 0 0 0 1px rgba(118,102,255,0.28), 0 12px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.08);
+        }
+        .otl-cinematic-shot-line {
+            position: absolute;
+            left: 10px;
+            right: 10px;
+            top: -13px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            pointer-events: none;
+        }
+        .otl-cinematic-shot-title {
+            font-weight: 800;
+            text-align: left;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            padding: 3px 8px;
+            border-radius: 6px;
+            background: rgba(6, 7, 12, 0.98);
+            border: 1px solid rgba(69, 73, 93, 0.92);
+            max-width: calc(100% - 74px);
+        }
+        .otl-cinematic-shot-meta {
+            font-size: 10px;
+            color: #b3c1e7;
+            text-align: right;
+            padding: 3px 8px;
+            border-radius: 6px;
+            background: rgba(6, 7, 12, 0.98);
+            border: 1px solid rgba(69, 73, 93, 0.92);
+            white-space: nowrap;
+        }
+        .otl-cinematic-shot-klabels {
+            position: relative;
+            height: 15px;
+            margin-top: 10px;
+        }
+        .otl-cinematic-keyframe-label {
+            position: absolute;
+            top: 0;
+            transform: translateX(-50%);
+            font-size: 9px;
+            color: #727792;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        .otl-cinematic-shot-dots {
+            position: relative;
+            height: 22px;
+            margin-top: 8px;
+        }
+        .otl-cinematic-pane.parameters-pane .otl-cinematic-section-head {
+            margin-bottom: 10px !important;
+        }
+        .otl-cinematic-pane.parameters-pane .otl-cinematic-field {
+            gap: 4px;
+        }
+        .otl-cinematic-pane.parameters-pane .otl-cinematic-field label {
+            font-size: 10px;
+            letter-spacing: 0.05em;
+        }
+        .otl-cinematic-pane.parameters-pane .otl-input,
+        .otl-cinematic-pane.parameters-pane .otl-select {
+            font-size: 11px;
+            padding: 6px 8px;
+            min-height: 30px;
+        }
+        .otl-cinematic-pane.parameters-pane .otl-btn {
+            height: 28px;
+            font-size: 11px;
+            padding: 0 8px;
+        }
+        .otl-cinematic-pane.parameters-pane .otl-cinematic-keyframe-heading {
+            display: none;
+        }
+        .otl-cinematic-keyframe-dot {
+            position: absolute;
+            width: 13px;
+            height: 13px;
+            border-radius: 3px;
+            border: 1px solid rgba(139, 141, 158, 0.88);
+            background: linear-gradient(180deg, rgba(34, 36, 46, 0.98), rgba(15, 16, 22, 0.98));
+            transform: translate(-50%, -50%);
+            cursor: pointer;
+            rotate: 45deg;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px rgba(0,0,0,0.2);
+        }
+        .otl-cinematic-keyframe-dot.active {
+            background: linear-gradient(180deg, rgba(123, 113, 255, 1), rgba(91, 80, 238, 0.98));
+            border-color: #f3f5ff;
+            box-shadow: 0 0 0 4px rgba(110,98,255,0.18), inset 0 1px 0 rgba(255,255,255,0.22);
+        }
+        .otl-cinematic-keyframe-dot::after { content: none; }
+        .otl-cinematic-playhead {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(180deg, rgba(115, 103, 255, 1), rgba(115, 103, 255, 0.12));
+            transform: translateX(-1px);
+            pointer-events: none;
+            z-index: 4;
+        }
+        .otl-cinematic-playhead::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 50%;
+            width: 14px;
+            height: 14px;
+            background: #7666ff;
+            border-radius: 50%;
+            transform: translate(-50%, -22%);
+            box-shadow: 0 0 0 4px rgba(110,98,255,0.18);
+        }
+        .otl-cinematic-request-hint {
+            font-size: 11px;
+            color: #8595b8;
+            line-height: 1.45;
+        }
+        .otl-cinematic-panel-title {
+            font-size: 12px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #95a8cf;
+            margin-bottom: 12px;
+        }
+        .otl-cinematic-map-wrap {
+            position: relative;
+            border: 1px solid rgba(43, 59, 97, 0.54);
+            border-radius: 14px;
+            overflow: hidden;
+            background: radial-gradient(circle at center, rgba(18,29,56,0.55), rgba(7,10,19,0.96));
+            min-height: 280px;
+        }
+        .otl-cinematic-map-split {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            min-height: 0;
+            flex: 1;
+        }
+        .otl-cinematic-map-box {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: flex-start;
+            flex: 1;
+            min-height: 0;
+        }
+        .otl-cinematic-map-box canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            aspect-ratio: 260 / 210;
+            max-width: 100%;
+            object-fit: contain;
+            flex: 1;
+            min-height: 0;
+        }
+        .otl-cinematic-map-box .otl-map-controls {
+            align-self: flex-start;
+            margin-top: 8px;
+        }
+        .otl-cinematic-preview-box {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            min-height: 0;
+            flex: 1;
+        }
+        .otl-cinematic-preview-wrap {
+            border: 1px solid rgba(43, 59, 97, 0.54);
+            border-radius: 14px;
+            overflow: hidden;
+            background: rgba(7,10,19,0.96);
+            width: 100%;
+            min-height: 0;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .otl-cinematic-preview-wrap img {
+            display: block;
+            width: 100%;
+            height: 100%;
+            aspect-ratio: 16 / 9;
+            object-fit: contain;
+            background: #050912;
+            flex: 1;
+            min-height: 0;
+        }
+        .otl-cinematic-map-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            gap: 12px;
+        }
+        .otl-cinematic-map-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+        .otl-cinematic-map-current {
+            border-radius: 8px;
+            background: rgba(40, 54, 88, 0.78);
+            color: #d5e1ff;
+            padding: 5px 8px;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .otl-cinematic-route-toggle {
+            height: 30px;
+            padding: 0 12px;
+            border-radius: 999px;
+            border: 1px solid rgba(72, 92, 135, 0.58);
+            background: rgba(20, 28, 46, 0.95);
+            color: #d6e2ff;
+            font-size: 11px;
+            font-weight: 700;
+            font-family: var(--otl-font-ui);
+            cursor: pointer;
+        }
+        .otl-cinematic-route-toggle.active {
+            border-color: rgba(74, 122, 255, 0.82);
+            background: rgba(20, 42, 92, 0.95);
+            color: #f0f5ff;
+        }
+        .otl-cinematic-prompt-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(4, 4, 8, 0.76);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 18px;
+            z-index: 10020;
+            backdrop-filter: blur(18px);
+        }
+        .otl-cinematic-prompt-modal.hidden { display: none; }
+        .otl-cinematic-prompt-panel {
+            width: min(980px, calc(100vw - 40px));
+            min-height: 560px;
+            max-height: calc(100vh - 40px);
+            border-radius: 16px;
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            background:
+                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
+                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
+            box-shadow: 0 28px 60px rgba(0,0,0,0.5);
+            display: grid;
+            grid-template-rows: auto 1fr;
+            overflow: hidden;
+        }
+        .otl-cinematic-prompt-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 18px;
+            border-bottom: 1px solid rgba(56, 61, 86, 0.65);
+        }
+        .otl-cinematic-keyframe-head-left {
+            display: inline-flex;
+            align-items: center;
+            gap: 14px;
+            min-width: 0;
+            flex-wrap: wrap;
+        }
+        .otl-cinematic-keyframe-head-tools {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            justify-content: flex-start;
+            flex-wrap: wrap;
+        }
+        .otl-cinematic-prompt-body {
+            display: grid;
+            grid-template-columns: 240px 1fr;
+            min-height: 0;
+        }
+        .otl-cinematic-prompt-versions {
+            border-right: 1px solid rgba(56, 61, 86, 0.65);
+            padding: 14px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .otl-cinematic-prompt-editor {
+            display: grid;
+            grid-template-rows: 1fr auto;
+            min-height: 0;
+        }
+        .otl-cinematic-prompt-text {
+            width: 100%;
+            height: 100%;
+            border: 0;
+            background: transparent;
+            color: #f3f7ff;
+            resize: none;
+            padding: 18px;
+            line-height: 1.6;
+            outline: none;
+            font-size: 14px;
+            font-family: var(--otl-font-ui);
+        }
+        .otl-cinematic-prompt-footer {
+            border-top: 1px solid rgba(56, 61, 86, 0.65);
+            padding: 14px 18px;
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+        .otl-cinematic-prompt-version-item {
+            border: 1px solid rgba(56, 61, 86, 0.92);
+            border-radius: 12px;
+            background: rgba(15, 16, 24, 0.92);
+            color: #dce7ff;
+            text-align: left;
+            padding: 12px;
+            cursor: pointer;
+        }
+        .otl-cinematic-prompt-version-item.active {
+            border-color: #7666ff;
+            box-shadow: inset 0 0 0 1px rgba(118,102,255,0.26);
+            background: rgba(37, 32, 66, 0.92);
+        }
+        .otl-cinematic-prompt-version-meta {
+            color: #7f92ba;
+            font-size: 11px;
+            margin-top: 6px;
+        }
+        .otl-cinematic-parameter-speech {
+            min-height: 30px;
+            font-size: 11px;
+            resize: none;
+        }
+        .otl-cinematic-mini {
+            display: none;
+            align-items: center;
+            gap: 14px;
+            min-width: 340px;
+            padding-left: 12px;
+        }
+        .otl-cinematic-mini-play {
+            width: 38px;
+            height: 38px;
+            border-radius: 12px;
+            border: 1px solid rgba(72, 92, 135, 0.58);
+            background: rgba(20, 28, 46, 0.95);
+            color: #eef4ff;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+        }
+        .otl-cinematic-mini-timeline {
+            position: relative;
+            flex: 1;
+            height: 40px;
+            border: 1px solid rgba(46, 63, 103, 0.45);
+            border-radius: 999px;
+            background: linear-gradient(180deg, rgba(6,9,18,0.98), rgba(8,11,20,0.98));
+            overflow: hidden;
+        }
+        .otl-cinematic-mini-track,
+        .otl-cinematic-mini-progress {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            height: 6px;
+            border-radius: 999px;
+        }
+        .otl-cinematic-mini-track {
+            left: 12px;
+            right: 12px;
+            background: rgba(83, 104, 148, 0.26);
+        }
+        .otl-cinematic-mini-progress {
+            left: 12px;
+            background: linear-gradient(90deg, rgba(44,117,255,0.88), rgba(120,170,255,0.88));
+            min-width: 6px;
+        }
+        .otl-cinematic-mini-playhead {
+            position: absolute;
+            top: 50%;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #f3f7ff;
+            box-shadow: 0 0 0 4px rgba(47,124,255,0.18);
+            transform: translate(-50%, -50%);
+        }
+        .otl-cinematic-mini-time {
+            min-width: 56px;
+            color: #9ab0da;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        .otl-cinematic-bgm-modal {
+            position: fixed;
+            inset: 0;
+            background: rgba(4, 4, 8, 0.76);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 18px;
+            z-index: 10030;
+            backdrop-filter: blur(16px);
+        }
+        .otl-cinematic-bgm-modal.hidden { display: none; }
+        .otl-cinematic-bgm-panel {
+            width: min(980px, calc(100vw - 24px));
+            max-height: calc(100vh - 24px);
+            border-radius: 16px;
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            background: linear-gradient(180deg, rgba(18, 19, 27, 0.985), rgba(11, 12, 17, 0.99));
+            box-shadow: 0 28px 60px rgba(0,0,0,0.5);
+            display: grid;
+            grid-template-rows: auto 1fr;
+            overflow: hidden;
+        }
+        .otl-cinematic-bgm-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            border-bottom: 1px solid rgba(56, 61, 86, 0.65);
+        }
+        .otl-cinematic-bgm-grid {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 14px;
+            min-height: 0;
+            padding: 14px;
+        }
+        .otl-cinematic-bgm-library,
+        .otl-cinematic-bgm-editor {
+            min-height: 0;
+            border: 1px solid rgba(56, 61, 86, 0.74);
+            border-radius: 12px;
+            background: rgba(10, 12, 18, 0.92);
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .otl-cinematic-bgm-list {
+            min-height: 0;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .otl-cinematic-bgm-item {
+            width: 100%;
+            border: 1px solid rgba(50, 62, 92, 0.64);
+            border-radius: 10px;
+            background: rgba(17, 23, 36, 0.9);
+            color: #ecf3ff;
+            padding: 8px 10px;
+            text-align: left;
+            cursor: pointer;
+            font-family: var(--otl-font-ui);
+            font-size: 12px;
+        }
+        .otl-cinematic-bgm-item.active {
+            border-color: rgba(96, 136, 255, 0.92);
+            box-shadow: inset 0 0 0 1px rgba(96, 136, 255, 0.25);
+        }
+        .otl-cinematic-bgm-item .meta {
+            display: block;
+            color: #8ca2d0;
+            font-size: 10px;
+            margin-top: 4px;
+        }
+        .otl-cinematic-bgm-toolbar {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+        }
+        .otl-cinematic-bgm-list-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .otl-cinematic-bgm-head-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .otl-cinematic-bgm-apply-top {
+            height: 34px;
+            padding: 0 12px;
+            font-size: 12px;
+            border-radius: 10px;
+        }
+        .otl-cinematic-bgm-list-head .otl-cinematic-icon-btn {
+            width: 34px;
+            height: 34px;
+            border-radius: 10px;
+        }
+        .otl-cinematic-bgm-player {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto auto;
+            gap: 8px;
+            align-items: center;
+        }
+        .otl-cinematic-bgm-wave {
+            width: 100%;
+            height: 120px;
+            border-radius: 10px;
+            border: 1px solid rgba(50, 62, 92, 0.64);
+            background: linear-gradient(180deg, rgba(6, 9, 16, 0.98), rgba(8, 12, 22, 0.98));
+            cursor: crosshair;
+        }
+        .otl-cinematic-bgm-range {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
+            gap: 8px;
+            align-items: end;
+        }
+        .otl-cinematic-bgm-params {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 8px;
+            align-items: end;
+        }
+        .otl-cine-record-btn {
+            border: 1px solid rgba(255, 84, 110, 0.48);
+            border-radius: 999px;
+            background: rgba(26, 8, 12, 0.9);
+            color: #ffd9e1;
+            font-weight: 700;
+            font-size: 11px;
+            padding: 7px 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            cursor: pointer;
+        }
+        .otl-cine-record-btn .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff2a4f;
+            box-shadow: 0 0 0 2px rgba(255, 42, 79, 0.18);
+        }
+        .otl-cine-record-btn.hidden { display: none; }
+        .otl-cine-record-timer {
+            min-width: 78px;
+            text-align: right;
+            font-size: 11px;
+            color: #a7bad6;
+        }
+        .otl-cine-record-modal {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(4, 9, 18, 0.72);
+            z-index: 40;
+            padding: 22px;
+        }
+        .otl-cine-record-modal.hidden { display: none; }
+        .otl-cine-record-card {
+            width: min(1160px, calc(100vw - 90px));
+            max-height: calc(100vh - 110px);
+            display: flex;
+            flex-direction: column;
+            border-radius: 18px;
+            border: 1px solid rgba(102, 132, 176, 0.34);
+            background: linear-gradient(180deg, rgba(13, 20, 34, 0.98), rgba(9, 14, 26, 0.98));
+            box-shadow: 0 28px 68px rgba(2, 5, 12, 0.6);
+            overflow: hidden;
+        }
+        .otl-cine-record-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            border-bottom: 1px solid rgba(102, 132, 176, 0.24);
+            gap: 10px;
+        }
+        .otl-cine-record-title { font-size: 30px; font-weight: 800; letter-spacing: -0.01em; }
+        .otl-cine-record-head-actions { display: flex; align-items: center; gap: 8px; }
+        .otl-cine-record-tool-group { position: relative; }
+        .otl-cine-record-popover {
+            position: absolute;
+            top: calc(100% + 8px);
+            right: 0;
+            width: min(360px, calc(100vw - 70px));
+            border-radius: 12px;
+            border: 1px solid rgba(106, 138, 184, 0.32);
+            background: rgba(12, 19, 32, 0.96);
+            box-shadow: 0 18px 48px rgba(3, 6, 16, 0.56);
+            padding: 10px;
+            display: none;
+            z-index: 5;
+        }
+        .otl-cine-record-popover.open { display: block; }
+        .otl-cine-record-pop-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+        .otl-cine-record-pop-close { background: none; border: 0; color: #b8cae6; cursor: pointer; font-size: 18px; }
+        .otl-cine-record-row {
+            display: grid;
+            grid-template-columns: 120px 1fr;
+            align-items: center;
+            gap: 8px;
+            margin-top: 7px;
+            color: #9eb2d1;
+            font-size: 12px;
+        }
+        .otl-cine-record-row select,
+        .otl-cine-record-row input[type="range"],
+        .otl-cine-record-row input[type="number"],
+        .otl-cine-record-row input[type="color"] {
+            width: 100%;
+        }
+        .otl-cine-record-check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #afc0da;
+            margin-top: 8px;
+        }
+        .otl-cine-record-inline {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 8px;
+        }
+        .otl-cine-record-body {
+            padding: 14px 16px;
+            overflow: auto;
+        }
+        .otl-cine-record-section {
+            border: 1px solid rgba(96, 127, 170, 0.28);
+            border-radius: 14px;
+            padding: 12px;
+            background: rgba(14, 21, 36, 0.6);
+        }
+        .otl-cine-record-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; gap: 10px; }
+        .otl-cine-record-section-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #d5e4ff; }
+        .otl-cine-record-section-actions { display: inline-flex; align-items: center; gap: 8px; }
+        .otl-cine-record-pagination { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid rgba(96, 127, 170, 0.32); border-radius: 10px; background: rgba(11, 17, 28, 0.74); }
+        .otl-cine-record-page-btn { width: 30px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+        .otl-cine-record-page-label { min-width: 62px; text-align: center; font-size: 11px; color: #a9bbd7; font-weight: 600; letter-spacing: 0.03em; }
+        .otl-cine-record-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+        }
+        .otl-cine-record-card-item {
+            border: 1px solid rgba(90, 120, 164, 0.34);
+            border-radius: 12px;
+            background: rgba(8, 13, 24, 0.9);
+            overflow: hidden;
+        }
+        .otl-cine-record-video { width: 100%; aspect-ratio: 16 / 9; background: #000; }
+        .otl-cine-record-card-body { padding: 8px 10px 10px; display: grid; gap: 6px; }
+        .otl-cine-record-name { font-size: 13px; font-weight: 700; color: #eaf2ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .otl-cine-record-meta { font-size: 11px; color: #8ea3c2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .otl-cine-record-status {
+            justify-self: start;
+            font-size: 10px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: #c8d6ed;
+            border: 1px solid rgba(118, 141, 174, 0.4);
+            padding: 2px 6px;
+            border-radius: 999px;
+        }
+        .otl-cine-record-status.processing { color: #d8b768; border-color: rgba(216, 183, 104, 0.45); }
+        .otl-cine-record-status.warn { color: #f0a1a1; border-color: rgba(240, 161, 161, 0.45); }
+        .otl-cine-record-actions { display: flex; justify-content: flex-end; }
+        .otl-cine-record-delete { border: 0; background: none; color: #c2d2ea; cursor: pointer; }
+        .otl-cine-record-foot {
+            padding: 10px 16px 14px;
+            border-top: 1px solid rgba(102, 132, 176, 0.22);
+        }
+        .otl-csv-workspace-panel.recording-lock .otl-cinematic-main,
+        .otl-csv-workspace-panel.recording-lock .otl-cinematic-bottom-dock {
+            pointer-events: none;
+            opacity: 0.78;
+        }
+        .otl-cinematic-shell.mini {
+            align-items: flex-end;
+            padding: 16px 16px 90px 96px;
+        }
+        .otl-cinematic-shell.mini .otl-csv-workspace-panel {
+            width: auto;
+            min-width: 520px;
+            height: auto;
+            padding: 14px 16px;
+        }
+        .otl-cinematic-shell.mini .otl-cinematic-main,
+        .otl-cinematic-shell.mini .otl-cinematic-header .otl-cinematic-actions {
+            display: none;
+        }
+        .otl-cinematic-shell.mini .otl-cinematic-mini {
+            display: flex;
+        }
+        @media (max-width: 1280px) {
+            .otl-cinematic-main { grid-template-columns: 280px minmax(0, 1fr); }
+            .otl-cinematic-middle { grid-template-columns: 1fr; }
+            .otl-cinematic-parameter-top,
+            .otl-cinematic-parameter-bottom { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .otl-cinematic-parameter-speech-row { grid-template-columns: minmax(0, 1fr) auto auto; }
+        }
+        @media (max-width: 980px) {
+            .otl-cinematic-main,
+            .otl-cinematic-right,
+            .otl-cinematic-middle,
+            .otl-cinematic-prompt-body,
+            .otl-cinematic-bgm-grid,
+            .otl-cinematic-map-split,
+            .otl-cinematic-grid-inputs { grid-template-columns: 1fr; }
+            .otl-cinematic-right { grid-template-rows: auto auto minmax(260px, 1fr); }
+            .otl-cinematic-parameter-top,
+            .otl-cinematic-parameter-bottom { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .otl-cinematic-parameter-speech-row { grid-template-columns: 1fr; }
+            .otl-cinematic-bgm-player,
+            .otl-cinematic-bgm-range,
+            .otl-cinematic-bgm-params { grid-template-columns: 1fr; }
+            .otl-cine-record-grid { grid-template-columns: 1fr; }
+            .otl-cine-record-title { font-size: 22px; }
+            .otl-cine-record-row { grid-template-columns: 1fr; }
+            .otl-cine-record-section-head { flex-wrap: wrap; }
         }
         .otl-csv-editor {
             width: 100%;
@@ -857,6 +2646,61 @@ const ensureStyle = () => {
         }
         .otl-csv-grid td {
             min-width: 120px;
+        }
+        .otl-csv-grid th.row-action,
+        .otl-csv-grid td.row-action {
+            min-width: 64px;
+            width: 64px;
+            text-align: center;
+            padding: 0;
+        }
+        .otl-csv-grid td.row-action {
+            background: #121625;
+        }
+        .otl-csv-row-tools {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 4px 4px;
+        }
+        .otl-csv-row-index {
+            color: #8fa0c8;
+            font-size: 11px;
+            min-width: 20px;
+            text-align: right;
+        }
+        .otl-csv-row-delete {
+            width: 22px;
+            height: 22px;
+            border-radius: 6px;
+            border: 1px solid #3a445e;
+            background: #171d2b;
+            color: #f08686;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+        }
+        .otl-csv-row-delete:hover {
+            border-color: #e27878;
+            background: rgba(226, 120, 120, 0.16);
+        }
+        .otl-csv-row-delete svg {
+            width: 12px;
+            height: 12px;
+            stroke: currentColor;
+            fill: none;
+            stroke-width: 1.8;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        .otl-csv-grid-empty {
+            padding: 10px;
+            color: var(--otl-text-muted);
+            text-align: center;
+            font-size: 12px;
         }
         .otl-csv-grid-cell {
             width: 100%;
@@ -967,6 +2811,44 @@ const ensureStyle = () => {
             padding: 24px;
         }
         .otl-voice-modal.hidden { display: none; }
+        #${PANEL_ID}.cinematic-only > .otl-voice-modal {
+            z-index: 10010;
+            background: rgba(5, 8, 16, 0.62);
+            backdrop-filter: blur(10px);
+        }
+        #${PANEL_ID}.cinematic-only > .otl-voice-modal .otl-voice-panel {
+            width: min(760px, calc(100vw - 80px));
+            max-height: min(760px, calc(100vh - 80px));
+            border-radius: 18px;
+            border: 1px solid rgba(52, 72, 118, 0.56);
+            background: linear-gradient(180deg, rgba(10,14,24,0.98), rgba(7,10,19,0.98));
+            box-shadow: 0 24px 48px rgba(0,0,0,0.42);
+            padding: 20px;
+            gap: 14px;
+        }
+        .otl-voice-modal.workspace-local {
+            position: absolute;
+            inset: 0;
+            background: transparent;
+            align-items: flex-start;
+            justify-content: flex-end;
+            z-index: 34;
+            padding: 72px 18px 18px;
+            pointer-events: none;
+        }
+        .otl-voice-modal.workspace-local .otl-voice-panel {
+            width: min(760px, calc(100% - 24px));
+            max-height: calc(100% - 24px);
+            border-radius: 16px;
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            background:
+                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
+                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
+            box-shadow: 0 22px 42px rgba(0,0,0,0.36);
+            padding: 18px;
+            gap: 12px;
+            pointer-events: auto;
+        }
         .otl-voice-panel {
             width: min(520px, calc(100vw - 32px));
             max-height: min(720px, calc(100vh - 32px));
@@ -991,6 +2873,28 @@ const ensureStyle = () => {
             padding: 24px;
         }
         .otl-config-modal.hidden { display: none; }
+        .otl-config-modal.workspace-local {
+            position: absolute;
+            inset: 0;
+            background: transparent;
+            align-items: flex-start;
+            justify-content: flex-end;
+            z-index: 34;
+            padding: 72px 18px 18px;
+            pointer-events: none;
+        }
+        .otl-config-modal.workspace-local .otl-config-panel {
+            width: min(420px, calc(100% - 24px));
+            max-height: calc(100% - 24px);
+            border-radius: 16px;
+            border: 1px solid rgba(56, 61, 86, 0.95);
+            background:
+                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
+                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
+            box-shadow: 0 22px 42px rgba(0,0,0,0.36);
+            padding: 16px;
+            pointer-events: auto;
+        }
         .otl-config-panel {
             width: min(420px, calc(100vw - 32px));
             border: 1px solid var(--otl-border);
@@ -1084,6 +2988,14 @@ const escapeCsv = (value: string | number) => {
     return `"${text.replace(/"/g, '""')}"`;
 };
 
+const escapeHtmlAttr = (value: string | number) => String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+const countSpeechChars = (value: string) => (String(value || '').match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length;
+
 const normalizeCsvVoiceConfig = (config?: Partial<CsvVoiceConfigState> | null): CsvVoiceConfigState => {
     const model = TTS_VOICE_OPTIONS_BY_MODEL[String(config?.model || '').trim()]
         ? String(config?.model || '').trim()
@@ -1095,10 +3007,10 @@ const normalizeCsvVoiceConfig = (config?: Partial<CsvVoiceConfigState> | null): 
     const voicePool = Array.isArray(config?.voicePool)
         ? Array.from(new Set(config.voicePool.map((item) => String(item || '').trim()).filter((item) => options.some((opt) => opt.value === item))))
         : [];
-    const enabled = Boolean(config?.enabled) && voicePool.length > 0;
+    const enabled = Boolean(config?.enabled);
     return {
         enabled,
-        mode: enabled ? 'shuffle_round_robin' : 'fixed',
+        mode: enabled && voicePool.length > 0 ? 'shuffle_round_robin' : 'fixed',
         model,
         fixedVoice,
         voicePool
@@ -1132,6 +3044,31 @@ const formatCsvTimingSummary = (summary?: CsvTimingSummary | null) => {
         estimated,
         minimum
     ].filter(Boolean).join(' | ');
+};
+
+const isAudioFileName = (value: string) => /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(String(value || '').trim());
+
+const clampMusicRate = (value: number) => clamp(Number.isFinite(value) ? value : 1, 0.5, 2);
+
+const normalizeMusicDuration = (value: number | null | undefined) => {
+    if (!Number.isFinite(Number(value))) return null;
+    const n = Number(value);
+    if (n <= 0) return null;
+    return clamp(n, 0.2, 600);
+};
+
+const formatSecondsLabel = (value: number) => {
+    const sec = Math.max(0, Number(value) || 0);
+    const m = Math.floor(sec / 60);
+    const s = sec - m * 60;
+    return `${m}:${s.toFixed(2).padStart(5, '0')}`;
+};
+
+const cinematicBgmEffectiveRate = (bgm: Pick<CinematicBgmConfig, 'audioStartSeconds' | 'audioEndSeconds' | 'audioPlaybackRate' | 'targetMusicDurationSeconds'>) => {
+    const clipDuration = Math.max(0.001, Number(bgm.audioEndSeconds || 0) - Number(bgm.audioStartSeconds || 0));
+    const target = normalizeMusicDuration(bgm.targetMusicDurationSeconds);
+    if (target) return clampMusicRate(clipDuration / Math.max(0.001, target));
+    return clampMusicRate(Number(bgm.audioPlaybackRate) || 1);
 };
 
 const describeTimingValue = (value: number | null | undefined) => {
@@ -1192,9 +3129,112 @@ class TourLoaderPanel implements TourLoaderController {
     private readonly csvContentModal: HTMLDivElement;
     private readonly csvContentTitleEl: HTMLDivElement;
     private readonly csvContentInput: HTMLTextAreaElement;
+    private readonly cinematicCwCsvWorkspaceModal: HTMLDivElement;
+    private readonly cinematicCwCsvWorkspacePanel: HTMLDivElement;
+    private readonly cinematicCwCsvVersionListEl: HTMLDivElement;
+    private readonly cinematicCwCsvGridWrapEl: HTMLDivElement;
+    private readonly cinematicCwCsvGridTableEl: HTMLTableElement;
+    private readonly cinematicCwCsvEditorInput: HTMLTextAreaElement;
+    private readonly cinematicCwCsvWorkspaceStatusEl: HTMLDivElement;
+    private readonly cinematicCwCsvTimingSummaryEl: HTMLDivElement;
+    private readonly cinematicCwCsvVoiceEnabledInput: HTMLInputElement;
+    private readonly cinematicCwCsvVoiceSummaryEl: HTMLDivElement;
+    private readonly cinematicCwCsvTimingEnabledInput: HTMLInputElement;
+    private readonly cinematicCwCsvTimingInput: HTMLInputElement;
+    private readonly cinematicCwCsvTimingModal: HTMLDivElement;
+    private readonly cinematicCwCsvTimingMinimumEl: HTMLDivElement;
+    private readonly cinematicCwCsvTimingEstimatedEl: HTMLDivElement;
+    private readonly cinematicCwCsvVoiceModal: HTMLDivElement;
+    private readonly cinematicCwCsvVoiceModelSelect: HTMLSelectElement;
+    private readonly cinematicCwCsvVoiceFixedSelect: HTMLSelectElement;
+    private readonly cinematicCwCsvVoiceListEl: HTMLDivElement;
+    private readonly cinematicCwCsvContentModal: HTMLDivElement;
+    private readonly cinematicCwCsvContentTitleEl: HTMLDivElement;
+    private readonly cinematicCwCsvContentInput: HTMLTextAreaElement;
+    private readonly cinematicWorkspaceModal: HTMLDivElement;
+    private readonly cinematicWorkspacePanel: HTMLDivElement;
+    private readonly cinematicVersionListEl: HTMLDivElement;
+    private readonly cinematicStatusEl: HTMLDivElement;
+    private readonly cinematicPoiListEl: HTMLDivElement;
+    private readonly cinematicTimelineEl: HTMLDivElement;
+    private readonly cinematicKeyframeModal: HTMLDivElement;
+    private readonly cinematicKeyframeEditorBodyEl: HTMLDivElement;
+    private readonly cinematicShotModal: HTMLDivElement;
+    private readonly cinematicShotEditorBodyEl: HTMLDivElement;
+    private readonly cinematicTopCanvas: HTMLCanvasElement;
+    private readonly cinematicFrontCanvas: HTMLCanvasElement;
+    private readonly cinematicPreviewImageEl: HTMLImageElement;
+    private readonly cinematicCurrentKfLabelEl: HTMLDivElement;
+    private readonly cinematicSimplePromptInput: HTMLTextAreaElement;
+    private readonly cinematicPlannerPromptInput: HTMLTextAreaElement;
+    private readonly cinematicSceneInput: HTMLTextAreaElement;
+    private readonly cinematicStoryInput: HTMLTextAreaElement;
+    private readonly cinematicStyleInput: HTMLInputElement;
+    private readonly cinematicDurationInput: HTMLInputElement;
+    private readonly cinematicMiniToggleBtn: HTMLButtonElement;
+    private readonly cinematicMiniPlayBtn: HTMLButtonElement;
+    private readonly cinematicMiniTimelineEl: HTMLDivElement;
+    private readonly cinematicMiniTimeEl: HTMLDivElement;
+    private readonly cinematicSimplePromptModal: HTMLDivElement;
+    private readonly cinematicComplexPromptModal: HTMLDivElement;
+    private readonly cinematicSimpleVersionListEl: HTMLDivElement;
+    private readonly cinematicComplexVersionListEl: HTMLDivElement;
+    private readonly cinematicSimplePromptEditor: HTMLTextAreaElement;
+    private readonly cinematicComplexPromptEditor: HTMLTextAreaElement;
+    private readonly cinematicBgmModal: HTMLDivElement;
+    private readonly cinematicBgmSearchInput: HTMLInputElement;
+    private readonly cinematicBgmLibraryEl: HTMLDivElement;
+    private readonly cinematicBgmFolderInput: HTMLInputElement;
+    private readonly cinematicBgmFileInput: HTMLInputElement;
+    private readonly cinematicMediaFileInput: HTMLInputElement;
+    private readonly cinematicBgmPlayerBtn: HTMLButtonElement;
+    private readonly cinematicBgmProgressInput: HTMLInputElement;
+    private readonly cinematicBgmTimeEl: HTMLDivElement;
+    private readonly cinematicBgmRateInput: HTMLSelectElement;
+    private readonly cinematicBgmWaveCanvas: HTMLCanvasElement;
+    private readonly cinematicBgmStartInput: HTMLInputElement;
+    private readonly cinematicBgmEndInput: HTMLInputElement;
+    private readonly cinematicBgmClipDurationEl: HTMLDivElement;
+    private readonly cinematicBgmClipPlayBtn: HTMLButtonElement;
+    private readonly cinematicBgmRecommendBtn: HTMLButtonElement;
+    private readonly cinematicBgmManualRateInput: HTMLInputElement;
+    private readonly cinematicBgmTargetDurationInput: HTMLInputElement;
+    private readonly cinematicBgmEffectiveRateEl: HTMLDivElement;
+    private readonly cinematicRecordingModalEl: HTMLDivElement;
+    private readonly cinematicRecordBtn: HTMLButtonElement;
+    private readonly cinematicRecordPauseBtn: HTMLButtonElement;
+    private readonly cinematicRecordStopBtn: HTMLButtonElement;
+    private readonly cinematicRecordTimerEl: HTMLSpanElement;
+    private readonly cinematicRecordingModalStatusEl: HTMLDivElement;
+    private readonly cinematicRecordingFrameRateSelect: HTMLSelectElement;
+    private readonly cinematicRecordingQualitySelect: HTMLSelectElement;
+    private readonly cinematicRecordingCompressionSelect: HTMLSelectElement;
+    private readonly cinematicRecordingIncludeTtsInput: HTMLInputElement;
+    private readonly cinematicRecordingAutoPlayInput: HTMLInputElement;
+    private readonly cinematicRecordingStopWithPlaybackInput: HTMLInputElement;
+    private readonly cinematicRecordingHidePanelInput: HTMLInputElement;
+    private readonly cinematicRecordingDisableInterruptsInput: HTMLInputElement;
+    private readonly cinematicRecordingMasterVolumeInput: HTMLInputElement;
+    private readonly cinematicRecordingTtsVolumeInput: HTMLInputElement;
+    private readonly cinematicRecordingBgmVolumeInput: HTMLInputElement;
+    private readonly cinematicRecordingSubtitlesEnabledInput: HTMLInputElement;
+    private readonly cinematicRecordingSubtitleFontSelect: HTMLSelectElement;
+    private readonly cinematicRecordingSubtitleSizeInput: HTMLInputElement;
+    private readonly cinematicRecordingSubtitleColorInput: HTMLInputElement;
+    private readonly cinematicRecordingMasterVolumeOut: HTMLSpanElement;
+    private readonly cinematicRecordingTtsVolumeOut: HTMLSpanElement;
+    private readonly cinematicRecordingBgmVolumeOut: HTMLSpanElement;
+    private readonly cinematicRecordingSubtitleSizeOut: HTMLSpanElement;
+    private readonly cinematicRecordingResultsEl: HTMLDivElement;
+    private readonly cinematicRecordingResultsEmptyEl: HTMLDivElement;
+    private readonly cinematicRecordingSyncToModelDbBtn: HTMLButtonElement;
+    private readonly cinematicRecordingPagePrevBtn: HTMLButtonElement;
+    private readonly cinematicRecordingPageNextBtn: HTMLButtonElement;
+    private readonly cinematicRecordingPageLabelEl: HTMLDivElement;
     private readonly stopBtn: HTMLButtonElement;
     private readonly playToggleBtn: HTMLButtonElement;
     private readonly globalSaveBtn: HTMLButtonElement;
+    private readonly hotspotController: HotspotController;
 
     private modelFilename: string | null = null;
     private modelReady = false;
@@ -1206,6 +3246,7 @@ class TourLoaderPanel implements TourLoaderController {
     private job: JobState = { jobId: null, paused: false, streaming: false };
     private eventSource: EventSource | null = null;
     private csvExportEventSource: EventSource | null = null;
+    private cinematicEventSource: EventSource | null = null;
     private drag: {
         active: boolean;
         pointerId: number;
@@ -1242,6 +3283,136 @@ class TourLoaderPanel implements TourLoaderController {
     private csvVoiceConfig: CsvVoiceConfigState = normalizeCsvVoiceConfig(null);
     private csvTimingConfig: CsvTimingConfigState = normalizeCsvTimingConfig(null);
     private csvTimingSummary: CsvTimingSummary | null = null;
+    private cinematicCwCsvVersions: CsvVersionSummary[] = [];
+    private selectedCinematicCwCsvVersionId: number | null = null;
+    private cinematicCwCsvEditorDirty = false;
+    private cinematicCwCsvGridHeaders: string[] = [];
+    private cinematicCwCsvGridRows: string[][] = [];
+    private cinematicCwCsvContentEditTarget: { row: number; col: number } | null = null;
+    private cinematicCwCsvWorkspaceFullscreen = false;
+    private cinematicCwCsvWorkspaceDrag = { active: false, pointerId: -1, startX: 0, startY: 0, left: 0, top: 0 };
+    private cinematicCwCsvVoiceConfig: CsvVoiceConfigState = normalizeCsvVoiceConfig(null);
+    private cinematicCwCsvTimingConfig: CsvTimingConfigState = normalizeCsvTimingConfig(null);
+    private cinematicCwCsvTimingSummary: CsvTimingSummary | null = null;
+    private cinematicVersions: CinematicVersionSummary[] = [];
+    private selectedCinematicVersionId: number | null = null;
+    private cinematicSimplePrompt = DEFAULT_CINEMATIC_SIMPLE_PROMPT;
+    private cinematicPlannerPrompt = DEFAULT_CINEMATIC_PLANNER_PROMPT;
+    private cinematicSceneDescription = '';
+    private cinematicStoryBackground = '';
+    private cinematicStyleText = 'cinematic one take';
+    private cinematicTargetDurationSec = 14;
+    private cinematicSelectedPoiIds: string[] = [];
+    private cinematicPlan: CinematicPlan | null = null;
+    private cinematicWorkspaceDrag = { active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, left: 0, top: 0 };
+    private cinematicWorkspaceFloatPos = { left: 0, top: 0, initialized: false };
+    private cinematicWorkspaceFullscreen = false;
+    private cinematicMiniMode = false;
+    private cinematicHideRootOnClose = false;
+    private cinematicShowRouteOverlay = false;
+    private cinematicPoiExpanded = false;
+    private cinematicBgmLibrary: CinematicBgmLibraryItem[] = [];
+    private cinematicBgmFilter = '';
+    private cinematicBgmSelection: CinematicBgmConfig | null = null;
+    private cinematicBgmPreviewAudio: HTMLAudioElement | null = null;
+    private cinematicBgmLoadedAudioPath: string | null = null;
+    private cinematicBgmPreviewRaf = 0;
+    private cinematicBgmWaveform: number[] = [];
+    private cinematicBgmAudioDurationSec = 0;
+    private cinematicBgmClipPreviewPlaying = false;
+    private cinematicBgmObjectUrls: string[] = [];
+    private cinematicBgmWaveDrag = { active: false, pointerId: -1, mode: 'range' as 'range' | 'start' | 'end', anchorSec: 0 };
+    private selectedCinematicShotId: string | null = null;
+    private selectedCinematicKeyframeId: string | null = null;
+    private cinematicPreview = { playing: false, paused: false, rafId: 0, shotIndex: 0, keyframeIndex: 0, segmentStartMs: 0, segmentDurationMs: 0 };
+    private cinematicCurrentTimeSec = 0;
+    private cinematicRecordingSettings: CinematicRecordingSettings = {
+        frameRate: 24,
+        videoBitsPerSecond: 18_000_000,
+        audioBitsPerSecond: 256_000,
+        mp4CompressionPreset: 'target_10mb',
+        includeTts: true,
+        autoPlay: true,
+        stopWithPlayback: true,
+        hidePanelDuringRecording: false,
+        disableInterrupts: true,
+        masterVolume: 1,
+        ttsVolume: 1,
+        bgmVolume: 0.5,
+        subtitlesEnabled: true,
+        subtitleFont: 'PingFang SC',
+        subtitleFontSize: 26,
+        subtitleColor: '#d7a733'
+    };
+    private activeCinematicRecording: CinematicRecordingRuntime | null = null;
+    private cinematicRecordTimerId = 0;
+    private cinematicRecordingDbPromise: Promise<IDBDatabase> | null = null;
+    private cinematicRecordingResults: CinematicStoredRecordingEntry[] = [];
+    private cinematicRecordingPageIndex = 0;
+    private readonly cinematicRecordingPageSize = 3;
+    private cinematicRecordingObjectUrls = new Map<string, string>();
+    private readonly recoveringCinematicRecordingIds = new Set<string>();
+    private cinematicRecordingAudioMix: CinematicRecordingAudioMixRuntime | null = null;
+    private cinematicRecordingCompositorCanvas: HTMLCanvasElement | null = null;
+    private cinematicRecordingCompositorCtx: CanvasRenderingContext2D | null = null;
+    private cinematicRecordingCompositorRaf = 0;
+    private cinematicRecordingSubtitleText = '';
+    private cinematicRecordingHideRootOnStop = false;
+    private cinematicRecordingDisableUi = false;
+    private cinematicRecordingBackfillInProgress = false;
+    private cinematicTimelineDrag = { active: false, pointerId: -1 };
+    private cinematicTimelineKeyframeDrag = { active: false, pointerId: -1, keyframeId: '', shotId: '' };
+    private cinematicMediaPick = {
+        active: false,
+        keyframeId: '',
+        restoreMiniMode: false,
+        reopenKeyframeEditor: false,
+        cleanup: null as (() => void) | null
+    };
+    private cinematicMediaResize = {
+        active: false,
+        keyframeId: '',
+        restoreMiniMode: false,
+        reopenKeyframeEditor: false,
+        cleanup: null as (() => void) | null,
+        pointerDown: false,
+        startClientX: 0,
+        startScale: 1
+    };
+    private cinematicMediaFileTargetKeyframeId = '';
+    private cinematicMediaPlace = {
+        active: false,
+        keyframeId: '',
+        pointerDown: false,
+        startClientX: 0,
+        startClientY: 0,
+        currentClientX: 0,
+        currentClientY: 0,
+        startWorld: null as HotspotWorldPoint | null,
+        restoreMiniMode: false,
+        reopenKeyframeEditor: false,
+        cleanup: null as (() => void) | null
+    };
+    private cinematicMediaEditor = {
+        active: false,
+        keyframeId: '',
+        mode: 'move' as 'move' | 'rotate' | 'scale',
+        selected: false,
+        restoreMiniMode: false,
+        reopenKeyframeEditor: false,
+        overlayEl: null as HTMLDivElement | null,
+        pointerDown: false,
+        pointerId: -1,
+        dragMode: null as null | 'move' | 'rotate' | 'scale',
+        cleanup: null as (() => void) | null,
+        startClientX: 0,
+        startClientY: 0,
+        startAnchor: { x: 0, y: 0, z: 0 },
+        startYaw: 0,
+        startPitch: 0,
+        startRoll: 0,
+        startScale: 1
+    };
     private promptEditorContext: PromptEditorContext = { scope: 'global' };
     private batchProgress = { index: 0, total: 0, poiId: '' };
     private playback = {
@@ -1259,6 +3430,23 @@ class TourLoaderPanel implements TourLoaderController {
 
     constructor(private readonly options: TourLoaderOptions) {
         ensureStyle();
+        this.hotspotController = createHotspotController({
+            getModelFilename: () => this.modelFilename,
+            getPoiById: (poiId: string) => this.pois.find((poi) => poi.poiId === poiId) || null,
+            moveToPoi: async (poiId: string) => {
+                const poi = this.pois.find((item) => item.poiId === poiId);
+                if (!poi) return;
+                await this.moveToPoi(poi, 1);
+                this.hotspotController.activatePoi(poiId);
+            },
+            captureScreenshotPng: this.options.captureScreenshotPng,
+            saveState: (reason: string) => this.saveState(reason),
+            setStatus: (text: string) => this.setStatus(text),
+            pickWorldPointAtScreen: this.options.pickWorldPointAtScreen,
+            projectWorldToScreen: this.options.projectWorldToScreen,
+            resolveAssetUrl: this.options.resolveAssetUrl,
+            showEmbeddedMedia: this.options.showEmbeddedMedia
+        });
         this.root = document.createElement('div');
         this.root.id = PANEL_ID;
         this.root.className = 'hidden';
@@ -1308,6 +3496,7 @@ class TourLoaderPanel implements TourLoaderController {
                     <div class="otl-step-head">
                         <span class="otl-badge">2</span>POI
                         <div class="otl-step-actions">
+                            <button class="otl-icon-btn" data-act="goto-selected" title="Go To Selected POI">↗</button>
                             <button class="otl-icon-btn" data-act="update-current" title="Update to Current View">↺</button>
                             <button class="otl-icon-btn" data-act="poi-delete" title="Delete POI">🗑</button>
                         </div>
@@ -1541,6 +3730,398 @@ class TourLoaderPanel implements TourLoaderController {
                     </div>
                 </div>
             </div>
+            <div class="otl-settings-modal otl-cinematic-shell hidden" data-role="cinematic-workspace-modal">
+                <div class="otl-csv-workspace-panel" data-role="cinematic-workspace-panel">
+                    <div class="otl-cinematic-header otl-csv-workspace-drag-handle" data-role="cinematic-workspace-drag-handle">
+                        <div class="otl-cinematic-brand"><span class="otl-cinematic-badge">CINE</span><div class="otl-cinematic-title-group"><span class="otl-cinematic-title">Cinematic Workspace</span><button class="otl-cinematic-mini-toggle" data-act="cinematic-mini-mode" type="button">Mini</button></div></div>
+                        <div class="otl-cinematic-actions">
+                            <span class="otl-cine-record-timer" data-role="cinematic-record-timer"></span>
+                            <button class="otl-cine-record-btn" data-act="cinematic-record-open" title="Open Recording"><span class="dot"></span><span>Rec</span></button>
+                            <button class="otl-cine-record-btn hidden" data-act="cinematic-record-pause" title="Pause recording"><span>Pause</span></button>
+                            <button class="otl-cine-record-btn hidden" data-act="cinematic-record-stop" title="Stop recording"><span>Stop</span></button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-open-keyframe-editor" title="Key Frame Settings">${CINE_ICON_MAP}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-open-shot-editor" title="Shot Settings">${CINE_ICON_SLIDERS}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-open-bgm" title="BGM">${CINE_ICON_MUSIC}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="csv-voice-config" title="TTS Voice Settings">${CSV_ICON_VOICE}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-preview" title="Preview">${CINE_ICON_PLAY}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-save" title="Save">${CINE_ICON_SAVE}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-save-new" title="Save Version">${CINE_ICON_SAVE_AS}</button>
+                            <button class="otl-cinematic-icon-btn primary" data-act="cinematic-open-cw-csv" title="Generate CSV">${CINE_ICON_COMPILE}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-workspace-fullscreen" title="Fullscreen">${CSV_ICON_FULLSCREEN}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-workspace-close" title="Close">${CSV_ICON_CLOSE}</button>
+                        </div>
+                        <div class="otl-cinematic-mini">
+                            <button class="otl-cinematic-mini-play" data-act="cinematic-mini-play" title="Play or Pause">${CINE_ICON_PLAY}</button>
+                            <div class="otl-cinematic-mini-timeline" data-role="cinematic-mini-timeline"></div>
+                            <div class="otl-cinematic-mini-time" data-role="cinematic-mini-time">0.0s</div>
+                        </div>
+                    </div>
+                    <div class="otl-cinematic-main">
+                        <div class="otl-cinematic-left">
+                            <div class="otl-cinematic-pane">
+                                <div class="otl-cinematic-section-head">
+                                    <div class="otl-cinematic-section-title"><span class="otl-cinematic-step-badge">HISTORY</span><span>Versions</span></div>
+                                    <div class="otl-cinematic-subactions">
+                                        <button class="otl-cinematic-icon-btn" data-act="cinematic-version-refresh" title="Refresh Versions">${CINE_ICON_REFRESH}</button>
+                                        <button class="otl-cinematic-icon-btn" data-act="cinematic-version-delete" title="Delete Current Version">${CSV_ICON_DELETE}</button>
+                                    </div>
+                                </div>
+                                <div class="otl-csv-version-list" data-role="cinematic-version-list"></div>
+                            </div>
+                            <div class="otl-cinematic-pane control-pane">
+                                <div class="otl-cinematic-section-head">
+                                    <div class="otl-cinematic-section-title"><span class="otl-cinematic-step-badge">STEP 1</span><span>POIs</span></div>
+                                    <div class="otl-cinematic-subactions">
+                                        <button class="otl-cinematic-icon-btn" data-act="cinematic-open-simple-prompt" title="Open Simple Prompt">${CINE_ICON_GEAR}</button>
+                                        <button class="otl-cinematic-icon-btn" data-act="cinematic-generate-prompt" title="Generate Prompt">${CINE_ICON_MAGIC}</button>
+                                        <button class="otl-cinematic-icon-btn" data-act="cinematic-open-complex-prompt" title="Open Complex Prompt">${CINE_ICON_GEAR}</button>
+                                    </div>
+                                </div>
+                                    <div class="otl-cinematic-duration-label">Duration</div>
+                                    <div class="otl-cinematic-duration-row">
+                                    <input class="otl-input" data-role="cinematic-duration-input" type="number" min="4" max="180" step="1" placeholder="Duration" />
+                                    <button class="otl-btn primary" data-act="cinematic-generate-plan">Generate Timeline</button>
+                                    </div>
+                                <div class="otl-cinematic-poi-box">
+                                    <button class="otl-cinematic-poi-trigger" type="button" data-act="cinematic-toggle-pois"><span>SELECT POI</span><span data-role="cinematic-poi-chevron">${CINE_ICON_CHEVRON}</span></button>
+                                    <div class="otl-cinematic-poi-items" data-role="cinematic-poi-list"></div>
+                                </div>
+                                <div style="display:none;">
+                                    <textarea class="otl-prompt-input" data-role="cinematic-simple-prompt"></textarea>
+                                    <textarea class="otl-prompt-input" data-role="cinematic-planner-prompt"></textarea>
+                                </div>
+                                <div style="display:none;">
+                                    <textarea data-role="cinematic-scene-input"></textarea>
+                                    <textarea data-role="cinematic-story-input"></textarea>
+                                    <input data-role="cinematic-style-input" />
+                                </div>
+                                <div class="otl-muted" data-role="cinematic-workspace-status" style="margin-top:12px;">Ready</div>
+                            </div>
+                        </div>
+                        <div class="otl-cinematic-right">
+                            <div class="otl-cinematic-middle">
+                                <div class="otl-cinematic-pane map-pane">
+                                    <div class="otl-cinematic-map-meta">
+                                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_MAP}</span><span>Map View</span></div>
+                                        <div class="otl-cinematic-map-actions"><div class="otl-cinematic-map-current" data-role="cinematic-current-kf-label">K1 (t=0.00s)</div><button class="otl-cinematic-route-toggle" data-act="cinematic-toggle-route" type="button">Route Off</button></div>
+                                    </div>
+                                    <div class="otl-cinematic-map-split">
+                                        <div class="otl-map-box otl-cinematic-map-box">
+                                            <div class="otl-map-label">TopView (position + yaw)</div>
+                                            <canvas width="260" height="210" data-role="cinematic-top-canvas"></canvas>
+                                            <div class="otl-map-controls">
+                                                <button class="otl-icon-btn" data-act="cinematic-top-zoom-in" title="Top Zoom In">+</button>
+                                                <button class="otl-icon-btn" data-act="cinematic-top-zoom-out" title="Top Zoom Out">−</button>
+                                                <button class="otl-icon-btn" data-act="cinematic-top-center" title="Center Top">◎</button>
+                                            </div>
+                                        </div>
+                                        <div class="otl-map-box otl-cinematic-map-box">
+                                            <div class="otl-map-label">FrontView (pitch)</div>
+                                            <canvas width="260" height="210" data-role="cinematic-front-canvas"></canvas>
+                                            <div class="otl-map-controls">
+                                                <button class="otl-icon-btn" data-act="cinematic-front-zoom-in" title="Front Zoom In">+</button>
+                                                <button class="otl-icon-btn" data-act="cinematic-front-zoom-out" title="Front Zoom Out">−</button>
+                                                <button class="otl-icon-btn" data-act="cinematic-front-center" title="Center Front">◎</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="otl-cinematic-pane preview-pane">
+                                    <div class="otl-cinematic-map-meta">
+                                        <div class="otl-cinematic-section-title"><span>2D Preview</span></div>
+                                    </div>
+                                    <div class="otl-cinematic-preview-box">
+                                        <div class="otl-cinematic-preview-wrap">
+                                            <img data-role="cinematic-preview-image" alt="Current camera preview" />
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="otl-cinematic-bottom-dock">
+                            <div class="otl-cinematic-pane timeline-pane">
+                                <div class="otl-cinematic-timeline-frame">
+                                    <div class="otl-cinematic-ruler-zoom"><button class="otl-cinematic-icon-btn" data-act="cinematic-timeline-zoom-out" title="Zoom Out">${CINE_ICON_MINUS}</button><input class="otl-cinematic-zoom-range" data-role="cinematic-timeline-zoom" type="range" min="80" max="260" step="10" value="150" /><button class="otl-cinematic-icon-btn" data-act="cinematic-timeline-zoom-in" title="Zoom In">${CINE_ICON_PLUS}</button></div>
+                                    <div class="otl-cinematic-timeline" data-role="cinematic-timeline"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="otl-cinematic-editor-modal hidden" data-role="cinematic-keyframe-modal">
+                            <div class="otl-cinematic-editor-panel">
+                                <div class="otl-cinematic-prompt-head">
+                                    <div class="otl-cinematic-keyframe-head-left">
+                                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_MAP}</span><span>Key Frame</span></div>
+                                        <div class="otl-cinematic-keyframe-head-tools">
+                                            <span class="otl-cinematic-step-badge">3D Object</span>
+                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="pick" data-act="cinematic-kf-media-pick-main">Place On Main View</button>
+                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="edit" data-act="cinematic-kf-media-toggle-editor">Edit 3D Object In Main View</button>
+                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="move" data-act="cinematic-kf-media-mode-move">Move</button>
+                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="rotate" data-act="cinematic-kf-media-mode-rotate">Rotate</button>
+                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="scale" data-act="cinematic-kf-media-mode-scale">Scale</button>
+                                        </div>
+                                    </div>
+                                    <button class="otl-cinematic-icon-btn" data-act="cinematic-keyframe-editor-close" title="Close">${CSV_ICON_CLOSE}</button>
+                                </div>
+                                <div class="otl-cinematic-editor-body" data-role="cinematic-keyframe-editor-body"></div>
+                            </div>
+                        </div>
+                        <div class="otl-cinematic-editor-modal hidden" data-role="cinematic-shot-modal">
+                            <div class="otl-cinematic-editor-panel">
+                                <div class="otl-cinematic-prompt-head">
+                                    <div class="otl-cinematic-section-title"><span>${CINE_ICON_SLIDERS}</span><span>Shot / Stage</span></div>
+                                    <div class="otl-cinematic-subactions"><button class="otl-cinematic-icon-btn" data-act="cinematic-delete-keyframe" title="Delete Keyframe">${CSV_ICON_DELETE}</button><button class="otl-cinematic-icon-btn" data-act="cinematic-shot-editor-close" title="Close">${CSV_ICON_CLOSE}</button></div>
+                                </div>
+                                <div class="otl-cinematic-editor-body" data-role="cinematic-shot-editor-body"></div>
+                            </div>
+                        </div>
+                        <div class="otl-cine-record-modal hidden" data-role="cinematic-recording-modal">
+                            <div class="otl-cine-record-card">
+                                <div class="otl-cine-record-head">
+                                    <div class="otl-cine-record-title">Recording</div>
+                                    <div class="otl-cine-record-head-actions">
+                                        <button class="otl-cine-record-btn" type="button" data-record-modal="start" title="Start Recording"><span class="dot"></span><span>Rec</span></button>
+                                        <div class="otl-cine-record-tool-group">
+                                            <button class="otl-cinematic-icon-btn" type="button" data-record-popover-trigger="video" title="Video Settings">${CINE_ICON_MAP}</button>
+                                            <section class="otl-cine-record-popover" data-record-popover="video">
+                                                <div class="otl-cine-record-pop-head"><div class="otl-cinematic-section-title">Video</div><button class="otl-cine-record-pop-close" type="button" data-record-popover-close="video">×</button></div>
+                                                <div class="otl-cine-record-row"><label>Frame Rate</label><select data-record="frame-rate"><option value="24" selected>24 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select></div>
+                                                <div class="otl-cine-record-row"><label>Quality</label><select data-record="quality"><option value="standard" selected>Standard 18 Mbps</option><option value="high">High 28 Mbps</option><option value="ultra">Ultra 40 Mbps</option></select></div>
+                                                <div class="otl-cine-record-row"><label>MP4 Compression</label><select data-record="compression"><option value="original">Original</option><option value="fast_export">Fast Export</option><option value="balanced">Balanced</option><option value="archive_smallest">Archive Smallest</option><option value="target_10mb" selected>Target 10MB</option></select></div>
+                                                <label class="otl-cine-record-check"><input type="checkbox" data-record="auto-play" checked />Auto-start preview when recording begins</label>
+                                                <label class="otl-cine-record-check"><input type="checkbox" data-record="stop-with-playback" checked />Stop recording automatically when preview finishes</label>
+                                                <label class="otl-cine-record-check"><input type="checkbox" data-record="hide-panel" />Temporarily hide cinematic workspace during recording</label>
+                                            </section>
+                                        </div>
+                                        <div class="otl-cine-record-tool-group">
+                                            <button class="otl-cinematic-icon-btn" type="button" data-record-popover-trigger="audio" title="Audio Settings">${CINE_ICON_VOLUME}</button>
+                                            <section class="otl-cine-record-popover" data-record-popover="audio">
+                                                <div class="otl-cine-record-pop-head"><div class="otl-cinematic-section-title">Audio</div><button class="otl-cine-record-pop-close" type="button" data-record-popover-close="audio">×</button></div>
+                                                <label class="otl-cine-record-check"><input type="checkbox" data-record="include-tts" checked />Capture system TTS narration</label>
+                                                <label class="otl-cine-record-check"><input type="checkbox" data-record="disable-interrupts" checked />Disable timeline edits while recording</label>
+                                                <div class="otl-cine-record-row"><label>Master Volume</label><div class="otl-cine-record-inline"><input type="range" min="0" max="100" value="100" data-record="master-volume" /><span data-record="master-volume-out">100%</span></div></div>
+                                                <div class="otl-cine-record-row"><label>TTS Volume</label><div class="otl-cine-record-inline"><input type="range" min="0" max="100" value="100" data-record="tts-volume" /><span data-record="tts-volume-out">100%</span></div></div>
+                                                <div class="otl-cine-record-row"><label>BGM Volume</label><div class="otl-cine-record-inline"><input type="range" min="0" max="100" value="50" data-record="bgm-volume" /><span data-record="bgm-volume-out">50%</span></div></div>
+                                            </section>
+                                        </div>
+                                        <div class="otl-cine-record-tool-group">
+                                            <button class="otl-cinematic-icon-btn" type="button" data-record-popover-trigger="subtitle" title="Subtitle Settings">${CINE_ICON_PROMPT}</button>
+                                            <section class="otl-cine-record-popover" data-record-popover="subtitle">
+                                                <div class="otl-cine-record-pop-head"><div class="otl-cinematic-section-title">Subtitles</div><button class="otl-cine-record-pop-close" type="button" data-record-popover-close="subtitle">×</button></div>
+                                                <label class="otl-cine-record-check"><input type="checkbox" data-record="subtitles-enabled" checked />Burn subtitles into recording</label>
+                                                <div class="otl-cine-record-row"><label>Font</label><select data-record="subtitle-font"><option value="PingFang SC" selected>PingFang SC Semibold</option><option value="Source Han Sans SC">Source Han Sans SC SemiBold</option><option value="Noto Sans SC">Noto Sans SC Medium</option></select></div>
+                                                <div class="otl-cine-record-row"><label>Font Size</label><div class="otl-cine-record-inline"><input type="range" min="24" max="64" value="26" data-record="subtitle-size" /><span data-record="subtitle-size-out">26px</span></div></div>
+                                                <div class="otl-cine-record-row"><label>Font Color</label><input type="color" value="#d7a733" data-record="subtitle-color" /></div>
+                                            </section>
+                                        </div>
+                                    </div>
+                                    <button class="otl-cinematic-icon-btn" data-record-modal="close" title="Close">${CSV_ICON_CLOSE}</button>
+                                </div>
+                                <div class="otl-cine-record-body">
+                                    <section class="otl-cine-record-section">
+                                        <div class="otl-cine-record-section-head">
+                                            <div class="otl-cine-record-section-title">Recordings</div>
+                                            <div class="otl-cine-record-section-actions">
+                                                <div class="otl-cine-record-pagination">
+                                                    <button class="otl-cinematic-icon-btn otl-cine-record-page-btn" type="button" data-record="page-prev" title="Previous Page">&lt;</button>
+                                                    <div class="otl-cine-record-page-label" data-record="page-label">1 / 1</div>
+                                                    <button class="otl-cinematic-icon-btn otl-cine-record-page-btn" type="button" data-record="page-next" title="Next Page">&gt;</button>
+                                                </div>
+                                                <button class="otl-cinematic-icon-btn" type="button" data-record="sync-model-db" title="Sync MP4 to Model DB">${CINE_ICON_REFRESH}</button>
+                                            </div>
+                                        </div>
+                                        <div class="otl-cine-record-grid" data-record="results"></div>
+                                        <div class="otl-muted hidden" data-record="results-empty">No recordings yet.</div>
+                                    </section>
+                                </div>
+                                <div class="otl-cine-record-foot"><div class="otl-muted" data-record="modal-status">Ready to record.</div></div>
+                            </div>
+                        </div>
+                        <div class="otl-settings-modal hidden" data-role="cinematic-cw-csv-workspace-modal">
+                            <div class="otl-csv-workspace-panel" data-role="cinematic-cw-csv-workspace-panel">
+                                <div class="otl-step-head otl-csv-workspace-drag-handle" data-role="cinematic-cw-csv-workspace-drag-handle">
+                                    <span class="otl-badge">CSV</span><span style="font-size:14px;font-weight:700;">CSV Workspace</span>
+                                    <div class="otl-step-actions">
+                                        <div class="otl-csv-toolbar">
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-timing-config" title="巡游时长限制">${CSV_ICON_TIMING}</button>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-voice-config" title="TTS 声音配置">${CSV_ICON_VOICE}</button>
+                                            <span class="otl-csv-toolbar-sep"></span>
+                                            <button class="otl-icon-btn primary" data-act="cinematic-cw-csv-version-generate" title="生成新版本">${CSV_ICON_GENERATE}</button>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-version-save" title="保存当前版本">${CSV_ICON_SAVE}</button>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-version-save-new" title="另存为新版本">${CSV_ICON_SAVE_AS}</button>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-version-delete" title="删除当前版本">${CSV_ICON_DELETE}</button>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-version-download" title="下载 CSV">${CSV_ICON_DOWNLOAD}</button>
+                                            <span class="otl-csv-toolbar-sep"></span>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-workspace-fullscreen" title="Fullscreen">${CSV_ICON_FULLSCREEN}</button>
+                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-workspace-close" title="Close">${CSV_ICON_CLOSE}</button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="otl-csv-workspace-grid">
+                                    <div class="otl-csv-version-list" data-role="cinematic-cw-csv-version-list"></div>
+                                    <div class="otl-csv-grid-wrap" data-role="cinematic-cw-csv-grid-wrap">
+                                        <table class="otl-csv-grid" data-role="cinematic-cw-csv-grid-table"></table>
+                                    </div>
+                                    <textarea class="otl-csv-editor otl-hidden" data-role="cinematic-cw-csv-editor-input" placeholder="Generate or select a CSV version."></textarea>
+                                </div>
+                                <div class="otl-row" style="justify-content:space-between;">
+                                    <div class="otl-csv-voice-tools">
+                                        <div class="otl-muted" data-role="cinematic-cw-csv-workspace-status">Ready</div>
+                                        <div class="otl-voice-pill" data-role="cinematic-cw-csv-voice-summary">固定声音: ${DEFAULT_TTS_VOICE}</div>
+                                    </div>
+                                    <div class="otl-muted" data-role="cinematic-cw-csv-timing-summary">Timing: default generation</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="otl-voice-modal hidden" data-role="cinematic-cw-csv-voice-modal">
+                            <div class="otl-voice-panel">
+                                <div class="otl-step-head"><span class="otl-badge">♪</span><span style="font-size:14px;font-weight:700;">Alibaba TTS Voices</span></div>
+                                <label class="otl-check"><input type="checkbox" data-role="cinematic-cw-csv-voice-enabled" />启用多声音洗牌轮询</label>
+                                <div class="otl-row">
+                                    <label class="otl-muted" style="min-width:72px;">语音模型</label>
+                                    <select class="otl-select" data-role="cinematic-cw-csv-voice-model">
+                                        <option value="cosyvoice-v3-plus">高质量语音</option>
+                                        <option value="cosyvoice-v3-flash">低延迟语音</option>
+                                    </select>
+                                </div>
+                                <div class="otl-row">
+                                    <label class="otl-muted" style="min-width:72px;">固定声音</label>
+                                    <select class="otl-select" data-role="cinematic-cw-csv-voice-fixed"></select>
+                                </div>
+                                <div class="otl-muted">勾选多个声音后，生成 CSV 时会按洗牌轮询策略逐行写入 tts_voice。</div>
+                                <div class="otl-voice-list" data-role="cinematic-cw-csv-voice-list"></div>
+                                <div class="otl-row" style="justify-content:flex-end;">
+                                    <button class="otl-btn primary" data-act="cinematic-cw-csv-voice-save">Done</button>
+                                    <button class="otl-btn" data-act="cinematic-cw-csv-voice-close">Close</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="otl-config-modal hidden" data-role="cinematic-cw-csv-timing-modal">
+                            <div class="otl-config-panel">
+                                <div class="otl-step-head"><span class="otl-badge">⏱</span><span style="font-size:14px;font-weight:700;">Tour Duration</span></div>
+                                <label class="otl-check"><input type="checkbox" data-role="cinematic-cw-csv-timing-enabled" />启用总时长限制</label>
+                                <div class="otl-row">
+                                    <label class="otl-muted" style="min-width:88px;">目标时长</label>
+                                    <input class="otl-input" data-role="cinematic-cw-csv-timing-input" type="number" min="5" max="900" step="1" value="30" />
+                                    <div class="otl-muted">秒</div>
+                                </div>
+                                <div class="otl-config-stat"><span class="otl-muted">最短可达</span><strong data-role="cinematic-cw-csv-timing-minimum">尚未计算</strong></div>
+                                <div class="otl-config-stat"><span class="otl-muted">预计总时长</span><strong data-role="cinematic-cw-csv-timing-estimated">尚未计算</strong></div>
+                                <div class="otl-row" style="justify-content:flex-end;">
+                                    <button class="otl-btn" data-act="cinematic-cw-csv-timing-estimate">Estimate</button>
+                                    <button class="otl-btn primary" data-act="cinematic-cw-csv-timing-save">Done</button>
+                                    <button class="otl-btn" data-act="cinematic-cw-csv-timing-close">Close</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="otl-csv-content-modal hidden" data-role="cinematic-cw-csv-content-modal">
+                            <div class="otl-csv-content-panel">
+                                <div class="otl-step-head"><span class="otl-badge">✎</span><div data-role="cinematic-cw-csv-content-title">Edit content</div></div>
+                                <textarea class="otl-csv-content-input" data-role="cinematic-cw-csv-content-input"></textarea>
+                                <div class="otl-row" style="justify-content:flex-end;">
+                                    <button class="otl-btn primary" data-act="cinematic-cw-csv-content-save">Save</button>
+                                    <button class="otl-btn" data-act="cinematic-cw-csv-content-cancel">Cancel</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="otl-cinematic-prompt-modal hidden" data-role="cinematic-simple-prompt-modal">
+                <div class="otl-cinematic-prompt-panel">
+                    <div class="otl-cinematic-prompt-head">
+                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_MAGIC}</span><span>Simple Prompt</span></div>
+                        <button class="otl-cinematic-icon-btn" data-act="cinematic-simple-prompt-close" title="Close">${CSV_ICON_CLOSE}</button>
+                    </div>
+                    <div class="otl-cinematic-prompt-body">
+                        <div class="otl-cinematic-prompt-versions" data-role="cinematic-simple-version-list"></div>
+                        <div class="otl-cinematic-prompt-editor">
+                            <textarea class="otl-cinematic-prompt-text" data-role="cinematic-simple-prompt-editor"></textarea>
+                            <div class="otl-cinematic-prompt-footer">
+                                <button class="otl-btn" data-act="cinematic-simple-prompt-cancel">Cancel</button>
+                                <button class="otl-btn" data-act="cinematic-simple-prompt-update">Update Current</button>
+                                <button class="otl-btn primary" data-act="cinematic-simple-prompt-save-new">Save as New Version</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="otl-cinematic-prompt-modal hidden" data-role="cinematic-complex-prompt-modal">
+                <div class="otl-cinematic-prompt-panel">
+                    <div class="otl-cinematic-prompt-head">
+                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_PROMPT}</span><span>Complex Prompt</span></div>
+                        <button class="otl-cinematic-icon-btn" data-act="cinematic-complex-prompt-close" title="Close">${CSV_ICON_CLOSE}</button>
+                    </div>
+                    <div class="otl-cinematic-prompt-body">
+                        <div class="otl-cinematic-prompt-versions" data-role="cinematic-complex-version-list"></div>
+                        <div class="otl-cinematic-prompt-editor">
+                            <textarea class="otl-cinematic-prompt-text" data-role="cinematic-complex-prompt-editor"></textarea>
+                            <div class="otl-cinematic-prompt-footer">
+                                <button class="otl-btn" data-act="cinematic-complex-prompt-cancel">Cancel</button>
+                                <button class="otl-btn" data-act="cinematic-complex-prompt-update">Update Current</button>
+                                <button class="otl-btn primary" data-act="cinematic-complex-prompt-save-new">Save as New Version</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="otl-cinematic-bgm-modal hidden" data-role="cinematic-bgm-modal">
+                <div class="otl-cinematic-bgm-panel">
+                    <div class="otl-cinematic-bgm-head">
+                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_MUSIC}</span><span>BGM Workflow</span></div>
+                        <div class="otl-cinematic-bgm-head-actions">
+                            <button class="otl-btn primary otl-cinematic-bgm-apply-top" type="button" data-act="cinematic-bgm-apply">Apply To Timeline</button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-bgm-close" title="Close">${CSV_ICON_CLOSE}</button>
+                        </div>
+                    </div>
+                    <div class="otl-cinematic-bgm-grid">
+                        <div class="otl-cinematic-bgm-library">
+                            <div class="otl-cinematic-bgm-list-head">
+                                <div class="otl-cinematic-panel-title" style="margin-bottom:0;">Music Playlist</div>
+                                <div class="otl-cinematic-subactions">
+                                    <button class="otl-cinematic-icon-btn" type="button" data-act="cinematic-bgm-browse-folder" title="Load Folder">${CINE_ICON_FOLDER}</button>
+                                    <button class="otl-cinematic-icon-btn" type="button" data-act="cinematic-bgm-browse-files" title="Load Files">${CINE_ICON_FILE_PLUS}</button>
+                                </div>
+                            </div>
+                            <div class="otl-cinematic-bgm-toolbar">
+                                <input class="otl-input" data-role="cinematic-bgm-search" type="search" placeholder="Search in library..." />
+                            </div>
+                            <input type="file" data-role="cinematic-bgm-folder-input" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,audio/*" webkitdirectory directory multiple style="display:none;" />
+                            <input type="file" data-role="cinematic-bgm-file-input" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,audio/*" multiple style="display:none;" />
+                            <input type="file" data-role="cinematic-media-file-input" accept=".mp4,.mov,.webm,.m4v,video/*" style="display:none;" />
+                            <div class="otl-cinematic-bgm-list" data-role="cinematic-bgm-library"></div>
+                        </div>
+                        <div class="otl-cinematic-bgm-editor">
+                            <div class="otl-cinematic-panel-title" style="margin-bottom:4px;">2) Select Clip</div>
+                            <div class="otl-cinematic-bgm-player">
+                                <button class="otl-btn" type="button" data-act="cinematic-bgm-player-toggle">Play</button>
+                                <input class="otl-cinematic-zoom-range" data-role="cinematic-bgm-progress" type="range" min="0" max="1000" step="1" value="0" />
+                                <div class="otl-muted" data-role="cinematic-bgm-time">0:00.00 / 0:00.00</div>
+                                <select class="otl-select" data-role="cinematic-bgm-preview-rate">
+                                    <option value="0.5">0.5x</option>
+                                    <option value="0.75">0.75x</option>
+                                    <option value="1" selected>1.0x</option>
+                                    <option value="1.25">1.25x</option>
+                                    <option value="1.5">1.5x</option>
+                                </select>
+                            </div>
+                            <canvas class="otl-cinematic-bgm-wave" data-role="cinematic-bgm-wave" width="620" height="120"></canvas>
+                            <div class="otl-cinematic-bgm-range">
+                                <div class="otl-cinematic-field"><label>Start (s)</label><input class="otl-input" data-role="cinematic-bgm-start" type="number" min="0" step="0.01" value="0" /></div>
+                                <div class="otl-cinematic-field"><label>End (s)</label><input class="otl-input" data-role="cinematic-bgm-end" type="number" min="0" step="0.01" value="0" /></div>
+                                <div class="otl-cinematic-field"><label>Clip Duration (s)</label><div class="otl-muted" data-role="cinematic-bgm-clip-duration" style="padding-top:8px;">0.00s</div></div>
+                                <button class="otl-btn" type="button" data-act="cinematic-bgm-play-clip">Play Clip</button>
+                                <button class="otl-btn" type="button" data-act="cinematic-bgm-recommend">Recommend Phrase</button>
+                            </div>
+                            <div class="otl-cinematic-panel-title" style="margin:4px 0 0;">3) Rate / Target Duration</div>
+                            <div class="otl-cinematic-bgm-params">
+                                <div class="otl-cinematic-field"><label>Manual Rate (0.5~2)</label><input class="otl-input" data-role="cinematic-bgm-manual-rate" type="number" min="0.5" max="2" step="0.01" value="1" /></div>
+                                <div class="otl-cinematic-field"><label>Target Duration (s)</label><input class="otl-input" data-role="cinematic-bgm-target-duration" type="number" min="0.2" step="0.01" placeholder="Optional" /></div>
+                                <div class="otl-cinematic-field"><label>Effective Rate</label><div class="otl-muted" data-role="cinematic-bgm-effective-rate" style="padding-top:8px;">1.00x</div></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         `;
 
         this.topCanvas = this.root.querySelector('[data-map="top"]') as HTMLCanvasElement;
@@ -1594,6 +4175,108 @@ class TourLoaderPanel implements TourLoaderController {
         this.csvContentModal = this.root.querySelector('[data-role="csv-content-modal"]') as HTMLDivElement;
         this.csvContentTitleEl = this.root.querySelector('[data-role="csv-content-title"]') as HTMLDivElement;
         this.csvContentInput = this.root.querySelector('[data-role="csv-content-input"]') as HTMLTextAreaElement;
+        this.cinematicCwCsvWorkspaceModal = this.root.querySelector('[data-role="cinematic-cw-csv-workspace-modal"]') as HTMLDivElement;
+        this.cinematicCwCsvWorkspacePanel = this.root.querySelector('[data-role="cinematic-cw-csv-workspace-panel"]') as HTMLDivElement;
+        this.cinematicCwCsvVersionListEl = this.root.querySelector('[data-role="cinematic-cw-csv-version-list"]') as HTMLDivElement;
+        this.cinematicCwCsvGridWrapEl = this.root.querySelector('[data-role="cinematic-cw-csv-grid-wrap"]') as HTMLDivElement;
+        this.cinematicCwCsvGridTableEl = this.root.querySelector('[data-role="cinematic-cw-csv-grid-table"]') as HTMLTableElement;
+        this.cinematicCwCsvEditorInput = this.root.querySelector('[data-role="cinematic-cw-csv-editor-input"]') as HTMLTextAreaElement;
+        this.cinematicCwCsvWorkspaceStatusEl = this.root.querySelector('[data-role="cinematic-cw-csv-workspace-status"]') as HTMLDivElement;
+        this.cinematicCwCsvTimingSummaryEl = this.root.querySelector('[data-role="cinematic-cw-csv-timing-summary"]') as HTMLDivElement;
+        this.cinematicCwCsvVoiceEnabledInput = this.root.querySelector('[data-role="cinematic-cw-csv-voice-enabled"]') as HTMLInputElement;
+        this.cinematicCwCsvVoiceSummaryEl = this.root.querySelector('[data-role="cinematic-cw-csv-voice-summary"]') as HTMLDivElement;
+        this.cinematicCwCsvTimingEnabledInput = this.root.querySelector('[data-role="cinematic-cw-csv-timing-enabled"]') as HTMLInputElement;
+        this.cinematicCwCsvTimingInput = this.root.querySelector('[data-role="cinematic-cw-csv-timing-input"]') as HTMLInputElement;
+        this.cinematicCwCsvTimingModal = this.root.querySelector('[data-role="cinematic-cw-csv-timing-modal"]') as HTMLDivElement;
+        this.cinematicCwCsvTimingMinimumEl = this.root.querySelector('[data-role="cinematic-cw-csv-timing-minimum"]') as HTMLDivElement;
+        this.cinematicCwCsvTimingEstimatedEl = this.root.querySelector('[data-role="cinematic-cw-csv-timing-estimated"]') as HTMLDivElement;
+        this.cinematicCwCsvVoiceModal = this.root.querySelector('[data-role="cinematic-cw-csv-voice-modal"]') as HTMLDivElement;
+        this.cinematicCwCsvVoiceModelSelect = this.root.querySelector('[data-role="cinematic-cw-csv-voice-model"]') as HTMLSelectElement;
+        this.cinematicCwCsvVoiceFixedSelect = this.root.querySelector('[data-role="cinematic-cw-csv-voice-fixed"]') as HTMLSelectElement;
+        this.cinematicCwCsvVoiceListEl = this.root.querySelector('[data-role="cinematic-cw-csv-voice-list"]') as HTMLDivElement;
+        this.cinematicCwCsvContentModal = this.root.querySelector('[data-role="cinematic-cw-csv-content-modal"]') as HTMLDivElement;
+        this.cinematicCwCsvContentTitleEl = this.root.querySelector('[data-role="cinematic-cw-csv-content-title"]') as HTMLDivElement;
+        this.cinematicCwCsvContentInput = this.root.querySelector('[data-role="cinematic-cw-csv-content-input"]') as HTMLTextAreaElement;
+        this.cinematicWorkspaceModal = this.root.querySelector('[data-role="cinematic-workspace-modal"]') as HTMLDivElement;
+        this.cinematicWorkspacePanel = this.root.querySelector('[data-role="cinematic-workspace-panel"]') as HTMLDivElement;
+        this.cinematicVersionListEl = this.root.querySelector('[data-role="cinematic-version-list"]') as HTMLDivElement;
+        this.cinematicStatusEl = this.root.querySelector('[data-role="cinematic-workspace-status"]') as HTMLDivElement;
+        this.cinematicPoiListEl = this.root.querySelector('[data-role="cinematic-poi-list"]') as HTMLDivElement;
+        this.cinematicTimelineEl = this.root.querySelector('[data-role="cinematic-timeline"]') as HTMLDivElement;
+        this.cinematicKeyframeModal = this.root.querySelector('[data-role="cinematic-keyframe-modal"]') as HTMLDivElement;
+        this.cinematicKeyframeEditorBodyEl = this.root.querySelector('[data-role="cinematic-keyframe-editor-body"]') as HTMLDivElement;
+        this.cinematicShotModal = this.root.querySelector('[data-role="cinematic-shot-modal"]') as HTMLDivElement;
+        this.cinematicShotEditorBodyEl = this.root.querySelector('[data-role="cinematic-shot-editor-body"]') as HTMLDivElement;
+        this.cinematicTopCanvas = this.root.querySelector('[data-role="cinematic-top-canvas"]') as HTMLCanvasElement;
+        this.cinematicFrontCanvas = this.root.querySelector('[data-role="cinematic-front-canvas"]') as HTMLCanvasElement;
+        this.cinematicPreviewImageEl = this.root.querySelector('[data-role="cinematic-preview-image"]') as HTMLImageElement;
+        this.cinematicCurrentKfLabelEl = this.root.querySelector('[data-role="cinematic-current-kf-label"]') as HTMLDivElement;
+        this.cinematicSimplePromptInput = this.root.querySelector('[data-role="cinematic-simple-prompt"]') as HTMLTextAreaElement;
+        this.cinematicPlannerPromptInput = this.root.querySelector('[data-role="cinematic-planner-prompt"]') as HTMLTextAreaElement;
+        this.cinematicSceneInput = this.root.querySelector('[data-role="cinematic-scene-input"]') as HTMLTextAreaElement;
+        this.cinematicStoryInput = this.root.querySelector('[data-role="cinematic-story-input"]') as HTMLTextAreaElement;
+        this.cinematicStyleInput = this.root.querySelector('[data-role="cinematic-style-input"]') as HTMLInputElement;
+        this.cinematicDurationInput = this.root.querySelector('[data-role="cinematic-duration-input"]') as HTMLInputElement;
+        this.cinematicMiniToggleBtn = this.root.querySelector('[data-act="cinematic-mini-mode"]') as HTMLButtonElement;
+        this.cinematicMiniPlayBtn = this.root.querySelector('[data-act="cinematic-mini-play"]') as HTMLButtonElement;
+        this.cinematicMiniTimelineEl = this.root.querySelector('[data-role="cinematic-mini-timeline"]') as HTMLDivElement;
+        this.cinematicMiniTimeEl = this.root.querySelector('[data-role="cinematic-mini-time"]') as HTMLDivElement;
+        this.cinematicSimplePromptModal = this.root.querySelector('[data-role="cinematic-simple-prompt-modal"]') as HTMLDivElement;
+        this.cinematicComplexPromptModal = this.root.querySelector('[data-role="cinematic-complex-prompt-modal"]') as HTMLDivElement;
+        this.cinematicSimpleVersionListEl = this.root.querySelector('[data-role="cinematic-simple-version-list"]') as HTMLDivElement;
+        this.cinematicComplexVersionListEl = this.root.querySelector('[data-role="cinematic-complex-version-list"]') as HTMLDivElement;
+        this.cinematicSimplePromptEditor = this.root.querySelector('[data-role="cinematic-simple-prompt-editor"]') as HTMLTextAreaElement;
+        this.cinematicComplexPromptEditor = this.root.querySelector('[data-role="cinematic-complex-prompt-editor"]') as HTMLTextAreaElement;
+        this.cinematicBgmModal = this.root.querySelector('[data-role="cinematic-bgm-modal"]') as HTMLDivElement;
+        this.cinematicBgmSearchInput = this.root.querySelector('[data-role="cinematic-bgm-search"]') as HTMLInputElement;
+        this.cinematicBgmLibraryEl = this.root.querySelector('[data-role="cinematic-bgm-library"]') as HTMLDivElement;
+        this.cinematicBgmFolderInput = this.root.querySelector('[data-role="cinematic-bgm-folder-input"]') as HTMLInputElement;
+        this.cinematicBgmFileInput = this.root.querySelector('[data-role="cinematic-bgm-file-input"]') as HTMLInputElement;
+        this.cinematicMediaFileInput = this.root.querySelector('[data-role="cinematic-media-file-input"]') as HTMLInputElement;
+        this.cinematicBgmPlayerBtn = this.root.querySelector('[data-act="cinematic-bgm-player-toggle"]') as HTMLButtonElement;
+        this.cinematicBgmProgressInput = this.root.querySelector('[data-role="cinematic-bgm-progress"]') as HTMLInputElement;
+        this.cinematicBgmTimeEl = this.root.querySelector('[data-role="cinematic-bgm-time"]') as HTMLDivElement;
+        this.cinematicBgmRateInput = this.root.querySelector('[data-role="cinematic-bgm-preview-rate"]') as HTMLSelectElement;
+        this.cinematicBgmWaveCanvas = this.root.querySelector('[data-role="cinematic-bgm-wave"]') as HTMLCanvasElement;
+        this.cinematicBgmStartInput = this.root.querySelector('[data-role="cinematic-bgm-start"]') as HTMLInputElement;
+        this.cinematicBgmEndInput = this.root.querySelector('[data-role="cinematic-bgm-end"]') as HTMLInputElement;
+        this.cinematicBgmClipDurationEl = this.root.querySelector('[data-role="cinematic-bgm-clip-duration"]') as HTMLDivElement;
+        this.cinematicBgmClipPlayBtn = this.root.querySelector('[data-act="cinematic-bgm-play-clip"]') as HTMLButtonElement;
+        this.cinematicBgmRecommendBtn = this.root.querySelector('[data-act="cinematic-bgm-recommend"]') as HTMLButtonElement;
+        this.cinematicBgmManualRateInput = this.root.querySelector('[data-role="cinematic-bgm-manual-rate"]') as HTMLInputElement;
+        this.cinematicBgmTargetDurationInput = this.root.querySelector('[data-role="cinematic-bgm-target-duration"]') as HTMLInputElement;
+        this.cinematicBgmEffectiveRateEl = this.root.querySelector('[data-role="cinematic-bgm-effective-rate"]') as HTMLDivElement;
+        this.cinematicRecordingModalEl = this.root.querySelector('[data-role="cinematic-recording-modal"]') as HTMLDivElement;
+        this.cinematicRecordBtn = this.root.querySelector('[data-act="cinematic-record-open"]') as HTMLButtonElement;
+        this.cinematicRecordPauseBtn = this.root.querySelector('[data-act="cinematic-record-pause"]') as HTMLButtonElement;
+        this.cinematicRecordStopBtn = this.root.querySelector('[data-act="cinematic-record-stop"]') as HTMLButtonElement;
+        this.cinematicRecordTimerEl = this.root.querySelector('[data-role="cinematic-record-timer"]') as HTMLSpanElement;
+        this.cinematicRecordingModalStatusEl = this.root.querySelector('[data-record="modal-status"]') as HTMLDivElement;
+        this.cinematicRecordingFrameRateSelect = this.root.querySelector('[data-record="frame-rate"]') as HTMLSelectElement;
+        this.cinematicRecordingQualitySelect = this.root.querySelector('[data-record="quality"]') as HTMLSelectElement;
+        this.cinematicRecordingCompressionSelect = this.root.querySelector('[data-record="compression"]') as HTMLSelectElement;
+        this.cinematicRecordingIncludeTtsInput = this.root.querySelector('[data-record="include-tts"]') as HTMLInputElement;
+        this.cinematicRecordingAutoPlayInput = this.root.querySelector('[data-record="auto-play"]') as HTMLInputElement;
+        this.cinematicRecordingStopWithPlaybackInput = this.root.querySelector('[data-record="stop-with-playback"]') as HTMLInputElement;
+        this.cinematicRecordingHidePanelInput = this.root.querySelector('[data-record="hide-panel"]') as HTMLInputElement;
+        this.cinematicRecordingDisableInterruptsInput = this.root.querySelector('[data-record="disable-interrupts"]') as HTMLInputElement;
+        this.cinematicRecordingMasterVolumeInput = this.root.querySelector('[data-record="master-volume"]') as HTMLInputElement;
+        this.cinematicRecordingTtsVolumeInput = this.root.querySelector('[data-record="tts-volume"]') as HTMLInputElement;
+        this.cinematicRecordingBgmVolumeInput = this.root.querySelector('[data-record="bgm-volume"]') as HTMLInputElement;
+        this.cinematicRecordingSubtitlesEnabledInput = this.root.querySelector('[data-record="subtitles-enabled"]') as HTMLInputElement;
+        this.cinematicRecordingSubtitleFontSelect = this.root.querySelector('[data-record="subtitle-font"]') as HTMLSelectElement;
+        this.cinematicRecordingSubtitleSizeInput = this.root.querySelector('[data-record="subtitle-size"]') as HTMLInputElement;
+        this.cinematicRecordingSubtitleColorInput = this.root.querySelector('[data-record="subtitle-color"]') as HTMLInputElement;
+        this.cinematicRecordingMasterVolumeOut = this.root.querySelector('[data-record="master-volume-out"]') as HTMLSpanElement;
+        this.cinematicRecordingTtsVolumeOut = this.root.querySelector('[data-record="tts-volume-out"]') as HTMLSpanElement;
+        this.cinematicRecordingBgmVolumeOut = this.root.querySelector('[data-record="bgm-volume-out"]') as HTMLSpanElement;
+        this.cinematicRecordingSubtitleSizeOut = this.root.querySelector('[data-record="subtitle-size-out"]') as HTMLSpanElement;
+        this.cinematicRecordingResultsEl = this.root.querySelector('[data-record="results"]') as HTMLDivElement;
+        this.cinematicRecordingResultsEmptyEl = this.root.querySelector('[data-record="results-empty"]') as HTMLDivElement;
+        this.cinematicRecordingSyncToModelDbBtn = this.root.querySelector('[data-record="sync-model-db"]') as HTMLButtonElement;
+        this.cinematicRecordingPagePrevBtn = this.root.querySelector('[data-record="page-prev"]') as HTMLButtonElement;
+        this.cinematicRecordingPageNextBtn = this.root.querySelector('[data-record="page-next"]') as HTMLButtonElement;
+        this.cinematicRecordingPageLabelEl = this.root.querySelector('[data-record="page-label"]') as HTMLDivElement;
         this.stopBtn = this.root.querySelector('[data-act="play-stop"]') as HTMLButtonElement;
         this.playToggleBtn = this.root.querySelector('[data-act="play-toggle"]') as HTMLButtonElement;
         this.globalSaveBtn = this.root.querySelector('[data-act="save-all-pois"]') as HTMLButtonElement;
@@ -1604,29 +4287,139 @@ class TourLoaderPanel implements TourLoaderController {
         this.csvTimingConfig = normalizeCsvTimingConfig(this.csvTimingConfig);
         this.renderCsvVoiceConfig();
         this.renderCsvTimingConfig();
+        this.cinematicCwCsvVoiceConfig = normalizeCsvVoiceConfig(this.csvVoiceConfig);
+        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig(this.csvTimingConfig);
+        this.renderCinematicCwCsvVoiceConfig();
+        this.renderCinematicCwCsvTimingConfig();
+        this.cinematicSimplePromptInput.value = this.cinematicSimplePrompt;
+        this.cinematicPlannerPromptInput.value = this.cinematicPlannerPrompt;
+        this.cinematicSimplePromptEditor.value = this.cinematicSimplePrompt;
+        this.cinematicComplexPromptEditor.value = this.cinematicPlannerPrompt;
+        this.cinematicSceneInput.value = this.cinematicSceneDescription;
+        this.cinematicStoryInput.value = this.cinematicStoryBackground;
+        this.cinematicStyleInput.value = this.cinematicStyleText;
+        this.cinematicDurationInput.value = String(this.cinematicTargetDurationSec);
+        this.syncCinematicChrome();
+        this.syncCinematicRecordingForm();
+        this.renderCinematicRecordingResults();
+        this.refreshCinematicRecordingButtons();
 
         document.body.appendChild(this.root);
         this.bindEvents();
         this.refreshPlaybackUi();
         this.setModelReady(false);
+        const initialModelFilename = this.options.getModelFilename();
+        if (initialModelFilename) {
+            this.modelFilename = initialModelFilename;
+            this.setModelReady(true);
+        }
         if (this.options.onModelLoaded) {
-            this.unsubscribeModelLoaded = this.options.onModelLoaded(() => {
-                if (!this.root.classList.contains('hidden')) {
+            this.unsubscribeModelLoaded = this.options.onModelLoaded((modelFilename) => {
+                this.modelFilename = modelFilename;
+                this.setModelReady(Boolean(modelFilename));
+                if (modelFilename && !this.root.classList.contains('hidden')) {
                     void this.reload();
                 }
             });
         }
         this.logDebug('system', 'panel initialized');
+        void this.loadCinematicRecordingResults();
     }
 
     open() {
+        this.modelFilename = this.options.getModelFilename();
+        this.setModelReady(Boolean(this.modelFilename));
+        this.cinematicHideRootOnClose = false;
+        this.root.classList.remove('cinematic-only');
         this.root.classList.remove('hidden');
         this.startLiveDrawLoop();
         void this.reload();
     }
 
+    async openCinematicWorkspace() {
+        this.modelFilename = this.options.getModelFilename();
+        this.setModelReady(Boolean(this.modelFilename));
+        if (!this.requireModel()) return;
+        this.cinematicHideRootOnClose = this.root.classList.contains('hidden');
+        this.root.classList.remove('hidden');
+        this.root.classList.add('cinematic-only');
+        this.attachCsvVoiceModalToCurrentWorkspace(true);
+        this.attachCsvTimingModalToCurrentWorkspace(true);
+        this.cinematicWorkspaceModal.classList.remove('hidden');
+        this.cinematicWorkspacePanel.classList.toggle('fullscreen', this.cinematicWorkspaceFullscreen);
+        if (this.cinematicWorkspaceFullscreen) {
+            this.cinematicWorkspacePanel.classList.remove('floating');
+            this.cinematicWorkspacePanel.style.left = '';
+            this.cinematicWorkspacePanel.style.top = '';
+        } else if (this.cinematicWorkspaceFloatPos.initialized) {
+            this.pinCinematicWorkspacePanel();
+        } else {
+            this.cinematicWorkspacePanel.classList.remove('floating');
+            this.cinematicWorkspacePanel.style.left = '';
+            this.cinematicWorkspacePanel.style.top = '';
+        }
+        this.startLiveDrawLoop();
+        this.syncCinematicChrome();
+        this.refreshCinematicRecordingButtons();
+        await this.reload();
+        this.syncCinematicInputsFromState();
+        this.cinematicSelectedPoiIds = this.cinematicSelectedPoiIds.length > 0 ? this.cinematicSelectedPoiIds : this.pois.slice(0, 4).map((poi) => poi.poiId);
+        this.refreshCinematicUi();
+        this.setCinematicStatus('Loading cinematic versions...');
+        await this.loadCinematicVersionList();
+        this.setCinematicStatus('Ready');
+    }
+
+    closeCinematicWorkspace() {
+        if (this.activeCinematicRecording) {
+            void this.stopCinematicRecording(true, 'workspace-close');
+        }
+        this.cancelCinematicMediaPick();
+        this.cancelCinematicMediaResize();
+        this.closeCinematicMediaEditor();
+        this.cinematicWorkspaceModal.classList.add('hidden');
+        this.cinematicRecordingModalEl.classList.add('hidden');
+        this.cinematicCwCsvWorkspaceModal.classList.add('hidden');
+        this.cinematicCwCsvVoiceModal.classList.add('hidden');
+        this.cinematicCwCsvTimingModal.classList.add('hidden');
+        this.cinematicCwCsvContentModal.classList.add('hidden');
+        this.cinematicSimplePromptModal.classList.add('hidden');
+        this.cinematicComplexPromptModal.classList.add('hidden');
+        this.closeCinematicBgmModal();
+        this.closeCinematicEditors();
+        this.csvVoiceModal.classList.add('hidden');
+        this.csvTimingModal.classList.add('hidden');
+        this.attachCsvVoiceModalToCurrentWorkspace(false);
+        this.attachCsvTimingModalToCurrentWorkspace(false);
+        this.closeCinematicEventStream();
+        this.stopCinematicSpeechPreview();
+        this.stopCinematicPreview();
+        this.cinematicMiniMode = false;
+        this.syncCinematicChrome();
+        this.cinematicWorkspaceDrag = { active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, left: 0, top: 0 };
+        this.options.showEmbeddedMedia?.(null);
+        this.root.classList.remove('cinematic-only');
+        if (this.cinematicHideRootOnClose) {
+            this.root.classList.add('hidden');
+        }
+        this.cinematicHideRootOnClose = false;
+        this.drawViews();
+        if (this.root.classList.contains('hidden')) this.stopLiveDrawLoop();
+    }
+
     close() {
+        if (this.activeCinematicRecording) {
+            void this.stopCinematicRecording(true, 'panel-close');
+        }
+        this.cancelCinematicMediaPick();
+        this.cancelCinematicMediaResize();
+        this.closeCinematicMediaEditor();
+        this.cinematicHideRootOnClose = false;
+        this.root.classList.remove('cinematic-only');
         this.root.classList.add('hidden');
+        this.closeCinematicEditors();
+        this.closeCinematicEventStream();
+        this.stopCinematicSpeechPreview();
         this.settingsModal.classList.add('hidden');
         this.batchModal.classList.add('hidden');
         this.llmPopover.classList.add('hidden');
@@ -1635,9 +4428,12 @@ class TourLoaderPanel implements TourLoaderController {
         this.movePromptModal.classList.add('hidden');
         this.csvWorkspaceModal.classList.add('hidden');
         this.csvContentModal.classList.add('hidden');
+        this.cinematicRecordingModalEl.classList.add('hidden');
+        this.closeCinematicBgmModal();
         this.stopPlayback();
+        this.hotspotController.closePresentations();
         this.closeCsvExportEventStream();
-        this.stopLiveDrawLoop();
+        if (this.cinematicWorkspaceModal.classList.contains('hidden')) this.stopLiveDrawLoop();
     }
 
     toggle() {
@@ -1646,6 +4442,24 @@ class TourLoaderPanel implements TourLoaderController {
 
     private apiBase() {
         return this.options.apiBaseUrl || 'http://localhost:3031/api/ot-tour-loader';
+    }
+
+    private resolveAsset(value: string) {
+        const raw = String(value || '').trim();
+        if (!raw) return raw;
+        if (/^https?:\/\//i.test(raw) || raw.startsWith('blob:') || raw.startsWith('data:')) return raw;
+        if (this.options.resolveAssetUrl) {
+            try {
+                return this.options.resolveAssetUrl(raw);
+            } catch {
+                return raw;
+            }
+        }
+        return raw;
+    }
+
+    private recordingApiBase() {
+        return 'http://localhost:3032/api/ot-tour-player';
     }
 
     private setStatus(text: string) {
@@ -1847,7 +4661,8 @@ class TourLoaderPanel implements TourLoaderController {
             screenshotDataUrl: poi.screenshotDataUrl ? String(poi.screenshotDataUrl) : '',
             screenshotUpdatedAt: poi.screenshotUpdatedAt ? String(poi.screenshotUpdatedAt) : undefined,
             contentUpdatedAt: poi.contentUpdatedAt ? String(poi.contentUpdatedAt) : undefined,
-            promptUpdatedAt: poi.promptUpdatedAt ? String(poi.promptUpdatedAt) : undefined
+            promptUpdatedAt: poi.promptUpdatedAt ? String(poi.promptUpdatedAt) : undefined,
+            hotspots: Array.isArray(poi.hotspots) ? poi.hotspots.map((item, hotspotIdx) => normalizeHotspot(item, hotspotIdx)) : []
         };
     }
 
@@ -1868,7 +4683,8 @@ class TourLoaderPanel implements TourLoaderController {
             dwellMs: 1500,
             content: '',
             ttsLang: '',
-            promptTemplate: DEFAULT_PROMPT_TEMPLATE
+            promptTemplate: DEFAULT_PROMPT_TEMPLATE,
+            hotspots: []
         } as TourPoi;
     }
 
@@ -1977,20 +4793,28 @@ class TourLoaderPanel implements TourLoaderController {
         return { x: nx * w, y: h - ny * h };
     }
 
-    private projectTop(x: number, z: number) {
-        const w = this.topCanvas.width;
-        const h = this.topCanvas.height;
-        const base = this.projectTopBase(x, z);
+    private projectTopForCanvas(canvas: HTMLCanvasElement, x: number, z: number) {
+        const b = this.topBounds;
+        const w = canvas.width;
+        const h = canvas.height;
+        const nx = (x - b.xMin) / Math.max(1e-6, b.xMax - b.xMin);
+        const ny = ((-z) - b.yMin) / Math.max(1e-6, b.yMax - b.yMin);
+        const baseX = nx * w;
+        const baseY = h - ny * h;
         return {
-            x: (base.x - w * 0.5) * this.topView.zoom + w * 0.5 + this.topView.offsetX,
-            y: (base.y - h * 0.5) * this.topView.zoom + h * 0.5 + this.topView.offsetY
+            x: (baseX - w * 0.5) * this.topView.zoom + w * 0.5 + this.topView.offsetX,
+            y: (baseY - h * 0.5) * this.topView.zoom + h * 0.5 + this.topView.offsetY
         };
     }
 
-    private unprojectTop(cx: number, cy: number) {
+    private projectTop(x: number, z: number) {
+        return this.projectTopForCanvas(this.topCanvas, x, z);
+    }
+
+    private unprojectTopForCanvas(canvas: HTMLCanvasElement, cx: number, cy: number) {
         const b = this.topBounds;
-        const w = this.topCanvas.width;
-        const h = this.topCanvas.height;
+        const w = canvas.width;
+        const h = canvas.height;
         const baseX = (cx - this.topView.offsetX - w * 0.5) / this.topView.zoom + w * 0.5;
         const baseY = (cy - this.topView.offsetY - h * 0.5) / this.topView.zoom + h * 0.5;
         const nx = clamp(baseX / w, 0, 1);
@@ -2001,24 +4825,36 @@ class TourLoaderPanel implements TourLoaderController {
         };
     }
 
+    private unprojectTop(cx: number, cy: number) {
+        return this.unprojectTopForCanvas(this.topCanvas, cx, cy);
+    }
+
     private poiEyeY(poi: TourPoi) {
         return poi.targetY + this.eyeHeightM;
     }
 
-    private projectFront(x: number, y: number) {
-        const w = this.frontCanvas.width;
-        const h = this.frontCanvas.height;
-        const base = this.projectFrontBase(x, y);
+    private projectFrontForCanvas(canvas: HTMLCanvasElement, x: number, y: number) {
+        const b = this.frontBounds;
+        const w = canvas.width;
+        const h = canvas.height;
+        const nx = (x - b.xMin) / Math.max(1e-6, b.xMax - b.xMin);
+        const ny = (y - b.yMin) / Math.max(1e-6, b.yMax - b.yMin);
+        const baseX = nx * w;
+        const baseY = h - ny * h;
         return {
-            x: (base.x - w * 0.5) * this.frontView.zoom + w * 0.5 + this.frontView.offsetX,
-            y: (base.y - h * 0.5) * this.frontView.zoom + h * 0.5 + this.frontView.offsetY
+            x: (baseX - w * 0.5) * this.frontView.zoom + w * 0.5 + this.frontView.offsetX,
+            y: (baseY - h * 0.5) * this.frontView.zoom + h * 0.5 + this.frontView.offsetY
         };
     }
 
-    private unprojectFront(cx: number, cy: number) {
+    private projectFront(x: number, y: number) {
+        return this.projectFrontForCanvas(this.frontCanvas, x, y);
+    }
+
+    private unprojectFrontForCanvas(canvas: HTMLCanvasElement, cx: number, cy: number) {
         const b = this.frontBounds;
-        const w = this.frontCanvas.width;
-        const h = this.frontCanvas.height;
+        const w = canvas.width;
+        const h = canvas.height;
         const baseX = (cx - this.frontView.offsetX - w * 0.5) / this.frontView.zoom + w * 0.5;
         const baseY = (cy - this.frontView.offsetY - h * 0.5) / this.frontView.zoom + h * 0.5;
         const nx = clamp(baseX / w, 0, 1);
@@ -2027,6 +4863,10 @@ class TourLoaderPanel implements TourLoaderController {
             x: b.xMin + nx * (b.xMax - b.xMin),
             y: b.yMin + ny * (b.yMax - b.yMin)
         };
+    }
+
+    private unprojectFront(cx: number, cy: number) {
+        return this.unprojectFrontForCanvas(this.frontCanvas, cx, cy);
     }
 
     private drawViews() {
@@ -2138,6 +4978,63 @@ class TourLoaderPanel implements TourLoaderController {
             frontCtx.fill();
         });
 
+        if (this.cinematicWorkspaceOpen() && this.cinematicPlan?.shots?.length) {
+            const keyframes = this.cinematicPlan.shots.flatMap((shot) => shot.keyframes.map((kf) => ({ ...kf, shotLabel: shot.label })));
+            if (keyframes.length > 1) {
+                topCtx.beginPath();
+                keyframes.forEach((kf, idx) => {
+                    const p = this.projectTop(kf.x, kf.z);
+                    if (idx === 0) topCtx.moveTo(p.x, p.y);
+                    else topCtx.lineTo(p.x, p.y);
+                });
+                topCtx.strokeStyle = 'rgba(244, 114, 182, 0.72)';
+                topCtx.lineWidth = 2;
+                topCtx.stroke();
+
+                frontCtx.beginPath();
+                keyframes.forEach((kf, idx) => {
+                    const p = this.projectFront(kf.x, kf.y + this.eyeHeightM);
+                    if (idx === 0) frontCtx.moveTo(p.x, p.y);
+                    else frontCtx.lineTo(p.x, p.y);
+                });
+                frontCtx.strokeStyle = 'rgba(244, 114, 182, 0.72)';
+                frontCtx.lineWidth = 2;
+                frontCtx.stroke();
+            }
+            keyframes.forEach((kf) => {
+                const active = kf.keyframeId === this.selectedCinematicKeyframeId;
+                const tp = this.projectTop(kf.x, kf.z);
+                topCtx.beginPath();
+                topCtx.arc(tp.x, tp.y, active ? 6.5 : 4, 0, Math.PI * 2);
+                topCtx.fillStyle = active ? '#f472b6' : 'rgba(250, 204, 21, 0.92)';
+                topCtx.fill();
+                const yawR = degToRad(kf.yaw);
+                const hx = tp.x + Math.sin(yawR) * 22;
+                const hy = tp.y + Math.cos(yawR) * 22;
+                topCtx.beginPath();
+                topCtx.moveTo(tp.x, tp.y);
+                topCtx.lineTo(hx, hy);
+                topCtx.strokeStyle = active ? '#f472b6' : 'rgba(250, 204, 21, 0.72)';
+                topCtx.lineWidth = 2;
+                topCtx.stroke();
+
+                const fp = this.projectFront(kf.x, kf.y + this.eyeHeightM);
+                frontCtx.beginPath();
+                frontCtx.arc(fp.x, fp.y, active ? 6.5 : 4, 0, Math.PI * 2);
+                frontCtx.fillStyle = active ? '#f472b6' : 'rgba(250, 204, 21, 0.92)';
+                frontCtx.fill();
+                const pR = degToRad(kf.pitch);
+                const phx = fp.x + Math.cos(pR) * 20;
+                const phy = fp.y - Math.sin(pR) * 20;
+                frontCtx.beginPath();
+                frontCtx.moveTo(fp.x, fp.y);
+                frontCtx.lineTo(phx, phy);
+                frontCtx.strokeStyle = active ? '#f472b6' : 'rgba(250, 204, 21, 0.72)';
+                frontCtx.lineWidth = 2;
+                frontCtx.stroke();
+            });
+        }
+
         const live = this.options.getLiveCameraPose?.();
         if (live) {
             const topLive = this.projectTop(live.pose.eye.x, live.pose.eye.z);
@@ -2225,6 +5122,7 @@ class TourLoaderPanel implements TourLoaderController {
             .forEach((poi) => {
                 const hasImage = Boolean((poi.screenshotDataUrl || '').trim());
                 const previewSrc = hasImage ? poi.screenshotDataUrl : this.placeholderImageDataUrl(poi.poiName);
+                const hotspotCount = Array.isArray(poi.hotspots) ? poi.hotspots.length : 0;
                 const card = document.createElement('div');
                 card.className = 'otl-poi-card';
                 card.setAttribute('data-poi-id', poi.poiId);
@@ -2252,6 +5150,7 @@ class TourLoaderPanel implements TourLoaderController {
                             </div>
                         </div>
                         <div class="otl-poi-actions-inline">
+                            <button class="otl-poi-icon" data-act="edit-hotspots" data-poi-id="${poi.poiId}" title="Edit Hotspots">◎</button>
                             <button class="otl-poi-icon" data-act="save-poi-row" data-poi-id="${poi.poiId}" title="Save">💾</button>
                             <button class="otl-poi-icon" data-act="delete-image" data-poi-id="${poi.poiId}" title="Delete Image">🖼</button>
                             <button class="otl-poi-icon danger" data-act="delete-poi-inline" data-poi-id="${poi.poiId}" title="Delete POI">🗑</button>
@@ -2260,6 +5159,7 @@ class TourLoaderPanel implements TourLoaderController {
                     <div class="otl-poi-row-bottom">
                         <img class="otl-poi-preview ${hasImage ? '' : 'placeholder'}" src="${previewSrc}" alt="${poi.poiName}" />
                         <div class="otl-poi-content-wrap">
+                            <div class="otl-muted" style="margin-bottom:6px;">Hotspots: ${hotspotCount}</div>
                             <textarea class="otl-poi-content" data-field="poi-content" data-poi-id="${poi.poiId}" placeholder="AI narrative content...">${poi.content || ''}</textarea>
                             <button class="otl-poi-prompt" data-act="open-prompt" data-poi-id="${poi.poiId}" title="Prompt Settings">⚙</button>
                             <button class="otl-poi-gen" data-act="generate-one" data-poi-id="${poi.poiId}" title="Generate Content">✦</button>
@@ -2433,6 +5333,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.pois.forEach((p, i) => { p.sortOrder = i; });
         if (this.selectedPoiId === poiId) this.selectedPoiId = this.pois[0]?.poiId || null;
         this.refreshPoiControls();
+        this.hotspotController.activatePoi(this.selectedPoiId);
         this.debounceSave('delete-poi-inline');
     }
 
@@ -2500,6 +5401,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.modelFilename = this.options.getModelFilename();
         if (!this.modelFilename) {
             this.stopPlayback();
+            this.hotspotController.activatePoi(null);
             this.points = [];
             this.pois = [];
             this.selectedPoiId = null;
@@ -2553,6 +5455,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.eyeHeightM = Number(data?.profile?.eyeHeightM ?? 1.65);
             this.selectedPoiId = this.pois[0]?.poiId || null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
             this.setStatus(this.pois.length > 0 ? `Loaded ${this.pois.length} POIs` : 'No saved POIs');
             this.logDebug('load', `state loaded for ${this.modelFilename}`);
         } catch (error) {
@@ -2560,6 +5463,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.pois = [];
             this.selectedPoiId = null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(null);
             this.setStatus('Map ready; failed to load saved POIs');
         }
     }
@@ -2723,6 +5627,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.playback.segmentStartMs = 0;
         this.playback.segmentDurationMs = 0;
         this.playback.dwellUntilMs = 0;
+        this.hotspotController.activatePoi(null);
         this.refreshPlaybackUi();
         if (statusText) this.setStatus(statusText);
     }
@@ -2741,6 +5646,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (list.length === 1) {
                 const onlyPoi = list[0];
                 void this.options.setLiveCameraPose?.(this.currentCameraTargetFromPoi(onlyPoi), clampFov(onlyPoi.targetFov, DEFAULT_POI_FOV));
+                this.hotspotController.activatePoi(onlyPoi.poiId, { playback: true });
                 this.playback.rafId = window.requestAnimationFrame(tick);
                 return;
             }
@@ -2748,6 +5654,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (this.playback.dwellUntilMs > now) {
                 const currentPoi = list[this.playback.index % list.length];
                 void this.options.setLiveCameraPose?.(this.currentCameraTargetFromPoi(currentPoi), clampFov(currentPoi.targetFov, DEFAULT_POI_FOV));
+                this.hotspotController.activatePoi(currentPoi.poiId, { playback: true });
                 this.playback.rafId = window.requestAnimationFrame(tick);
                 return;
             }
@@ -2782,6 +5689,7 @@ class TourLoaderPanel implements TourLoaderController {
                 this.playback.segmentDurationMs = 0;
                 this.playback.segmentStartMs = 0;
                 this.playback.dwellUntilMs = now + Math.max(80, arrived.dwellMs);
+                this.hotspotController.activatePoi(arrived.poiId, { playback: true });
             }
 
             this.playback.rafId = window.requestAnimationFrame(tick);
@@ -2800,6 +5708,8 @@ class TourLoaderPanel implements TourLoaderController {
         this.playback.segmentStartMs = 0;
         this.playback.segmentDurationMs = 0;
         this.playback.dwellUntilMs = 0;
+        const firstPoi = this.pois.slice().sort((a, b) => a.sortOrder - b.sortOrder)[0] || null;
+        this.hotspotController.activatePoi(firstPoi?.poiId || null, { playback: true });
         this.refreshPlaybackUi();
         this.setStatus('Playback started');
         this.ensurePlaybackLoop();
@@ -2817,6 +5727,77 @@ class TourLoaderPanel implements TourLoaderController {
             this.csvExportEventSource.close();
             this.csvExportEventSource = null;
         }
+    }
+
+    private closeCinematicEventStream() {
+        if (this.cinematicEventSource) {
+            this.cinematicEventSource.close();
+            this.cinematicEventSource = null;
+        }
+    }
+
+    private streamCinematicJob(jobId: string, kind: 'prompt' | 'timeline') {
+        this.closeCinematicEventStream();
+        return new Promise<any>((resolve, reject) => {
+            const es = new EventSource(`${this.apiBase()}/cinematic/jobs/${encodeURIComponent(jobId)}/events`);
+            this.cinematicEventSource = es;
+            let sseTimeout = 0;
+            let firstEventReceived = false;
+            const timeoutMs = () => (firstEventReceived ? 30000 : 45000);
+            const resetSseTimeout = () => {
+                if (sseTimeout) window.clearTimeout(sseTimeout);
+                sseTimeout = window.setTimeout(() => {
+                    const wait = timeoutMs();
+                    this.logDebug(`cine.${kind}.stream`, firstEventReceived
+                        ? `SSE timeout: no events for ${wait}ms (jobId=${jobId})`
+                        : `SSE waiting first event > ${wait}ms (jobId=${jobId})`);
+                }, timeoutMs());
+            };
+            resetSseTimeout();
+            const finish = (result?: any, error?: any) => {
+                if (sseTimeout) window.clearTimeout(sseTimeout);
+                this.closeCinematicEventStream();
+                if (error) reject(error);
+                else resolve(result);
+            };
+            const on = (type: string, fn: (payload: any) => void) => {
+                es.addEventListener(type, (evt) => {
+                    firstEventReceived = true;
+                    resetSseTimeout();
+                    try {
+                        fn(JSON.parse((evt as MessageEvent).data || '{}'));
+                    } catch {
+                        fn({});
+                    }
+                });
+            };
+            on('job.started', (p) => this.logDebug(`cine.${kind}.job`, `started jobId=${p.jobId || jobId} model=${p.llmModel || '-'} endpoint=${p.apiEndpoint || '-'}`));
+            on('prompt.input', (p) => this.logDebug('cine.prompt.input', `simplePromptChars=${p.promptChars ?? '-'} prompt="${this.debugText(String(p.simplePrompt || ''), 1200)}"`));
+            on('timeline.payload.summary', (p) => this.logDebug('cine.timeline.payload', `duration=${p.targetDurationSec ?? '-'} poiCount=${p.poiCount ?? '-'} imageCount=${p.imageCount ?? '-'} bbox=${this.debugText(JSON.stringify(p.boundingBox || {}, null, 2), 2400)}`));
+            on('timeline.payload.poi', (p) => this.logDebug('cine.timeline.poi', `index=${p.index ?? '-'} poiId=${p.poiId || '-'} name=${p.poiName || '-'} pos=(${p.targetX}, ${p.targetY}, ${p.targetZ}) yaw=${p.targetYaw} pitch=${p.targetPitch} imageBytes=${p.imageBytes ?? 0} imageMime=${p.imageMime || '-'} imageSha256=${p.imageSha256 || '-'} content="${this.debugText(String(p.content || ''), 1000)}"`));
+            on('timeline.prompt', (p) => this.logDebug('cine.timeline.prompt', `promptChars=${p.promptChars ?? '-'} prompt="${this.debugText(String(p.prompt || ''), 4000)}"`));
+            on('timeline.media.detected', (p) => this.logDebug('cine.timeline.media', `requested=${Boolean(p.requested)} orbitLike=${Boolean(p.orbitLike)} promptPreview="${this.debugText(String(p.promptPreview || ''), 240)}"`));
+            on('timeline.media.enriched', (p) => this.logDebug('cine.timeline.media', `totalMediaKeyframes=${p.totalMediaKeyframes ?? 0} placeholderKeyframes=${p.placeholderKeyframes ?? 0}`));
+            on('api.call', (p) => this.logDebug(`cine.${kind}.api.call`, `model=${p.llmModel || '-'} endpoint=${p.apiEndpoint || '-'} promptChars=${p.promptChars ?? '-'} imageCount=${p.imageCount ?? '-'} hasApiKey=${p.hasApiKey}`));
+            on('api.request.raw', (p) => this.logDebug(`cine.${kind}.api.request.raw`, `provider=${p.provider || '-'} imageCount=${p.imageCount ?? '-'} requestJson=${this.debugText(JSON.stringify(p.requestJson || {}, null, 2), 12000)}`));
+            on('api.chunk', (p) => this.logDebug(`cine.${kind}.chunk`, `idx=${p.chunkIndex ?? '-'} chunkChars=${p.chunkChars ?? '-'} totalChars=${p.contentCharsSoFar ?? '-'} chunk="${this.debugText(String(p.chunk?.text || p.chunk || ''), 260)}"`));
+            on('api.response.raw', (p) => this.logDebug(`cine.${kind}.api.response.raw`, `frame=${p.frameIndex ?? '-'} rawJson=${this.debugText(String(p.rawJson || ''), 12000)}`));
+            on('api.response', (p) => this.logDebug(`cine.${kind}.api.response`, `ok=${p.ok} status=${p.status ?? '-'} requestId=${p.requestId || '-'} finishReason=${p.finishReason || '-'} chunkCount=${p.chunkCount ?? '-'} usageTotalTokens=${p.usageMetadata?.totalTokenCount ?? '-'} contentChars=${p.contentChars ?? '-'} preview="${this.debugText(String(p.preview || ''), 800)}"`));
+            on('api.error', (p) => this.logDebug(`cine.${kind}.api.error`, `status=${p.status ?? '-'} requestId=${p.requestId || '-'} finishReason=${p.finishReason || '-'} usageTotalTokens=${p.usageMetadata?.totalTokenCount ?? '-'} error=${p.error || '-'} errorCause=${this.debugText(String(p.errorCause || ''), 1200)} errorRaw=${this.debugText(String(p.errorRaw || ''), 4000)}`));
+            on('heartbeat', (p) => this.logDebug(`cine.${kind}.heartbeat`, `waitingMs=${p.waitingMs ?? '-'} jobId=${p.jobId || jobId}`));
+            on('timeline.plan.parsed', (p) => this.logDebug('cine.timeline.plan', `shots=${p.shots ?? '-'} totalKeyframes=${p.totalKeyframes ?? '-'}`));
+            on('job.done', (p) => {
+                this.logDebug(`cine.${kind}.job`, `done jobId=${p.jobId || jobId}`);
+                finish(p);
+            });
+            on('job.error', (p) => {
+                this.logDebug(`cine.${kind}.error`, String(p.error || 'unknown error'));
+                finish(undefined, new Error(String(p.error || 'unknown error')));
+            });
+            es.onerror = () => {
+                this.logDebug(`cine.${kind}.stream`, 'event stream disconnected');
+            };
+        });
     }
 
     private streamCsvExportJob(jobId: string) {
@@ -3015,6 +5996,137 @@ class TourLoaderPanel implements TourLoaderController {
         };
     }
 
+    private cinematicSelectedPoisForLlm() {
+        const selected = this.pois
+            .filter((poi) => this.cinematicSelectedPoiIds.includes(poi.poiId))
+            .sort((a, b) => a.sortOrder - b.sortOrder);
+        return (selected.length >= 2 ? selected : this.pois.slice().sort((a, b) => a.sortOrder - b.sortOrder).slice(0, 4)).map((poi) => ({
+            poiId: poi.poiId,
+            poiName: poi.poiName,
+            content: String(poi.content || ''),
+            screenshotDataUrl: String(poi.screenshotDataUrl || ''),
+            targetX: poi.targetX,
+            targetY: poi.targetY,
+            targetZ: poi.targetZ,
+            targetYaw: poi.targetYaw,
+            targetPitch: poi.targetPitch,
+            targetFov: poi.targetFov,
+            moveSpeedMps: poi.moveSpeedMps
+        }));
+    }
+
+    private async generateCinematicPromptViaLlm() {
+        this.syncCinematicStateFromInputs();
+        const llm = this.currentLlmRequest();
+        const modelFilename = this.modelFilename || this.options.getModelFilename();
+        let simplePrompt = String(this.cinematicSimplePrompt || '').trim();
+        if (modelFilename) {
+            this.modelFilename = modelFilename;
+            this.setModelReady(true);
+        }
+        if (!modelFilename) throw new Error('Model unavailable');
+        if (!simplePrompt) throw new Error('Simple prompt is empty');
+        if (this.csvVoiceConfig.enabled && this.csvVoiceConfig.voicePool.length > 0) {
+            simplePrompt += `\n\n【语音约束】: 启用了多声音轮询策略，可用声音池为: ${this.csvVoiceConfig.voicePool.join(', ')}。请在生成时为每个 shot 分配适合其情感基调的语音角色。`;
+        } else {
+            simplePrompt += `\n\n【语音约束】: 采用固定单语音旁白。请保证全篇文案口吻统一。`;
+        }
+        try {
+            this.logDebug('cine.prompt.api.call', `POST ${this.apiBase()}/cinematic/jobs/prompt provider=${llm.provider} model=${llm.model}`);
+            const response = await fetch(`${this.apiBase()}/cinematic/jobs/prompt`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    modelFilename,
+                    simplePrompt,
+                    ttsConfig: this.csvVoiceConfig,
+                    llm: {
+                        provider: llm.provider,
+                        model: llm.model,
+                        apiKey: llm.apiKey
+                    }
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data?.ok || !data?.jobId) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+            const result = await this.streamCinematicJob(String(data.jobId), 'prompt');
+            const plannerPrompt = String(result?.plannerPrompt || '').trim();
+            if (!plannerPrompt) throw new Error('Prompt generation returned empty content');
+            this.cinematicPlannerPrompt = plannerPrompt;
+            this.cinematicPlannerPromptInput.value = plannerPrompt;
+            this.cinematicComplexPromptEditor.value = plannerPrompt;
+            this.setCinematicStatus('Planner prompt generated by LLM');
+        } catch (error) {
+            this.logDebug('cine.prompt.fallback', `local planner prompt fallback: ${String(error)}`);
+            this.expandCinematicPrompt();
+            this.cinematicComplexPromptEditor.value = this.cinematicPlannerPrompt;
+            this.setCinematicStatus('Planner prompt generated locally (fallback)');
+        }
+    }
+
+    private async generateCinematicPlanViaLlm() {
+        this.syncCinematicStateFromInputs();
+        const llm = this.currentLlmRequest();
+        const modelFilename = this.modelFilename || this.options.getModelFilename();
+        let plannerPrompt = String(this.cinematicPlannerPrompt || '').trim();
+        if (modelFilename) {
+            this.modelFilename = modelFilename;
+            this.setModelReady(true);
+        }
+        if (!modelFilename) throw new Error('Model unavailable');
+        if (!plannerPrompt) throw new Error('Complex prompt is empty');
+        if (this.csvVoiceConfig.enabled && this.csvVoiceConfig.voicePool.length > 0) {
+            plannerPrompt += `\n\n【语音约束】: 启用了多声音轮询策略，可用声音池为: ${this.csvVoiceConfig.voicePool.join(', ')}。请在生成时为每个 shot 分配适合其情感基调的语音角色。`;
+        } else {
+            plannerPrompt += `\n\n【语音约束】: 采用固定单语音旁白。请保证全篇文案口吻统一。`;
+        }
+        const pois = this.cinematicSelectedPoisForLlm();
+        if (pois.length < 2) throw new Error('Need at least 2 POIs for cinematic timeline');
+        try {
+            this.logDebug('cine.timeline.api.call', `POST ${this.apiBase()}/cinematic/jobs/timeline provider=${llm.provider} model=${llm.model} poiIds=${pois.map((poi) => poi.poiId).join(',')}`);
+            const response = await fetch(`${this.apiBase()}/cinematic/jobs/timeline`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    modelFilename,
+                    plannerPrompt,
+                    targetDurationSec: this.cinematicTargetDurationSec,
+                    pois,
+                    ttsConfig: this.csvVoiceConfig,
+                    llm: {
+                        provider: llm.provider,
+                        model: llm.model,
+                        apiKey: llm.apiKey
+                    }
+                })
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data?.ok || !data?.jobId) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+            const result = await this.streamCinematicJob(String(data.jobId), 'timeline');
+            const plan = result?.plan as CinematicPlan | undefined;
+            if (!plan?.shots?.length) throw new Error('Timeline generation returned no shots');
+            this.normalizeCinematicPlanMedia(plan);
+            this.applyPromptedMediaFallbackToPlan(plan, plannerPrompt);
+            plan.bgm = this.cinematicBgmSelection ? { ...this.cinematicBgmSelection } : (plan.bgm || null);
+            this.applyStoredSpeechTimingToPlan(plan);
+            const mediaKeyframeCount = plan.shots.reduce((sum, shot) => sum + shot.keyframes.filter((kf) => kf.mediaObject?.enabled).length, 0);
+            const placeholderCount = plan.shots.reduce((sum, shot) => sum + shot.keyframes.filter((kf) => kf.mediaObject?.enabled && (kf.mediaObject?.placeholder || !kf.mediaObject?.src)).length, 0);
+            this.logDebug('cine.timeline.media', `frontend mediaKeyframes=${mediaKeyframeCount} placeholderKeyframes=${placeholderCount}`);
+            this.cinematicPlan = plan;
+        } catch (error) {
+            this.logDebug('cine.timeline.fallback', `local cinematic timeline fallback: ${String(error)}`);
+            this.generateCinematicPlan();
+        }
+        const plan = this.cinematicPlan;
+        if (!plan?.shots?.length) throw new Error('Timeline generation returned no shots');
+        this.cinematicSelectedPoiIds = Array.isArray(plan.selectedPoiIds) && plan.selectedPoiIds.length > 0 ? plan.selectedPoiIds : pois.map((poi) => poi.poiId);
+        this.cinematicCurrentTimeSec = 0;
+        this.selectedCinematicShotId = plan.shots[0]?.shotId || null;
+        this.selectedCinematicKeyframeId = plan.shots[0]?.keyframes[0]?.keyframeId || null;
+        this.refreshCinematicUi();
+        this.setCinematicStatus(`Plan generated with ${plan.shots.length} shots`);
+    }
+
     private async startGenerate(mode: 'single' | 'batch', poiIds: string[]) {
         if (!this.requireModel() || poiIds.length < 1) return;
         const llm = this.currentLlmRequest();
@@ -3117,6 +6229,14 @@ class TourLoaderPanel implements TourLoaderController {
         this.closeCsvContentEditor();
     }
 
+    private deleteCsvGridRow(rowIndex: number) {
+        if (rowIndex < 0 || rowIndex >= this.csvGridRows.length) return;
+        this.csvGridRows.splice(rowIndex, 1);
+        this.csvEditorInput.value = this.buildCsvTextFromGrid();
+        this.markCsvEditorDirty();
+        this.renderCsvGrid();
+    }
+
     private parseCsvText(csvText: string) {
         const rows: string[][] = [];
         let row: string[] = [];
@@ -3200,6 +6320,10 @@ class TourLoaderPanel implements TourLoaderController {
         this.csvGridWrapEl.appendChild(this.csvGridTableEl);
         const head = document.createElement('thead');
         const headRow = document.createElement('tr');
+        const rowActionTh = document.createElement('th');
+        rowActionTh.className = 'row-action';
+        rowActionTh.textContent = '#';
+        headRow.appendChild(rowActionTh);
         this.csvGridHeaders.forEach((header) => {
             const th = document.createElement('th');
             th.textContent = header;
@@ -3209,8 +6333,34 @@ class TourLoaderPanel implements TourLoaderController {
         this.csvGridTableEl.appendChild(head);
 
         const body = document.createElement('tbody');
+        if (this.csvGridRows.length < 1) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = this.csvGridHeaders.length + 1;
+            td.className = 'otl-csv-grid-empty';
+            td.textContent = 'No CSV rows';
+            tr.appendChild(td);
+            body.appendChild(tr);
+        }
         this.csvGridRows.forEach((row, rowIndex) => {
             const tr = document.createElement('tr');
+            const actionTd = document.createElement('td');
+            actionTd.className = 'row-action';
+            const tools = document.createElement('div');
+            tools.className = 'otl-csv-row-tools';
+            const rowNo = document.createElement('span');
+            rowNo.className = 'otl-csv-row-index';
+            rowNo.textContent = String(rowIndex + 1);
+            const delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.className = 'otl-csv-row-delete';
+            delBtn.title = `Delete row ${rowIndex + 1}`;
+            delBtn.innerHTML = CSV_ICON_DELETE;
+            delBtn.addEventListener('click', () => this.deleteCsvGridRow(rowIndex));
+            tools.appendChild(rowNo);
+            tools.appendChild(delBtn);
+            actionTd.appendChild(tools);
+            tr.appendChild(actionTd);
             this.csvGridHeaders.forEach((headerName, colIndex) => {
                 const td = document.createElement('td');
                 const isContentCol = String(headerName || '').trim().toLowerCase() === 'content';
@@ -3561,6 +6711,501 @@ class TourLoaderPanel implements TourLoaderController {
         this.setCsvWorkspaceStatus(`Downloaded v${current?.versionNo || this.selectedCsvVersionId}`);
     }
 
+    private setCinematicCwCsvWorkspaceStatus(text: string) {
+        this.cinematicCwCsvWorkspaceStatusEl.textContent = text;
+    }
+
+    private setCinematicCwCsvWorkspaceTimingStatus(prefix: string, summary?: CsvTimingSummary | null) {
+        this.cinematicCwCsvTimingSummary = summary || null;
+        this.renderCinematicCwCsvTimingConfig();
+        const timing = formatCsvTimingSummary(summary);
+        this.setCinematicCwCsvWorkspaceStatus(timing ? `${prefix} | ${timing}` : prefix);
+    }
+
+    private setCinematicCwCsvWorkspaceFullscreen(enabled: boolean) {
+        this.cinematicCwCsvWorkspaceFullscreen = enabled;
+        this.cinematicCwCsvWorkspacePanel.classList.toggle('fullscreen', enabled);
+        const btn = this.root.querySelector('[data-act="cinematic-cw-csv-workspace-fullscreen"]') as HTMLButtonElement | null;
+        if (btn) {
+            btn.textContent = enabled ? '🗗' : '⛶';
+            btn.title = enabled ? 'Exit Fullscreen' : 'Fullscreen';
+        }
+        if (enabled) {
+            this.cinematicCwCsvWorkspacePanel.classList.add('floating');
+            this.cinematicCwCsvWorkspacePanel.style.left = '12px';
+            this.cinematicCwCsvWorkspacePanel.style.top = '12px';
+        }
+    }
+
+    private markCinematicCwCsvEditorDirty() {
+        this.cinematicCwCsvEditorDirty = true;
+        const current = this.selectedCinematicCwCsvVersion();
+        this.setCinematicCwCsvWorkspaceStatus(current ? `Editing v${current.versionNo} (unsaved)` : 'Editing (unsaved)');
+    }
+
+    private openCinematicCwCsvContentEditor(row: number, col: number) {
+        const header = String(this.cinematicCwCsvGridHeaders[col] || `col_${col + 1}`);
+        this.cinematicCwCsvContentEditTarget = { row, col };
+        this.cinematicCwCsvContentTitleEl.textContent = `Edit ${header} row ${row + 1}`;
+        this.cinematicCwCsvContentInput.value = String(this.cinematicCwCsvGridRows[row]?.[col] || '');
+        this.cinematicCwCsvContentModal.classList.remove('hidden');
+    }
+
+    private closeCinematicCwCsvContentEditor() {
+        this.cinematicCwCsvContentEditTarget = null;
+        this.cinematicCwCsvContentModal.classList.add('hidden');
+    }
+
+    private saveCinematicCwCsvContentEditor() {
+        const target = this.cinematicCwCsvContentEditTarget;
+        if (!target) return;
+        const { row, col } = target;
+        if (!this.cinematicCwCsvGridRows[row]) return;
+        this.cinematicCwCsvGridRows[row][col] = this.cinematicCwCsvContentInput.value;
+        this.cinematicCwCsvEditorInput.value = this.buildCinematicCwCsvTextFromGrid();
+        this.markCinematicCwCsvEditorDirty();
+        this.renderCinematicCwCsvGrid();
+        this.closeCinematicCwCsvContentEditor();
+    }
+
+    private deleteCinematicCwCsvGridRow(rowIndex: number) {
+        if (rowIndex < 0 || rowIndex >= this.cinematicCwCsvGridRows.length) return;
+        this.cinematicCwCsvGridRows.splice(rowIndex, 1);
+        this.cinematicCwCsvEditorInput.value = this.buildCinematicCwCsvTextFromGrid();
+        this.markCinematicCwCsvEditorDirty();
+        this.renderCinematicCwCsvGrid();
+    }
+
+    private parseCinematicCwCsvText(csvText: string) {
+        const rows: string[][] = [];
+        let row: string[] = [];
+        let cell = '';
+        let inQuotes = false;
+        const text = String(csvText || '');
+        for (let i = 0; i < text.length; i += 1) {
+            const ch = text[i];
+            if (inQuotes) {
+                if (ch === '"') {
+                    if (text[i + 1] === '"') {
+                        cell += '"';
+                        i += 1;
+                    } else {
+                        inQuotes = false;
+                    }
+                } else {
+                    cell += ch;
+                }
+                continue;
+            }
+            if (ch === '"') {
+                inQuotes = true;
+                continue;
+            }
+            if (ch === ',') {
+                row.push(cell);
+                cell = '';
+                continue;
+            }
+            if (ch === '\n') {
+                row.push(cell);
+                rows.push(row);
+                row = [];
+                cell = '';
+                continue;
+            }
+            if (ch === '\r') continue;
+            cell += ch;
+        }
+        if (cell.length > 0 || row.length > 0) {
+            row.push(cell);
+            rows.push(row);
+        }
+        if (rows.length < 1) return { headers: [], rows: [] as string[][] };
+        const headers = rows[0].map((item) => String(item || ''));
+        const width = Math.max(1, headers.length);
+        const body = rows.slice(1).map((item) => {
+            const out = item.slice(0, width).map((v) => String(v || ''));
+            while (out.length < width) out.push('');
+            return out;
+        });
+        return { headers, rows: body };
+    }
+
+    private buildCinematicCwCsvTextFromGrid() {
+        if (this.cinematicCwCsvGridHeaders.length < 1) return String(this.cinematicCwCsvEditorInput.value || '');
+        const width = this.cinematicCwCsvGridHeaders.length;
+        const lines: string[] = [];
+        lines.push(this.cinematicCwCsvGridHeaders.map((item) => escapeCsv(item)).join(','));
+        this.cinematicCwCsvGridRows.forEach((row) => {
+            const cols = row.slice(0, width).map((item) => escapeCsv(item));
+            while (cols.length < width) cols.push('');
+            lines.push(cols.join(','));
+        });
+        return lines.join('\n');
+    }
+
+    private renderCinematicCwCsvGrid() {
+        this.cinematicCwCsvGridTableEl.innerHTML = '';
+        if (this.cinematicCwCsvGridHeaders.length < 1) {
+            const empty = document.createElement('div');
+            empty.className = 'otl-muted';
+            empty.style.padding = '10px';
+            empty.textContent = 'No CSV content';
+            this.cinematicCwCsvGridWrapEl.innerHTML = '';
+            this.cinematicCwCsvGridWrapEl.appendChild(empty);
+            return;
+        }
+        this.cinematicCwCsvGridWrapEl.innerHTML = '';
+        this.cinematicCwCsvGridWrapEl.appendChild(this.cinematicCwCsvGridTableEl);
+        const head = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        const rowActionTh = document.createElement('th');
+        rowActionTh.className = 'row-action';
+        rowActionTh.textContent = '#';
+        headRow.appendChild(rowActionTh);
+        this.cinematicCwCsvGridHeaders.forEach((header) => {
+            const th = document.createElement('th');
+            th.textContent = header;
+            headRow.appendChild(th);
+        });
+        head.appendChild(headRow);
+        this.cinematicCwCsvGridTableEl.appendChild(head);
+
+        const body = document.createElement('tbody');
+        if (this.cinematicCwCsvGridRows.length < 1) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = this.cinematicCwCsvGridHeaders.length + 1;
+            td.className = 'otl-csv-grid-empty';
+            td.textContent = 'No CSV rows';
+            tr.appendChild(td);
+            body.appendChild(tr);
+        }
+        this.cinematicCwCsvGridRows.forEach((row, rowIndex) => {
+            const tr = document.createElement('tr');
+            const actionTd = document.createElement('td');
+            actionTd.className = 'row-action';
+            const tools = document.createElement('div');
+            tools.className = 'otl-csv-row-tools';
+            const rowNo = document.createElement('span');
+            rowNo.className = 'otl-csv-row-index';
+            rowNo.textContent = String(rowIndex + 1);
+            const delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.className = 'otl-csv-row-delete';
+            delBtn.title = `Delete row ${rowIndex + 1}`;
+            delBtn.innerHTML = CSV_ICON_DELETE;
+            delBtn.addEventListener('click', () => this.deleteCinematicCwCsvGridRow(rowIndex));
+            tools.appendChild(rowNo);
+            tools.appendChild(delBtn);
+            actionTd.appendChild(tools);
+            tr.appendChild(actionTd);
+            this.cinematicCwCsvGridHeaders.forEach((headerName, colIndex) => {
+                const td = document.createElement('td');
+                const isContentCol = String(headerName || '').trim().toLowerCase() === 'content';
+                if (isContentCol) {
+                    const preview = document.createElement('div');
+                    preview.className = 'otl-csv-content-cell';
+                    preview.textContent = String(row[colIndex] || '');
+                    preview.title = 'Click to edit content';
+                    preview.addEventListener('click', () => this.openCinematicCwCsvContentEditor(rowIndex, colIndex));
+                    td.appendChild(preview);
+                    tr.appendChild(td);
+                    return;
+                }
+                const input = document.createElement('input');
+                input.className = 'otl-csv-grid-cell';
+                input.type = 'text';
+                input.value = String(row[colIndex] || '');
+                input.addEventListener('input', () => {
+                    this.cinematicCwCsvGridRows[rowIndex][colIndex] = input.value;
+                    this.cinematicCwCsvEditorInput.value = this.buildCinematicCwCsvTextFromGrid();
+                    this.markCinematicCwCsvEditorDirty();
+                });
+                td.appendChild(input);
+                tr.appendChild(td);
+            });
+            body.appendChild(tr);
+        });
+        this.cinematicCwCsvGridTableEl.appendChild(body);
+    }
+
+    private renderCinematicCwCsvVoiceConfig() {
+        this.cinematicCwCsvVoiceConfig = normalizeCsvVoiceConfig(this.cinematicCwCsvVoiceConfig);
+        const options = TTS_VOICE_OPTIONS_BY_MODEL[this.cinematicCwCsvVoiceConfig.model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
+        this.cinematicCwCsvVoiceEnabledInput.checked = this.cinematicCwCsvVoiceConfig.enabled;
+        this.cinematicCwCsvVoiceModelSelect.value = this.cinematicCwCsvVoiceConfig.model;
+        this.cinematicCwCsvVoiceFixedSelect.innerHTML = options.map((option) => `<option value="${option.value}">${option.label} - ${option.subtitle} (${option.value})</option>`).join('');
+        this.cinematicCwCsvVoiceFixedSelect.value = this.cinematicCwCsvVoiceConfig.fixedVoice;
+        const grouped = new Map<string, TtsVoiceOption[]>();
+        options.forEach((option) => {
+            const list = grouped.get(option.group) || [];
+            list.push(option);
+            grouped.set(option.group, list);
+        });
+        this.cinematicCwCsvVoiceListEl.innerHTML = '';
+        grouped.forEach((items, group) => {
+            const title = document.createElement('div');
+            title.className = 'otl-voice-group-title';
+            title.textContent = group;
+            this.cinematicCwCsvVoiceListEl.appendChild(title);
+            items.forEach((option) => {
+                const label = document.createElement('label');
+                label.className = 'otl-voice-item';
+                const checked = this.cinematicCwCsvVoiceConfig.voicePool.includes(option.value);
+                label.innerHTML = `
+                    <input type="checkbox" data-role="cinematic-cw-csv-voice-item" value="${option.value}" ${checked ? 'checked' : ''} />
+                    <div class="otl-voice-item-main">
+                        <div>${option.label} - ${option.subtitle}</div>
+                        <div class="otl-voice-code">${option.value}</div>
+                    </div>
+                `;
+                this.cinematicCwCsvVoiceListEl.appendChild(label);
+            });
+        });
+        this.cinematicCwCsvVoiceSummaryEl.textContent = summarizeCsvVoiceConfig(this.cinematicCwCsvVoiceConfig);
+    }
+
+    private renderCinematicCwCsvTimingConfig() {
+        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig(this.cinematicCwCsvTimingConfig);
+        this.cinematicCwCsvTimingEnabledInput.checked = this.cinematicCwCsvTimingConfig.enabled;
+        this.cinematicCwCsvTimingInput.value = String(this.cinematicCwCsvTimingConfig.targetDurationSec);
+        this.cinematicCwCsvTimingMinimumEl.textContent = describeTimingValue(this.cinematicCwCsvTimingSummary?.minimumAchievableSec);
+        this.cinematicCwCsvTimingEstimatedEl.textContent = describeTimingValue(this.cinematicCwCsvTimingSummary?.estimatedDurationSec);
+        this.cinematicCwCsvTimingSummaryEl.textContent = this.cinematicCwCsvTimingConfig.enabled
+            ? `Timing: ${formatCsvTimingSummary(this.cinematicCwCsvTimingSummary || {
+                enabled: true,
+                targetDurationSec: this.cinematicCwCsvTimingConfig.targetDurationSec,
+                minimumAchievableSec: this.cinematicCwCsvTimingSummary?.minimumAchievableSec ?? null,
+                estimatedDurationSec: this.cinematicCwCsvTimingSummary?.estimatedDurationSec ?? null
+            }) || `目标 ${this.cinematicCwCsvTimingConfig.targetDurationSec}s`}`
+            : 'Timing: default generation';
+    }
+
+    private setCinematicCwCsvEditorText(csvText: string) {
+        const normalized = String(csvText || '');
+        this.cinematicCwCsvEditorInput.value = normalized;
+        const parsed = this.parseCinematicCwCsvText(normalized);
+        this.cinematicCwCsvGridHeaders = parsed.headers;
+        this.cinematicCwCsvGridRows = parsed.rows;
+        this.renderCinematicCwCsvGrid();
+    }
+
+    private getCinematicCwCsvEditorText() {
+        return this.buildCinematicCwCsvTextFromGrid();
+    }
+
+    private selectedCinematicCwCsvVersion() {
+        return this.cinematicCwCsvVersions.find((item) => item.id === this.selectedCinematicCwCsvVersionId) || null;
+    }
+
+    private renderCinematicCwCsvVersionList() {
+        this.cinematicCwCsvVersionListEl.innerHTML = '';
+        if (this.cinematicCwCsvVersions.length < 1) {
+            const empty = document.createElement('div');
+            empty.className = 'otl-muted';
+            empty.textContent = 'No CSV versions yet';
+            this.cinematicCwCsvVersionListEl.appendChild(empty);
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        this.cinematicCwCsvVersions.forEach((version) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `otl-csv-version-item${version.id === this.selectedCinematicCwCsvVersionId ? ' active' : ''}`;
+            btn.setAttribute('data-act', 'cinematic-cw-csv-version-select');
+            btn.setAttribute('data-version-id', String(version.id));
+            const status = version.status === 'confirmed' ? 'confirmed' : 'draft';
+            btn.textContent = `v${version.versionNo} ${status} ${version.updatedAt}`;
+            frag.appendChild(btn);
+        });
+        this.cinematicCwCsvVersionListEl.appendChild(frag);
+    }
+
+    private async loadCinematicCwCsvVersionList(preferredVersionId?: number | null) {
+        if (!this.requireModel(false)) return;
+        const response = await fetch(`${this.apiBase()}/csv/versions?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        this.cinematicCwCsvVersions = Array.isArray(data?.versions) ? data.versions as CsvVersionSummary[] : [];
+        const targetId = preferredVersionId && this.cinematicCwCsvVersions.some((item) => item.id === preferredVersionId)
+            ? preferredVersionId
+            : (this.selectedCinematicCwCsvVersionId && this.cinematicCwCsvVersions.some((item) => item.id === this.selectedCinematicCwCsvVersionId)
+                ? this.selectedCinematicCwCsvVersionId
+                : (this.cinematicCwCsvVersions[0]?.id || null));
+        this.selectedCinematicCwCsvVersionId = targetId;
+        this.renderCinematicCwCsvVersionList();
+        if (targetId) await this.loadCinematicCwCsvVersionDetail(targetId);
+        else {
+            this.setCinematicCwCsvEditorText('');
+            this.cinematicCwCsvEditorDirty = false;
+            this.setCinematicCwCsvWorkspaceStatus('No version selected');
+        }
+    }
+
+    private async loadCinematicCwCsvVersionDetail(versionId: number) {
+        if (!this.requireModel(false)) return;
+        const response = await fetch(`${this.apiBase()}/csv/versions/${encodeURIComponent(String(versionId))}?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.version) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        const detail = data.version as CsvVersionDetail;
+        this.selectedCinematicCwCsvVersionId = detail.id;
+        this.setCinematicCwCsvEditorText(String(detail.csvText || ''));
+        this.cinematicCwCsvEditorDirty = false;
+        this.renderCinematicCwCsvVersionList();
+        this.setCinematicCwCsvWorkspaceStatus(`Loaded v${detail.versionNo}`);
+    }
+
+    private async openCinematicCwCsvWorkspace() {
+        if (!this.requireModel()) return;
+        this.cinematicCwCsvVoiceConfig = normalizeCsvVoiceConfig(this.csvVoiceConfig);
+        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig(this.csvTimingConfig);
+        this.cinematicCwCsvTimingSummary = this.csvTimingSummary;
+        this.renderCinematicCwCsvVoiceConfig();
+        this.renderCinematicCwCsvTimingConfig();
+        this.cinematicCwCsvWorkspaceModal.classList.remove('hidden');
+        this.setCinematicCwCsvWorkspaceFullscreen(this.cinematicCwCsvWorkspaceFullscreen);
+        this.setCinematicCwCsvWorkspaceStatus('Loading versions...');
+        await this.loadCinematicCwCsvVersionList();
+    }
+
+    private async generateCinematicCwCsvVersion() {
+        if (!this.requireModel()) return;
+        const llm = this.currentLlmRequest();
+        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig({
+            ...this.cinematicCwCsvTimingConfig,
+            enabled: this.cinematicCwCsvTimingEnabledInput.checked,
+            targetDurationSec: Number(this.cinematicCwCsvTimingInput.value) || DEFAULT_CSV_TARGET_DURATION_SEC
+        });
+        this.setCinematicCwCsvWorkspaceStatus('Generating CSV...');
+        const response = await fetch(`${this.apiBase()}/csv/versions/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                modelFilename: this.modelFilename,
+                llm: {
+                    provider: llm.provider,
+                    model: llm.model,
+                    apiKey: llm.apiKey,
+                    csvPromptTemplate: this.csvPromptTemplate || DEFAULT_CSV_PROMPT_TEMPLATE,
+                    movePromptTemplate: this.movePromptTemplate || DEFAULT_MOVE_PROMPT_TEMPLATE
+                },
+                voiceConfig: this.cinematicCwCsvVoiceConfig,
+                timingConfig: this.cinematicCwCsvTimingConfig
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.version?.id) {
+            const error = new Error(data?.error?.message || `HTTP ${response.status}`) as Error & { timingSummary?: CsvTimingSummary | null };
+            error.timingSummary = data?.error?.details?.timingSummary || null;
+            throw error;
+        }
+        await this.loadCinematicCwCsvVersionList(Number(data.version.id));
+        this.setCinematicCwCsvWorkspaceTimingStatus(`Generated v${data.version.versionNo}`, data?.timingSummary || null);
+    }
+
+    private async estimateCinematicCwCsvTiming() {
+        if (!this.requireModel()) return;
+        const llm = this.currentLlmRequest();
+        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig({
+            ...this.cinematicCwCsvTimingConfig,
+            enabled: this.cinematicCwCsvTimingEnabledInput.checked,
+            targetDurationSec: Number(this.cinematicCwCsvTimingInput.value) || DEFAULT_CSV_TARGET_DURATION_SEC
+        });
+        this.renderCinematicCwCsvTimingConfig();
+        this.setCinematicCwCsvWorkspaceStatus('Estimating timing...');
+        const response = await fetch(`${this.apiBase()}/csv/timing/estimate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                modelFilename: this.modelFilename,
+                llm: {
+                    provider: llm.provider,
+                    model: llm.model,
+                    apiKey: llm.apiKey,
+                    csvPromptTemplate: this.csvPromptTemplate || DEFAULT_CSV_PROMPT_TEMPLATE,
+                    movePromptTemplate: this.movePromptTemplate || DEFAULT_MOVE_PROMPT_TEMPLATE
+                },
+                timingConfig: this.cinematicCwCsvTimingConfig
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        this.cinematicCwCsvTimingSummary = data?.timingSummary || null;
+        this.renderCinematicCwCsvTimingConfig();
+        this.setCinematicCwCsvWorkspaceTimingStatus('Timing estimated', this.cinematicCwCsvTimingSummary);
+    }
+
+    private async saveCinematicCwCsvVersion() {
+        if (!this.requireModel()) return;
+        if (!this.selectedCinematicCwCsvVersionId) throw new Error('no csv version selected');
+        const csvText = this.getCinematicCwCsvEditorText();
+        if (!csvText.trim()) throw new Error('csv is empty');
+        const response = await fetch(`${this.apiBase()}/csv/versions/${encodeURIComponent(String(this.selectedCinematicCwCsvVersionId))}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelFilename: this.modelFilename, csvText })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        await this.loadCinematicCwCsvVersionList(this.selectedCinematicCwCsvVersionId);
+        this.setCinematicCwCsvWorkspaceStatus(`Saved v${data?.version?.versionNo || ''}`.trim());
+    }
+
+    private async saveCinematicCwCsvVersionAsNew() {
+        if (!this.requireModel()) return;
+        if (!this.selectedCinematicCwCsvVersionId) throw new Error('no csv version selected');
+        const csvText = this.getCinematicCwCsvEditorText();
+        if (!csvText.trim()) throw new Error('csv is empty');
+        const response = await fetch(`${this.apiBase()}/csv/versions/${encodeURIComponent(String(this.selectedCinematicCwCsvVersionId))}/save-as-new`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelFilename: this.modelFilename, csvText })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.version?.id) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        await this.loadCinematicCwCsvVersionList(Number(data.version.id));
+        this.setCinematicCwCsvWorkspaceStatus(`Created v${data.version.versionNo}`);
+    }
+
+    private async deleteCinematicCwCsvVersion() {
+        if (!this.requireModel()) return;
+        if (!this.selectedCinematicCwCsvVersionId) throw new Error('no csv version selected');
+        const current = this.selectedCinematicCwCsvVersion();
+        const ok = window.confirm(`Delete CSV version v${current?.versionNo || this.selectedCinematicCwCsvVersionId}?`);
+        if (!ok) return;
+        const removeId = this.selectedCinematicCwCsvVersionId;
+        const response = await fetch(`${this.apiBase()}/csv/versions/${encodeURIComponent(String(removeId))}?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`, {
+            method: 'DELETE'
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        this.selectedCinematicCwCsvVersionId = null;
+        await this.loadCinematicCwCsvVersionList();
+        this.setCinematicCwCsvWorkspaceStatus(`Deleted v${current?.versionNo || removeId}`);
+    }
+
+    private async downloadCinematicCwCsvVersion() {
+        if (!this.requireModel()) return;
+        if (!this.selectedCinematicCwCsvVersionId) throw new Error('no csv version selected');
+        const response = await fetch(`${this.apiBase()}/csv/versions/${encodeURIComponent(String(this.selectedCinematicCwCsvVersionId))}/download?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`);
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        }
+        const csvText = await response.text();
+        const current = this.selectedCinematicCwCsvVersion();
+        const fallbackName = `ot-tour-loader-${String(this.modelFilename || 'model').replace(/[^a-zA-Z0-9_.-]/g, '_')}-v${current?.versionNo || this.selectedCinematicCwCsvVersionId}.csv`;
+        const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = fallbackName;
+        a.click();
+        URL.revokeObjectURL(blobUrl);
+        this.setCinematicCwCsvWorkspaceStatus(`Downloaded v${current?.versionNo || this.selectedCinematicCwCsvVersionId}`);
+    }
+
     private async importCsv(file: File) {
         if (!this.requireModel()) return;
         const csvText = await file.text();
@@ -3573,6 +7218,3545 @@ class TourLoaderPanel implements TourLoaderController {
         if (!data?.ok) throw new Error(data?.error?.message || 'import failed');
         await this.reload();
         this.setStatus(`Imported ${data.imported || 0} rows`);
+    }
+
+    private setCinematicStatus(text: string) {
+        this.cinematicStatusEl.textContent = text;
+    }
+
+    private cinematicSpeechMetricStorageKey(shotId: string) {
+        return `ot.cinematic.speech.metrics.${String(this.modelFilename || 'model')}.${String(shotId || '')}`;
+    }
+
+    private loadStoredSpeechMetrics(shotId: string) {
+        if (typeof window === 'undefined' || !shotId) return null;
+        try {
+            const raw = window.localStorage.getItem(this.cinematicSpeechMetricStorageKey(shotId));
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            const durationSec = Number(parsed?.durationSec || 0);
+            const charsPerSecond = Number(parsed?.charsPerSecond || 0);
+            const measuredChars = Number(parsed?.measuredChars || 0);
+            if (!(durationSec > 0) || !(charsPerSecond > 0)) return null;
+            return {
+                durationSec,
+                charsPerSecond,
+                measuredChars: measuredChars > 0 ? measuredChars : 0,
+                updatedAt: String(parsed?.updatedAt || ''),
+                ttsModel: parsed?.ttsModel ? String(parsed.ttsModel) : undefined,
+                ttsVoice: parsed?.ttsVoice ? String(parsed.ttsVoice) : undefined
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    private saveStoredSpeechMetrics(shot: CinematicShot) {
+        if (typeof window === 'undefined' || !shot?.shotId || !shot?.speechMetrics) return;
+        try {
+            window.localStorage.setItem(this.cinematicSpeechMetricStorageKey(shot.shotId), JSON.stringify(shot.speechMetrics));
+        } catch {}
+    }
+
+    private applyStoredSpeechTimingToShot(shot: CinematicShot) {
+        if (!shot) return;
+        const stored = shot.speechMetrics || this.loadStoredSpeechMetrics(shot.shotId);
+        if (!stored) return;
+        shot.speechMetrics = stored;
+        this.updateShotDurationFromSpeechMatch(shot);
+    }
+
+    private applyStoredSpeechTimingToPlan(plan: CinematicPlan | null) {
+        if (!plan?.shots?.length) return;
+        plan.shots.forEach((shot) => this.applyStoredSpeechTimingToShot(shot));
+    }
+
+    private stopCinematicSpeechPreview() {
+        this.updateCinematicRecordingAudioDucking(false);
+        if (this.cinematicSpeechAudio) {
+            try {
+                this.cinematicSpeechAudio.pause();
+                this.cinematicSpeechAudio.src = '';
+            } catch {}
+        }
+        this.cinematicSpeechAudio = null;
+        this.cinematicSpeechPlayingShotId = null;
+        this.cinematicSpeechLoadingShotId = null;
+    }
+
+    private async ensureCinematicRecordingAudioMix() {
+        if (this.cinematicRecordingAudioMix) {
+            if (this.cinematicRecordingAudioMix.context.state === 'suspended') {
+                await this.cinematicRecordingAudioMix.context.resume().catch(() => {
+                    // ignore resume failures and let playback fail naturally
+                });
+            }
+            return this.cinematicRecordingAudioMix;
+        }
+        const context = new AudioContext({ sampleRate: 48000 });
+        const destination = context.createMediaStreamDestination();
+        const masterGain = context.createGain();
+        const bgmGain = context.createGain();
+        const duckGain = context.createGain();
+        const speechGain = context.createGain();
+        const compressor = context.createDynamicsCompressor();
+        const bgmLowShelf = context.createBiquadFilter();
+        const bgmHighShelf = context.createBiquadFilter();
+        bgmLowShelf.type = 'lowshelf';
+        bgmLowShelf.frequency.value = 180;
+        bgmLowShelf.gain.value = 1.8;
+        bgmHighShelf.type = 'highshelf';
+        bgmHighShelf.frequency.value = 3200;
+        bgmHighShelf.gain.value = 1.4;
+        compressor.threshold.value = -20;
+        compressor.knee.value = 18;
+        compressor.ratio.value = 2.8;
+        compressor.attack.value = 0.003;
+        compressor.release.value = 0.2;
+        duckGain.gain.value = 1;
+        bgmGain.gain.value = 1;
+        speechGain.gain.value = 1;
+        masterGain.gain.value = 1;
+
+        bgmGain.connect(bgmLowShelf);
+        bgmLowShelf.connect(bgmHighShelf);
+        bgmHighShelf.connect(duckGain);
+        duckGain.connect(masterGain);
+        speechGain.connect(masterGain);
+        masterGain.connect(compressor);
+        compressor.connect(destination);
+        compressor.connect(context.destination);
+
+        this.cinematicRecordingAudioMix = {
+            context,
+            destination,
+            masterGain,
+            bgmGain,
+            duckGain,
+            speechGain,
+            compressor,
+            sources: new WeakMap()
+        };
+        await context.resume().catch(() => {
+            // ignore resume failures and let playback fail naturally
+        });
+        return this.cinematicRecordingAudioMix;
+    }
+
+    private connectCinematicRecordingAudioElement(audio: HTMLAudioElement, channel: 'bgm' | 'speech') {
+        const mix = this.cinematicRecordingAudioMix;
+        if (!mix) return;
+        if (mix.sources.has(audio)) return;
+        const source = mix.context.createMediaElementSource(audio);
+        mix.sources.set(audio, source);
+        source.connect(channel === 'bgm' ? mix.bgmGain : mix.speechGain);
+    }
+
+    private updateCinematicRecordingAudioDucking(active: boolean) {
+        const mix = this.cinematicRecordingAudioMix;
+        if (!mix) return;
+        const now = mix.context.currentTime;
+        const target = active ? 0.58 : 1;
+        mix.duckGain.gain.cancelScheduledValues(now);
+        mix.duckGain.gain.setTargetAtTime(target, now, active ? 0.02 : 0.12);
+    }
+
+    private stopCinematicRecordingAudioMix() {
+        const mix = this.cinematicRecordingAudioMix;
+        this.cinematicRecordingAudioMix = null;
+        if (!mix) return;
+        void mix.context.close().catch(() => {
+            // ignore close failures during teardown
+        });
+    }
+
+    private resetCinematicShotSpeechState() {
+        this.cinematicSpeechPlayedShotIds.clear();
+        this.cinematicSpeechLastShotId = null;
+        this.cinematicSpeechLastTimeSec = null;
+    }
+
+    private isCinematicBlockingSpeechInProgress() {
+        if (!this.cinematicSpeechAudio || !this.cinematicSpeechPlayingShotId || !this.cinematicPlan?.shots?.length) return false;
+        const playingShot = this.cinematicPlan.shots.find((shot) => shot.shotId === this.cinematicSpeechPlayingShotId) || null;
+        if (!playingShot || playingShot.speechMode !== 'BLOCKING') return false;
+        return !this.cinematicSpeechAudio.paused && !this.cinematicSpeechAudio.ended;
+    }
+
+    private attachCsvVoiceModalToCurrentWorkspace(workspaceLocal: boolean) {
+        if (workspaceLocal) {
+            if (this.csvVoiceModal.parentElement !== this.cinematicWorkspacePanel) {
+                this.cinematicWorkspacePanel.appendChild(this.csvVoiceModal);
+            }
+            this.csvVoiceModal.classList.add('workspace-local');
+            return;
+        }
+        if (this.csvVoiceModal.parentElement !== this.root) {
+            this.root.appendChild(this.csvVoiceModal);
+        }
+        this.csvVoiceModal.classList.remove('workspace-local');
+    }
+
+    private attachCsvTimingModalToCurrentWorkspace(workspaceLocal: boolean) {
+        if (workspaceLocal) {
+            if (this.csvTimingModal.parentElement !== this.cinematicWorkspacePanel) {
+                this.cinematicWorkspacePanel.appendChild(this.csvTimingModal);
+            }
+            this.csvTimingModal.classList.add('workspace-local');
+            return;
+        }
+        if (this.csvTimingModal.parentElement !== this.root) {
+            this.root.appendChild(this.csvTimingModal);
+        }
+        this.csvTimingModal.classList.remove('workspace-local');
+    }
+
+    private pinCinematicWorkspacePanel() {
+        if (this.cinematicWorkspaceFullscreen) return;
+        const rect = this.cinematicWorkspacePanel.getBoundingClientRect();
+        if (!this.cinematicWorkspaceFloatPos.initialized) {
+            this.cinematicWorkspaceFloatPos = {
+                left: rect.left,
+                top: rect.top,
+                initialized: true
+            };
+        }
+        this.cinematicWorkspacePanel.classList.add('floating');
+        this.cinematicWorkspacePanel.style.left = `${this.cinematicWorkspaceFloatPos.left}px`;
+        this.cinematicWorkspacePanel.style.top = `${this.cinematicWorkspaceFloatPos.top}px`;
+    }
+
+    private clampCinematicWorkspacePosition(left: number, top: number) {
+        const width = this.cinematicWorkspacePanel.offsetWidth || 1240;
+        const height = this.cinematicWorkspacePanel.offsetHeight || 860;
+        const minVisibleX = 180;
+        const minVisibleY = 54;
+        return {
+            left: clamp(left, minVisibleX - width, window.innerWidth - minVisibleX),
+            top: clamp(top, 12, window.innerHeight - minVisibleY)
+        };
+    }
+
+    private openCinematicKeyframeEditor() {
+        this.renderCinematicKeyframeList();
+        this.cinematicKeyframeModal.classList.remove('hidden');
+    }
+
+    private openCinematicShotEditor() {
+        this.renderCinematicKeyframeList();
+        this.cinematicShotModal.classList.remove('hidden');
+    }
+
+    private closeCinematicEditors() {
+        this.cinematicKeyframeModal.classList.add('hidden');
+        this.cinematicShotModal.classList.add('hidden');
+        this.closeCinematicMediaEditor();
+    }
+
+    private resolveShotSpeechTtsConfig(shot: CinematicShot) {
+        const requestedModel = String(shot?.speechMetrics?.ttsModel || this.csvVoiceConfig.model || DEFAULT_TTS_MODEL).trim();
+        const model = TTS_VOICE_OPTIONS_BY_MODEL[requestedModel] ? requestedModel : DEFAULT_TTS_MODEL;
+        const options = TTS_VOICE_OPTIONS_BY_MODEL[model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
+        const requestedVoice = String(shot?.speechMetrics?.ttsVoice || '').trim();
+        const fallbackVoice = String(this.csvVoiceConfig.fixedVoice || DEFAULT_TTS_VOICE).trim();
+        const voice = options.some((item) => item.value === requestedVoice)
+            ? requestedVoice
+            : (options.some((item) => item.value === fallbackVoice) ? fallbackVoice : (options[0]?.value || DEFAULT_TTS_VOICE));
+        return { model, voice };
+    }
+
+    private async ensureShotSpeechAudio(shot: CinematicShot) {
+        if (shot.speechAudioUrl) return shot.speechAudioUrl;
+        const text = String(shot.speechText || '').trim();
+        if (!text) return null;
+        const modelFilename = this.modelFilename || this.options.getModelFilename();
+        if (!modelFilename) return null;
+        const ttsConfig = this.resolveShotSpeechTtsConfig(shot);
+        const response = await fetch(`${this.apiBase()}/cinematic/speech-preview`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelFilename, shotId: shot.shotId, text, ttsConfig })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.audioUrl) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        shot.speechAudioUrl = String(data.audioUrl || '');
+        shot.speechMetrics = {
+            ...shot.speechMetrics,
+            ttsModel: String(data?.ttsConfig?.model || ttsConfig.model || ''),
+            ttsVoice: String(data?.ttsConfig?.voice || ttsConfig.voice || '')
+        };
+        return shot.speechAudioUrl;
+    }
+
+    private updateShotDurationFromSpeechMatch(shot: CinematicShot) {
+        if (!shot.speechMatchEnabled || !shot.speechMetrics?.charsPerSecond) return;
+        const chars = countSpeechChars(shot.speechText);
+        if (chars < 1) return;
+        shot.durationSec = Math.max(0.5, Number((chars / shot.speechMetrics.charsPerSecond).toFixed(1)));
+    }
+
+    private syncPreviewSpeechAtTime(timeSec: number) {
+        if (!this.cinematicPreview.playing || !this.cinematicPlan?.shots?.length) {
+            this.cinematicRecordingSubtitleText = '';
+            this.stopCinematicSpeechPreview();
+            return;
+        }
+        const metrics = this.cinematicTimelineData();
+        const activeSpan = metrics?.shots.find((item) => timeSec >= item.startSec && timeSec <= item.endSec + 1e-3) || null;
+        const activeShot = activeSpan?.shot || null;
+        const blockingSpeechActive = this.isCinematicBlockingSpeechInProgress();
+        const blockingShot = blockingSpeechActive
+            ? (this.cinematicPlan.shots.find((shot) => shot.shotId === this.cinematicSpeechPlayingShotId) || null)
+            : null;
+        this.cinematicRecordingSubtitleText = String((blockingShot || activeShot)?.speechText || '').trim();
+        if (!activeShot?.speechAudioUrl || !activeShot.speechText.trim()) {
+            if (this.cinematicSpeechPlayingShotId && !blockingSpeechActive) this.stopCinematicSpeechPreview();
+            this.cinematicSpeechLastShotId = activeShot?.shotId || null;
+            this.cinematicSpeechLastTimeSec = timeSec;
+            return;
+        }
+
+        const shotId = activeShot.shotId;
+        const prevShotId = this.cinematicSpeechLastShotId;
+        const prevTime = this.cinematicSpeechLastTimeSec;
+        this.cinematicSpeechLastShotId = shotId;
+        this.cinematicSpeechLastTimeSec = timeSec;
+
+        const crossedShotStart = prevTime === null
+            ? (timeSec >= activeSpan.startSec && (timeSec - activeSpan.startSec) <= 0.28)
+            : (prevTime < activeSpan.startSec - 1e-4 && timeSec >= activeSpan.startSec - 1e-4);
+        const enteredNewShot = prevShotId !== shotId;
+        if (blockingSpeechActive && blockingShot && blockingShot.shotId !== shotId) return;
+        const shouldPlayAtShotStart = enteredNewShot && crossedShotStart && !this.cinematicSpeechPlayedShotIds.has(shotId);
+        if (!shouldPlayAtShotStart) return;
+
+        this.cinematicSpeechPlayedShotIds.add(shotId);
+        this.stopCinematicSpeechPreview();
+        const audio = new Audio(activeShot.speechAudioUrl);
+        audio.volume = Math.max(0, Math.min(1, this.cinematicRecordingSettings.masterVolume * this.cinematicRecordingSettings.ttsVolume));
+        this.cinematicSpeechAudio = audio;
+        this.connectCinematicRecordingAudioElement(audio, 'speech');
+        this.cinematicSpeechPlayingShotId = shotId;
+        audio.onended = () => {
+            this.updateCinematicRecordingAudioDucking(false);
+            if (this.cinematicSpeechPlayingShotId === shotId) this.stopCinematicSpeechPreview();
+        };
+        void audio.play().catch(() => {
+            this.updateCinematicRecordingAudioDucking(false);
+            this.stopCinematicSpeechPreview();
+        });
+        this.updateCinematicRecordingAudioDucking(true);
+    }
+
+    private async previewCinematicShotSpeech(shotId: string) {
+        if (!this.requireModel()) return;
+        const shot = this.cinematicPlan?.shots.find((item) => item.shotId === shotId) || null;
+        if (!shot) throw new Error('Shot not found');
+        const text = String(shot.speechText || '').trim();
+        if (!text) throw new Error('Speech is empty');
+        const modelFilename = this.modelFilename || this.options.getModelFilename();
+        if (!modelFilename) throw new Error('Model unavailable');
+        this.stopCinematicSpeechPreview();
+        this.cinematicSpeechLoadingShotId = shotId;
+        this.renderCinematicKeyframeList();
+        this.setCinematicStatus('Generating speech preview...');
+        const ttsConfig = this.resolveShotSpeechTtsConfig(shot);
+        const response = await fetch(`${this.apiBase()}/cinematic/speech-preview`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                modelFilename,
+                shotId,
+                text,
+                ttsConfig
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.audioUrl) {
+            this.cinematicSpeechLoadingShotId = null;
+            this.renderCinematicKeyframeList();
+            throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        }
+        const audio = new Audio(String(data.audioUrl));
+        shot.speechAudioUrl = String(data.audioUrl || '');
+        this.cinematicSpeechAudio = audio;
+        this.connectCinematicRecordingAudioElement(audio, 'speech');
+        this.cinematicSpeechLoadingShotId = null;
+        this.cinematicSpeechPlayingShotId = shotId;
+        this.renderCinematicKeyframeList();
+        this.setCinematicStatus('Speech preview playing');
+        await new Promise<void>((resolve, reject) => {
+            let resolved = false;
+            const cleanup = () => {
+                this.updateCinematicRecordingAudioDucking(false);
+                audio.onended = null;
+                audio.onerror = null;
+                audio.onloadedmetadata = null;
+            };
+            audio.onloadedmetadata = () => {
+                this.renderCinematicKeyframeList();
+            };
+            audio.onerror = () => {
+                if (resolved) return;
+                resolved = true;
+                cleanup();
+                reject(new Error('Speech preview playback failed'));
+            };
+            audio.onended = () => {
+                if (resolved) return;
+                resolved = true;
+                cleanup();
+                const actualDuration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Math.max(0.1, audio.currentTime);
+                const measuredChars = countSpeechChars(text);
+                const charsPerSecond = measuredChars > 0 ? measuredChars / Math.max(actualDuration, 0.1) : 0;
+                shot.speechMetrics = {
+                    durationSec: Number(actualDuration.toFixed(3)),
+                    charsPerSecond: Number(charsPerSecond.toFixed(4)),
+                    measuredChars,
+                    updatedAt: new Date().toISOString(),
+                    ttsModel: String(data?.ttsConfig?.model || ''),
+                    ttsVoice: String(data?.ttsConfig?.voice || '')
+                };
+                this.saveStoredSpeechMetrics(shot);
+                this.updateShotDurationFromSpeechMatch(shot);
+                this.cinematicSpeechPlayingShotId = null;
+                this.cinematicSpeechAudio = null;
+                this.renderCinematicTimeline();
+                this.renderCinematicKeyframeList();
+                this.setCinematicStatus(`Speech measured ${actualDuration.toFixed(2)}s`);
+                resolve();
+            };
+            audio.play().catch((error) => {
+                if (resolved) return;
+                resolved = true;
+                cleanup();
+                reject(error instanceof Error ? error : new Error(String(error)));
+            });
+            this.updateCinematicRecordingAudioDucking(true);
+        }).finally(() => {
+            if (this.cinematicSpeechPlayingShotId === shotId) {
+                this.cinematicSpeechPlayingShotId = null;
+            }
+            if (this.cinematicSpeechLoadingShotId === shotId) {
+                this.cinematicSpeechLoadingShotId = null;
+            }
+            this.renderCinematicKeyframeList();
+        });
+    }
+
+    private syncCinematicChrome() {
+        this.cinematicWorkspaceModal.classList.toggle('mini', this.cinematicMiniMode);
+        this.cinematicMiniToggleBtn.textContent = this.cinematicMiniMode ? 'Full' : 'Mini';
+        const playMarkup = this.cinematicPreview.playing ? CINE_ICON_PAUSE : CINE_ICON_PLAY;
+        const previewBtn = this.root.querySelector('[data-act="cinematic-preview"]') as HTMLButtonElement | null;
+        const routeBtn = this.root.querySelector('[data-act="cinematic-toggle-route"]') as HTMLButtonElement | null;
+        if (previewBtn) previewBtn.innerHTML = playMarkup;
+        if (routeBtn) {
+            routeBtn.textContent = this.cinematicShowRouteOverlay ? 'Route On' : 'Route Off';
+            routeBtn.classList.toggle('active', this.cinematicShowRouteOverlay);
+        }
+        this.cinematicMiniPlayBtn.innerHTML = playMarkup;
+    }
+
+    private cinematicCurrentBgmConfig() {
+        return this.cinematicPlan?.bgm || this.cinematicBgmSelection || null;
+    }
+
+    private cinematicBgmApplyConfig(config: CinematicBgmConfig | null) {
+        const next = config ? {
+            ...config,
+            audioStartSeconds: Math.max(0, Number(config.audioStartSeconds) || 0),
+            audioEndSeconds: Math.max(0, Number(config.audioEndSeconds) || 0),
+            audioPlaybackRate: clampMusicRate(Number(config.audioPlaybackRate) || 1),
+            targetMusicDurationSeconds: normalizeMusicDuration(config.targetMusicDurationSeconds)
+        } : null;
+        if (next && next.audioEndSeconds <= next.audioStartSeconds) {
+            next.audioEndSeconds = next.audioStartSeconds + 0.2;
+        }
+        if (this.cinematicPlan) this.cinematicPlan.bgm = next;
+        this.cinematicBgmSelection = next;
+    }
+
+    private cinematicBgmStopPreview() {
+        if (this.cinematicBgmPreviewRaf) {
+            window.cancelAnimationFrame(this.cinematicBgmPreviewRaf);
+            this.cinematicBgmPreviewRaf = 0;
+        }
+        if (this.cinematicBgmPreviewAudio) {
+            this.cinematicBgmPreviewAudio.pause();
+            this.cinematicBgmPreviewAudio.currentTime = 0;
+            this.cinematicBgmPreviewAudio.onended = null;
+            this.cinematicBgmPreviewAudio.onloadedmetadata = null;
+            this.cinematicBgmPreviewAudio.ontimeupdate = null;
+        }
+        this.cinematicBgmClipPreviewPlaying = false;
+        this.cinematicBgmPlayerBtn.textContent = 'Play';
+        this.cinematicBgmClipPlayBtn.textContent = 'Play Clip';
+        this.cinematicBgmRenderWaveform();
+    }
+
+    private cinematicBgmStartTimelinePlayback() {
+        const bgm = this.cinematicCurrentBgmConfig();
+        const audio = this.cinematicBgmPreviewAudio;
+        if (!bgm || !audio) return;
+        this.connectCinematicRecordingAudioElement(audio, 'bgm');
+        const audioPath = String(bgm.audioPath || '').trim();
+        if (!audioPath || this.cinematicBgmLoadedAudioPath !== audioPath) return;
+        const clipStart = Math.max(0, Number(bgm.audioStartSeconds || 0));
+        const clipEnd = Math.max(clipStart + 0.01, Number(bgm.audioEndSeconds || 0));
+        const rate = cinematicBgmEffectiveRate(bgm);
+        const seek = clipStart + Math.max(0, this.cinematicCurrentTimeSec) * rate;
+        if (seek >= clipEnd - 0.01) {
+            audio.pause();
+            return;
+        }
+        audio.pause();
+        this.cinematicBgmClipPreviewPlaying = false;
+        audio.volume = Math.max(0, Math.min(1, this.cinematicRecordingSettings.masterVolume * this.cinematicRecordingSettings.bgmVolume));
+        audio.playbackRate = rate;
+        audio.currentTime = clamp(seek, clipStart, clipEnd - 0.01);
+        audio.onended = () => {
+            this.cinematicBgmPlayerBtn.textContent = 'Play';
+        };
+        audio.ontimeupdate = () => {
+            if (!this.cinematicPreview.playing || audio.currentTime >= clipEnd) {
+                audio.pause();
+                this.cinematicBgmPlayerBtn.textContent = 'Play';
+            }
+        };
+        void audio.play().then(() => {
+            this.cinematicBgmPlayerBtn.textContent = 'Pause';
+            if (!this.cinematicBgmPreviewRaf) this.cinematicBgmPreviewRaf = window.requestAnimationFrame(this.cinematicBgmPreviewTick);
+        }).catch((error) => {
+            this.logDebug('cine.bgm.playback', String(error));
+        });
+    }
+
+    private cinematicBgmPreviewTick = () => {
+        this.cinematicBgmPreviewRaf = 0;
+        const audio = this.cinematicBgmPreviewAudio;
+        if (!audio) return;
+        const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        const duration = this.cinematicBgmAudioDurationSec > 0 ? this.cinematicBgmAudioDurationSec : (Number.isFinite(audio.duration) ? audio.duration : 0);
+        if (duration > 0) {
+            const ratio = clamp(current / duration, 0, 1);
+            this.cinematicBgmProgressInput.value = String(Math.round(ratio * 1000));
+            this.cinematicBgmTimeEl.textContent = `${formatSecondsLabel(current)} / ${formatSecondsLabel(duration)}`;
+            this.cinematicBgmRenderWaveform();
+        }
+        if (!audio.paused) this.cinematicBgmPreviewRaf = window.requestAnimationFrame(this.cinematicBgmPreviewTick);
+    };
+
+    private cinematicBgmRenderWaveform() {
+        const canvas = this.cinematicBgmWaveCanvas;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        const width = canvas.width;
+        const height = canvas.height;
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = '#070a12';
+        ctx.fillRect(0, 0, width, height);
+        const samples = this.cinematicBgmWaveform;
+        if (samples.length > 0) {
+            ctx.fillStyle = 'rgba(129, 157, 219, 0.55)';
+            for (let x = 0; x < width; x += 1) {
+                const sample = samples[Math.floor((x / Math.max(1, width - 1)) * (samples.length - 1))] || 0;
+                const amp = Math.max(1, Math.round(sample * (height * 0.44)));
+                const y = Math.floor((height - amp) * 0.5);
+                ctx.fillRect(x, y, 1, amp);
+            }
+        } else {
+            ctx.fillStyle = '#7f8dad';
+            ctx.font = '12px sans-serif';
+            ctx.fillText('Select an audio track to render waveform', 12, Math.floor(height / 2));
+        }
+        const startSec = Math.max(0, Number(this.cinematicBgmStartInput.value) || 0);
+        const endSec = Math.max(startSec, Number(this.cinematicBgmEndInput.value) || 0);
+        const duration = Math.max(0.001, this.cinematicBgmAudioDurationSec || endSec || 1);
+        const left = (startSec / duration) * width;
+        const right = (endSec / duration) * width;
+        ctx.fillStyle = 'rgba(86, 152, 255, 0.18)';
+        ctx.fillRect(left, 0, Math.max(2, right - left), height);
+        ctx.strokeStyle = 'rgba(120, 185, 255, 0.95)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(left, 0);
+        ctx.lineTo(left, height);
+        ctx.moveTo(right, 0);
+        ctx.lineTo(right, height);
+        ctx.stroke();
+
+        const currentSec = Math.max(0, Number(this.cinematicBgmPreviewAudio?.currentTime || 0));
+        const playheadX = clamp(currentSec / duration, 0, 1) * width;
+        ctx.strokeStyle = 'rgba(255, 136, 96, 0.95)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(playheadX, 0);
+        ctx.lineTo(playheadX, height);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 136, 96, 0.95)';
+        ctx.beginPath();
+        ctx.moveTo(playheadX, 0);
+        ctx.lineTo(playheadX - 5, 7);
+        ctx.lineTo(playheadX + 5, 7);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    private cinematicBgmUpdateClipDuration() {
+        const start = Math.max(0, Number(this.cinematicBgmStartInput.value) || 0);
+        const end = Math.max(start, Number(this.cinematicBgmEndInput.value) || 0);
+        const span = Math.max(0, end - start);
+        this.cinematicBgmClipDurationEl.textContent = `${span.toFixed(3)}s`;
+    }
+
+    private cinematicBgmUpdateEffectiveRate() {
+        if (!this.cinematicBgmSelection) {
+            this.cinematicBgmEffectiveRateEl.textContent = '1.00x';
+            this.cinematicBgmUpdateClipDuration();
+            return;
+        }
+        const rate = cinematicBgmEffectiveRate(this.cinematicBgmSelection);
+        const clip = Math.max(0, this.cinematicBgmSelection.audioEndSeconds - this.cinematicBgmSelection.audioStartSeconds);
+        const target = normalizeMusicDuration(this.cinematicBgmSelection.targetMusicDurationSeconds);
+        this.cinematicBgmEffectiveRateEl.textContent = target
+            ? `${rate.toFixed(2)}x (clip ${clip.toFixed(2)}s -> target ${target.toFixed(2)}s)`
+            : `${rate.toFixed(2)}x`;
+        this.cinematicBgmUpdateClipDuration();
+    }
+
+    private cinematicBgmRenderLibrary() {
+        this.cinematicBgmLibraryEl.innerHTML = '';
+        const filter = this.cinematicBgmFilter.trim().toLowerCase();
+        const activePath = this.cinematicBgmSelection?.audioPath || '';
+        const rows = filter
+            ? this.cinematicBgmLibrary.filter((item) => item.name.toLowerCase().includes(filter) || item.audioPath.toLowerCase().includes(filter))
+            : this.cinematicBgmLibrary;
+        if (rows.length < 1) {
+            const empty = document.createElement('div');
+            empty.className = 'otl-muted';
+            empty.textContent = 'No music selected. Use folder/file button to load playlist.';
+            this.cinematicBgmLibraryEl.appendChild(empty);
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        rows.forEach((item) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `otl-cinematic-bgm-item${item.audioPath === activePath ? ' active' : ''}`;
+            btn.setAttribute('data-act', 'cinematic-bgm-select-item');
+            btn.setAttribute('data-audio-path', item.audioPath);
+            btn.textContent = item.name;
+            const meta = document.createElement('span');
+            meta.className = 'meta';
+            meta.textContent = item.source === 'folder' ? `Folder: ${item.audioPath}` : item.audioPath;
+            btn.appendChild(meta);
+            frag.appendChild(btn);
+        });
+        this.cinematicBgmLibraryEl.appendChild(frag);
+    }
+
+    private cinematicBgmResolveAudioUrl(audioPath: string) {
+        const path = String(audioPath || '').trim();
+        if (!path) return '';
+        if (/^(blob:|data:|https?:\/\/)/i.test(path)) return path;
+        const item = this.cinematicBgmLibrary.find((row) => row.audioPath === path);
+        if (item) return item.audioUrl;
+        return `${this.apiBase()}/local-file?path=${encodeURIComponent(path)}`;
+    }
+
+    private async cinematicBgmLoadAudio(audioPath: string, displayName?: string) {
+        const path = String(audioPath || '').trim();
+        if (!path) throw new Error('audioPath is empty');
+        const audioUrl = this.cinematicBgmResolveAudioUrl(path);
+        if (!audioUrl) throw new Error('audio url unavailable');
+        this.cinematicBgmStopPreview();
+        const preview = new Audio(audioUrl);
+        preview.preload = 'auto';
+        preview.crossOrigin = 'anonymous';
+        preview.volume = Math.max(0, Math.min(1, this.cinematicRecordingSettings.masterVolume * this.cinematicRecordingSettings.bgmVolume));
+        this.cinematicBgmPreviewAudio = preview;
+        this.connectCinematicRecordingAudioElement(preview, 'bgm');
+        await new Promise<void>((resolve, reject) => {
+            preview.onloadedmetadata = () => resolve();
+            preview.onerror = () => reject(new Error('Audio metadata load failed'));
+            preview.load();
+        });
+        this.cinematicBgmLoadedAudioPath = path;
+        this.cinematicBgmAudioDurationSec = Math.max(0.01, Number(preview.duration) || 0.01);
+        if (!this.cinematicBgmSelection) {
+            this.cinematicBgmSelection = {
+                audioPath: path,
+                audioStartSeconds: 0,
+                audioEndSeconds: this.cinematicBgmAudioDurationSec,
+                audioPlaybackRate: 1,
+                targetMusicDurationSeconds: null,
+                audioDisplayName: displayName || path
+            };
+        }
+        this.cinematicBgmSelection.audioPath = path;
+        this.cinematicBgmSelection.audioDisplayName = displayName || this.cinematicBgmSelection.audioDisplayName || path;
+        this.cinematicBgmSelection.audioStartSeconds = clamp(Number(this.cinematicBgmSelection.audioStartSeconds || 0), 0, this.cinematicBgmAudioDurationSec - 0.01);
+        this.cinematicBgmSelection.audioEndSeconds = clamp(Number(this.cinematicBgmSelection.audioEndSeconds || this.cinematicBgmAudioDurationSec), this.cinematicBgmSelection.audioStartSeconds + 0.01, this.cinematicBgmAudioDurationSec);
+        this.cinematicBgmStartInput.value = this.cinematicBgmSelection.audioStartSeconds.toFixed(3);
+        this.cinematicBgmEndInput.value = this.cinematicBgmSelection.audioEndSeconds.toFixed(3);
+        this.cinematicBgmManualRateInput.value = String(this.cinematicBgmSelection.audioPlaybackRate || 1);
+        this.cinematicBgmTargetDurationInput.value = this.cinematicBgmSelection.targetMusicDurationSeconds ? String(this.cinematicBgmSelection.targetMusicDurationSeconds) : '';
+        this.cinematicBgmProgressInput.value = '0';
+        this.cinematicBgmTimeEl.textContent = `0:00.00 / ${formatSecondsLabel(this.cinematicBgmAudioDurationSec)}`;
+
+        const response = await fetch(audioUrl);
+        if (!response.ok) throw new Error(`Audio fetch failed: HTTP ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        const audioCtx = new AudioContext();
+        let buffer: AudioBuffer;
+        try {
+            buffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+        } finally {
+            void audioCtx.close();
+        }
+        const channels = Math.max(1, buffer.numberOfChannels);
+        const samples = 1200;
+        const block = Math.max(1, Math.floor(buffer.length / samples));
+        this.cinematicBgmWaveform = [];
+        for (let i = 0; i < samples; i += 1) {
+            const offset = i * block;
+            let max = 0;
+            for (let j = 0; j < block; j += 1) {
+                const index = offset + j;
+                if (index >= buffer.length) break;
+                let value = 0;
+                for (let c = 0; c < channels; c += 1) {
+                    value += Math.abs(buffer.getChannelData(c)[index] || 0);
+                }
+                max = Math.max(max, value / channels);
+            }
+            this.cinematicBgmWaveform.push(max);
+        }
+        this.cinematicBgmRenderWaveform();
+        this.cinematicBgmUpdateEffectiveRate();
+        this.cinematicBgmRenderLibrary();
+    }
+
+    private cinematicBgmRecommendClip() {
+        if (!this.cinematicBgmSelection || this.cinematicBgmWaveform.length < 4 || this.cinematicBgmAudioDurationSec <= 0) return;
+        const duration = this.cinematicBgmAudioDurationSec;
+        const target = normalizeMusicDuration(this.cinematicBgmSelection.targetMusicDurationSeconds)
+            || clamp(duration * 0.28, 2, 20);
+        const span = clamp(target, 0.5, duration);
+        const maxStart = Math.max(0, duration - span);
+        let bestStart = 0;
+        let bestScore = -1;
+        const sampleCount = this.cinematicBgmWaveform.length;
+        const secToIndex = (sec: number) => Math.floor(clamp(sec / Math.max(0.001, duration), 0, 1) * (sampleCount - 1));
+        for (let start = 0; start <= maxStart; start += 0.2) {
+            const end = start + span;
+            const a = secToIndex(start);
+            const b = Math.max(a + 1, secToIndex(end));
+            let sum = 0;
+            let count = 0;
+            for (let i = a; i <= b; i += 1) {
+                sum += this.cinematicBgmWaveform[i] || 0;
+                count += 1;
+            }
+            const avg = count > 0 ? sum / count : 0;
+            const boundary = ((this.cinematicBgmWaveform[a] || 0) + (this.cinematicBgmWaveform[b] || 0)) * 0.5;
+            const score = avg - boundary * 0.22;
+            if (score > bestScore) {
+                bestScore = score;
+                bestStart = start;
+            }
+        }
+        this.cinematicBgmSelection.audioStartSeconds = Number(bestStart.toFixed(3));
+        this.cinematicBgmSelection.audioEndSeconds = Number((bestStart + span).toFixed(3));
+        this.cinematicBgmStartInput.value = this.cinematicBgmSelection.audioStartSeconds.toFixed(3);
+        this.cinematicBgmEndInput.value = this.cinematicBgmSelection.audioEndSeconds.toFixed(3);
+        this.cinematicBgmRenderWaveform();
+        this.cinematicBgmUpdateEffectiveRate();
+    }
+
+    private cinematicBgmSyncSelectionFromInputs() {
+        if (!this.cinematicBgmSelection) return;
+        const duration = Math.max(0.01, this.cinematicBgmAudioDurationSec || 0.01);
+        const start = clamp(Number(this.cinematicBgmStartInput.value) || 0, 0, duration - 0.01);
+        const end = clamp(Number(this.cinematicBgmEndInput.value) || duration, start + 0.01, duration);
+        this.cinematicBgmSelection.audioStartSeconds = Number(start.toFixed(3));
+        this.cinematicBgmSelection.audioEndSeconds = Number(end.toFixed(3));
+        this.cinematicBgmSelection.audioPlaybackRate = clampMusicRate(Number(this.cinematicBgmManualRateInput.value) || this.cinematicBgmSelection.audioPlaybackRate || 1);
+        this.cinematicBgmSelection.targetMusicDurationSeconds = normalizeMusicDuration(Number(this.cinematicBgmTargetDurationInput.value));
+        this.cinematicBgmStartInput.value = this.cinematicBgmSelection.audioStartSeconds.toFixed(3);
+        this.cinematicBgmEndInput.value = this.cinematicBgmSelection.audioEndSeconds.toFixed(3);
+        this.cinematicBgmManualRateInput.value = this.cinematicBgmSelection.audioPlaybackRate.toFixed(2);
+    }
+
+    private async openCinematicBgmModal() {
+        const current = this.cinematicCurrentBgmConfig();
+        this.cinematicBgmSelection = current ? { ...current } : {
+            audioPath: '',
+            audioStartSeconds: 0,
+            audioEndSeconds: 0,
+            audioPlaybackRate: 1,
+            targetMusicDurationSeconds: null
+        };
+        this.cinematicBgmFilter = '';
+        this.cinematicBgmSearchInput.value = '';
+        this.cinematicBgmPlayerBtn.textContent = 'Play';
+        this.cinematicBgmClipPlayBtn.textContent = 'Play Clip';
+        this.cinematicBgmStartInput.value = Number(this.cinematicBgmSelection.audioStartSeconds || 0).toFixed(3);
+        this.cinematicBgmEndInput.value = Number(this.cinematicBgmSelection.audioEndSeconds || 0).toFixed(3);
+        this.cinematicBgmManualRateInput.value = String(this.cinematicBgmSelection.audioPlaybackRate || 1);
+        this.cinematicBgmTargetDurationInput.value = this.cinematicBgmSelection.targetMusicDurationSeconds ? String(this.cinematicBgmSelection.targetMusicDurationSeconds) : '';
+        this.cinematicBgmRenderLibrary();
+        this.cinematicBgmModal.classList.remove('hidden');
+        this.cinematicBgmRenderWaveform();
+        this.cinematicBgmUpdateEffectiveRate();
+    }
+
+    private closeCinematicBgmModal() {
+        this.cinematicBgmModal.classList.add('hidden');
+        this.cinematicBgmStopPreview();
+    }
+
+    private openCinematicPromptModal(kind: 'simple' | 'complex') {
+        this.syncCinematicInputsFromState();
+        if (kind === 'simple') this.cinematicSimplePromptModal.classList.remove('hidden');
+        else this.cinematicComplexPromptModal.classList.remove('hidden');
+    }
+
+    private closeCinematicPromptModal(kind: 'simple' | 'complex') {
+        if (kind === 'simple') this.cinematicSimplePromptModal.classList.add('hidden');
+        else this.cinematicComplexPromptModal.classList.add('hidden');
+    }
+
+    private syncCinematicInputsFromState() {
+        this.cinematicSimplePromptInput.value = this.cinematicSimplePrompt;
+        this.cinematicPlannerPromptInput.value = this.cinematicPlannerPrompt;
+        this.cinematicSimplePromptEditor.value = this.cinematicSimplePrompt;
+        this.cinematicComplexPromptEditor.value = this.cinematicPlannerPrompt;
+        this.cinematicSceneInput.value = this.cinematicSceneDescription;
+        this.cinematicStoryInput.value = this.cinematicStoryBackground;
+        this.cinematicStyleInput.value = this.cinematicStyleText;
+        this.cinematicDurationInput.value = String(this.cinematicTargetDurationSec);
+    }
+
+    private syncCinematicStateFromInputs() {
+        this.cinematicSimplePrompt = this.cinematicSimplePromptEditor.value.trim() || this.cinematicSimplePromptInput.value.trim() || DEFAULT_CINEMATIC_SIMPLE_PROMPT;
+        this.cinematicPlannerPrompt = this.cinematicComplexPromptEditor.value.trim() || this.cinematicPlannerPromptInput.value.trim() || DEFAULT_CINEMATIC_PLANNER_PROMPT;
+        this.cinematicSimplePromptInput.value = this.cinematicSimplePrompt;
+        this.cinematicPlannerPromptInput.value = this.cinematicPlannerPrompt;
+        this.cinematicSceneDescription = this.cinematicSceneInput.value.trim();
+        this.cinematicStoryBackground = this.cinematicStoryInput.value.trim();
+        this.cinematicStyleText = this.cinematicStyleInput.value.trim() || 'cinematic one take';
+        this.cinematicTargetDurationSec = Math.max(4, Math.min(180, Number(this.cinematicDurationInput.value) || 14));
+        this.cinematicDurationInput.value = String(this.cinematicTargetDurationSec);
+    }
+
+    private selectedCinematicShot() {
+        return this.cinematicPlan?.shots.find((shot) => shot.shotId === this.selectedCinematicShotId) || null;
+    }
+
+    private selectedCinematicKeyframe() {
+        const shot = this.selectedCinematicShot();
+        return shot?.keyframes.find((item) => item.keyframeId === this.selectedCinematicKeyframeId) || null;
+    }
+
+    private ensureCinematicSelection() {
+        const firstShot = this.cinematicPlan?.shots[0] || null;
+        if (!firstShot) {
+            this.selectedCinematicShotId = null;
+            this.selectedCinematicKeyframeId = null;
+            return;
+        }
+        if (!this.selectedCinematicShotId || !this.cinematicPlan?.shots.some((shot) => shot.shotId === this.selectedCinematicShotId)) {
+            this.selectedCinematicShotId = firstShot.shotId;
+        }
+        const shot = this.selectedCinematicShot() || firstShot;
+        if (!this.selectedCinematicKeyframeId || !shot.keyframes.some((item) => item.keyframeId === this.selectedCinematicKeyframeId)) {
+            this.selectedCinematicKeyframeId = shot.keyframes[0]?.keyframeId || null;
+        }
+    }
+
+    private renderCinematicVersionList() {
+        this.cinematicVersionListEl.innerHTML = '';
+        this.cinematicSimpleVersionListEl.innerHTML = '';
+        this.cinematicComplexVersionListEl.innerHTML = '';
+        if (this.cinematicVersions.length < 1) {
+            const empty = document.createElement('div');
+            empty.className = 'otl-muted';
+            empty.textContent = 'No cinematic versions yet';
+            this.cinematicVersionListEl.appendChild(empty);
+            this.cinematicSimpleVersionListEl.appendChild(empty.cloneNode(true));
+            this.cinematicComplexVersionListEl.appendChild(empty.cloneNode(true));
+            return;
+        }
+        const frag = document.createDocumentFragment();
+        const simpleFrag = document.createDocumentFragment();
+        const complexFrag = document.createDocumentFragment();
+        this.cinematicVersions.forEach((version) => {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `otl-csv-version-item${version.id === this.selectedCinematicVersionId ? ' active' : ''}`;
+            btn.setAttribute('data-act', 'cinematic-version-select');
+            btn.setAttribute('data-version-id', String(version.id));
+            btn.textContent = `v${version.versionNo} ${version.updatedAt}`;
+            frag.appendChild(btn);
+
+            const itemMarkup = `<div><strong>v${version.versionNo}${version.id === this.selectedCinematicVersionId ? ' (Current)' : ''}</strong></div><div class="otl-cinematic-prompt-version-meta">${version.updatedAt}</div>`;
+            const simpleBtn = document.createElement('button');
+            simpleBtn.type = 'button';
+            simpleBtn.className = `otl-cinematic-prompt-version-item${version.id === this.selectedCinematicVersionId ? ' active' : ''}`;
+            simpleBtn.setAttribute('data-act', 'cinematic-version-select');
+            simpleBtn.setAttribute('data-version-id', String(version.id));
+            simpleBtn.innerHTML = itemMarkup;
+            simpleFrag.appendChild(simpleBtn);
+
+            const complexBtn = document.createElement('button');
+            complexBtn.type = 'button';
+            complexBtn.className = `otl-cinematic-prompt-version-item${version.id === this.selectedCinematicVersionId ? ' active' : ''}`;
+            complexBtn.setAttribute('data-act', 'cinematic-version-select');
+            complexBtn.setAttribute('data-version-id', String(version.id));
+            complexBtn.innerHTML = itemMarkup;
+            complexFrag.appendChild(complexBtn);
+        });
+        this.cinematicVersionListEl.appendChild(frag);
+        this.cinematicSimpleVersionListEl.appendChild(simpleFrag);
+        this.cinematicComplexVersionListEl.appendChild(complexFrag);
+    }
+
+    private renderCinematicPoiList() {
+        this.cinematicPoiListEl.innerHTML = '';
+        this.cinematicPoiListEl.classList.toggle('hidden', !this.cinematicPoiExpanded);
+        const chevron = this.root.querySelector('[data-role="cinematic-poi-chevron"]') as HTMLSpanElement | null;
+        if (chevron) chevron.style.transform = this.cinematicPoiExpanded ? 'rotate(180deg)' : 'rotate(0deg)';
+        const frag = document.createDocumentFragment();
+        this.pois.slice().sort((a, b) => a.sortOrder - b.sortOrder).forEach((poi) => {
+            const checked = this.cinematicSelectedPoiIds.includes(poi.poiId);
+            const item = document.createElement('label');
+            item.className = 'otl-cinematic-poi-row';
+            item.innerHTML = `<input type="checkbox" data-role="cinematic-poi-item" value="${poi.poiId}" ${checked ? 'checked' : ''} />
+                <span>${poi.poiName}</span>
+                <span class="otl-muted">${poi.targetX.toFixed(2)}, ${poi.targetY.toFixed(2)}, ${poi.targetZ.toFixed(2)}</span>`;
+            frag.appendChild(item);
+        });
+        this.cinematicPoiListEl.appendChild(frag);
+    }
+
+    private renderCinematicKeyframeList() {
+        const shot = this.selectedCinematicShot();
+        if (!shot) {
+            this.cinematicKeyframeEditorBodyEl.innerHTML = '<div class="otl-muted">No keyframe selected</div>';
+            this.cinematicShotEditorBodyEl.innerHTML = '<div class="otl-muted">No shot selected</div>';
+            const headMediaButtons = Array.from(this.root.querySelectorAll('[data-role="cinematic-kf-head-media"]')) as HTMLButtonElement[];
+            headMediaButtons.forEach((btn) => {
+                btn.disabled = true;
+                btn.removeAttribute('data-keyframe-id');
+                if (btn.getAttribute('data-kind') === 'edit') btn.textContent = 'Edit 3D Object In Main View';
+                btn.classList.remove('primary');
+            });
+            return;
+        }
+        const shotDuration = Math.max(0.1, shot.durationSec || 0.1);
+        const selectedKeyframeId = this.selectedCinematicKeyframeId || shot.keyframes[0]?.keyframeId;
+        const kf = shot.keyframes.find((item) => item.keyframeId === selectedKeyframeId) || shot.keyframes[0];
+        const idx = Math.max(0, shot.keyframes.findIndex((item) => item.keyframeId === kf?.keyframeId));
+        const media = kf ? (kf.mediaObject ? normalizeCwMediaObjectConfig(kf.mediaObject) : this.cinematicEffectiveMediaForKeyframe(kf.keyframeId).config) : null;
+        if (kf?.mediaObject) kf.mediaObject = normalizeCwMediaObjectConfig(kf.mediaObject);
+        const mediaStatus = kf ? this.describeCinematicMediaInheritance(kf) : 'No active 3D media object';
+        const mediaAnchorX = media?.anchorWorld ? media.anchorWorld.x.toFixed(3) : '';
+        const mediaAnchorY = media?.anchorWorld ? media.anchorWorld.y.toFixed(3) : '';
+        const mediaAnchorZ = media?.anchorWorld ? media.anchorWorld.z.toFixed(3) : '';
+        const mediaName = media?.fileName || media?.placeholderLabel || 'No video selected';
+        const mediaPath = media?.src || '';
+        this.cinematicKeyframeEditorBodyEl.innerHTML = kf ? `<button type="button" class="otl-btn otl-cinematic-keyframe-heading" data-act="cinematic-keyframe-select" data-keyframe-id="${kf.keyframeId}" style="width:100%;">K${idx + 1} (t=${(kf.t * shotDuration).toFixed(2)}s)</button>
+            <div class="otl-cinematic-editor-grid">
+                <div class="otl-cinematic-field"><label>Position X</label><input class="otl-input" data-act="cinematic-kf-x" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.x.toFixed(2)}" /></div>
+                <div class="otl-cinematic-field"><label>Position Y</label><input class="otl-input" data-act="cinematic-kf-y" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.y.toFixed(2)}" /></div>
+                <div class="otl-cinematic-field"><label>Position Z</label><input class="otl-input" data-act="cinematic-kf-z" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.z.toFixed(2)}" /></div>
+                <div class="otl-cinematic-field"><label>Yaw</label><input class="otl-input" data-act="cinematic-kf-yaw" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${kf.yaw.toFixed(1)}" /></div>
+                <div class="otl-cinematic-field"><label>Pitch</label><input class="otl-input" data-act="cinematic-kf-pitch" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${kf.pitch.toFixed(1)}" /></div>
+                <div class="otl-cinematic-field"><label>FOV</label><input class="otl-input" data-act="cinematic-kf-fov" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" min="20" max="120" value="${kf.fov.toFixed(1)}" /></div>
+            </div>
+            <div class="otl-cinematic-media-box">
+                <div class="otl-cinematic-media-header">
+                    <label class="otl-cinematic-check"><input type="checkbox" data-act="cinematic-kf-media-enabled" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" ${media?.enabled ? 'checked' : ''} />Enable</label>
+                    <div class="otl-cinematic-media-right">
+                        <button type="button" class="otl-btn" data-act="cinematic-kf-media-align-view" data-keyframe-id="${kf.keyframeId}">Align To Current View</button>
+                        <button type="button" class="otl-btn" data-act="cinematic-kf-media-reset-inherit" data-keyframe-id="${kf.keyframeId}">Reset To Inherited</button>
+                        <button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-remove" data-keyframe-id="${kf.keyframeId}" title="Remove 3D Media Object">${CSV_ICON_DELETE}</button>
+                    </div>
+                </div>
+                <div class="otl-cinematic-field"><label>Path</label><div class="otl-cinematic-media-path-row"><input class="otl-input" type="text" readonly value="${escapeHtmlAttr(mediaName)}" placeholder="No video selected" /><button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-choose-video" data-keyframe-id="${kf.keyframeId}" title="Choose Video Folder">${CINE_ICON_FOLDER}</button></div></div>
+                <div class="otl-cinematic-media-note" style="display:none;">${escapeHtmlAttr(mediaStatus)} ${escapeHtmlAttr(mediaPath)}</div>
+                <div class="otl-cinematic-editor-grid shot">
+                    <div class="otl-cinematic-field"><label>Scale</label><input class="otl-input" data-act="cinematic-kf-media-scale" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.05" min="0.1" max="120" value="${(media?.scale || 1.6).toFixed(2)}" /></div>
+                    <div class="otl-cinematic-field"><label>Yaw</label><input class="otl-input" data-act="cinematic-kf-media-yaw" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${(media?.yaw || 0).toFixed(1)}" /></div>
+                    <div class="otl-cinematic-field"><label>Pitch</label><input class="otl-input" data-act="cinematic-kf-media-pitch" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${(media?.pitch || 0).toFixed(1)}" /></div>
+                    <div class="otl-cinematic-field"><label>Roll</label><input class="otl-input" data-act="cinematic-kf-media-roll" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${(media?.roll || 0).toFixed(1)}" /></div>
+                    <div class="otl-cinematic-field"><label>Depth Offset</label><input class="otl-input" data-act="cinematic-kf-media-depth" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" min="-2" max="2" value="${(media?.depthOffset || 0.06).toFixed(2)}" /></div>
+                </div>
+                <div class="otl-cinematic-media-anchor-row">
+                    <div class="otl-cinematic-editor-grid shot">
+                        <div class="otl-cinematic-field"><label>Anchor X</label><input class="otl-input" data-act="cinematic-kf-media-anchor-x" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorX}" placeholder="Unset" /></div>
+                        <div class="otl-cinematic-field"><label>Anchor Y</label><input class="otl-input" data-act="cinematic-kf-media-anchor-y" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorY}" placeholder="Unset" /></div>
+                        <div class="otl-cinematic-field"><label>Anchor Z</label><input class="otl-input" data-act="cinematic-kf-media-anchor-z" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorZ}" placeholder="Unset" /></div>
+                    </div>
+                    <button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-clear-anchor" data-keyframe-id="${kf.keyframeId}" title="Clear Anchor">${CSV_ICON_DELETE}</button>
+                </div>
+            </div>` : '<div class="otl-muted">No keyframe selected</div>';
+
+        const headMediaButtons = Array.from(this.root.querySelectorAll('[data-role="cinematic-kf-head-media"]')) as HTMLButtonElement[];
+        headMediaButtons.forEach((btn) => {
+            if (kf) btn.setAttribute('data-keyframe-id', kf.keyframeId);
+            else btn.removeAttribute('data-keyframe-id');
+            btn.disabled = !kf;
+            const kind = String(btn.getAttribute('data-kind') || '');
+            btn.classList.remove('primary');
+            if (kind === 'edit' && this.cinematicMediaEditor.active) {
+                btn.classList.add('primary');
+                btn.textContent = 'Exit Object Edit';
+            } else if (kind === 'edit') {
+                btn.textContent = 'Edit 3D Object In Main View';
+            }
+            if ((kind === 'move' || kind === 'rotate' || kind === 'scale') && this.cinematicMediaEditor.active && this.cinematicMediaEditor.mode === kind) {
+                btn.classList.add('primary');
+            }
+        });
+
+        const speechMetrics = shot.speechMetrics || this.loadStoredSpeechMetrics(shot.shotId);
+        const durationText = speechMetrics?.durationSec ? `${speechMetrics.durationSec.toFixed(2)}s` : 'No audio';
+        const cpsText = speechMetrics?.charsPerSecond ? `${speechMetrics.charsPerSecond.toFixed(2)} cps` : '-- cps';
+        const isSpeechBusy = this.cinematicSpeechLoadingShotId === shot.shotId || this.cinematicSpeechPlayingShotId === shot.shotId;
+        const matchEnabled = Boolean(shot.speechMatchEnabled && speechMetrics?.charsPerSecond);
+
+        const shotTtsConfig = this.resolveShotSpeechTtsConfig(shot);
+        const currentVoice = shotTtsConfig.voice;
+        const voiceOptions = (TTS_VOICE_OPTIONS_BY_MODEL[shotTtsConfig.model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [])
+            .map((option) => `<option value="${option.value}" ${option.value === currentVoice ? 'selected' : ''}>${option.label}</option>`)
+            .join('');
+
+        this.cinematicShotEditorBodyEl.innerHTML = `<div class="otl-cinematic-editor-grid shot">
+                <div class="otl-cinematic-field"><label>Roll</label><input class="otl-input" type="number" step="0.1" value="0.0" disabled /></div>
+                <div class="otl-cinematic-field"><label>Move Speed</label><input class="otl-input" data-act="cinematic-kf-speed" data-keyframe-id="${kf?.keyframeId || ''}" data-shot-id="${shot.shotId}" type="number" step="0.05" min="0.1" value="${(kf?.moveSpeedMps || 0.8).toFixed(2)}" /></div>
+                <div class="otl-cinematic-field"><label>Duration</label><input class="otl-input" data-act="cinematic-shot-duration" data-shot-id="${shot.shotId}" type="number" min="0.1" max="120" step="0.1" value="${shot.durationSec.toFixed(1)}" /></div>
+                <div class="otl-cinematic-field"><label>Speech Mode</label><select class="otl-select" data-act="cinematic-shot-speech-mode" data-shot-id="${shot.shotId}"><option value="INTERRUPTIBLE" ${shot.speechMode === 'INTERRUPTIBLE' ? 'selected' : ''}>Interruptible</option><option value="BLOCKING" ${shot.speechMode === 'BLOCKING' ? 'selected' : ''}>Blocking</option></select></div>
+                <div class="otl-cinematic-field"><label>Voice</label><select class="otl-select" data-act="cinematic-shot-tts-voice" data-shot-id="${shot.shotId}">${voiceOptions}</select></div>
+            </div>
+            <div class="otl-cinematic-editor-speech">
+                <label class="otl-cinematic-check"><input type="checkbox" data-act="cinematic-shot-speech-match" data-shot-id="${shot.shotId}" ${matchEnabled ? 'checked' : ''} ${speechMetrics?.charsPerSecond ? '' : 'disabled'} />Match speech to timeline</label>
+                <div class="otl-cinematic-field"><label>Speech</label><input class="otl-input otl-cinematic-parameter-speech" data-act="cinematic-shot-speech" data-shot-id="${shot.shotId}" type="text" value="${escapeHtmlAttr(shot.speechText)}" /></div>
+                <button type="button" class="otl-btn otl-cinematic-speech-play-btn" data-act="cinematic-shot-play-speech" data-shot-id="${shot.shotId}" title="Play Speech" ${isSpeechBusy ? 'disabled' : ''}>${CINE_ICON_PLAY}</button>
+                <div class="otl-cinematic-speech-metric">${durationText}</div>
+                <div class="otl-cinematic-speech-metric">${cpsText}</div>
+            </div>`;
+    }
+
+    private cinematicTimelineData() {
+        if (!this.cinematicPlan?.shots?.length) return null;
+        const shots: Array<{ shot: CinematicShot; startSec: number; endSec: number; index: number }> = [];
+        const keyframes: Array<{ shot: CinematicShot; keyframe: CinematicKeyframe; globalTimeSec: number; shotIndex: number; keyframeIndex: number }> = [];
+        let cursor = 0;
+        this.cinematicPlan.shots.forEach((shot, shotIndex) => {
+            const duration = Math.max(0.2, shot.durationSec || 0.2);
+            const startSec = cursor;
+            const endSec = startSec + duration;
+            shots.push({ shot, startSec, endSec, index: shotIndex });
+            shot.keyframes.forEach((keyframe, keyframeIndex) => {
+                const t = clamp(keyframe.t, 0, 1);
+                keyframes.push({ shot, keyframe, globalTimeSec: startSec + duration * t, shotIndex, keyframeIndex });
+            });
+            cursor = endSec;
+        });
+        return { totalDurationSec: Math.max(0.2, cursor), shots, keyframes };
+    }
+
+    private blendCinematicKeyframes(from: CinematicKeyframe, to: CinematicKeyframe, ratio: number): CinematicKeyframe {
+        const t = clamp(ratio, 0, 1);
+        const ease = t < 0.5 ? 2 * t * t : 1 - (Math.pow(-2 * t + 2, 2) / 2);
+        const lerp = (a: number, b: number) => a + (b - a) * ease;
+        return {
+            ...from,
+            x: lerp(from.x, to.x),
+            y: lerp(from.y, to.y),
+            z: lerp(from.z, to.z),
+            yaw: lerp(from.yaw, to.yaw),
+            pitch: lerp(from.pitch, to.pitch),
+            fov: lerp(from.fov, to.fov),
+            moveSpeedMps: lerp(from.moveSpeedMps, to.moveSpeedMps)
+        };
+    }
+
+    private cinematicKeyframeAtTime(timeSec: number) {
+        const metrics = this.cinematicTimelineData();
+        if (!metrics) return null;
+        const clampedSec = clamp(timeSec, 0, metrics.totalDurationSec);
+        const shotSpan = metrics.shots.find((item) => clampedSec <= item.endSec + 1e-6) || metrics.shots[metrics.shots.length - 1];
+        if (!shotSpan) return null;
+        const shot = shotSpan.shot;
+        const duration = Math.max(0.2, shot.durationSec || 0.2);
+        const localT = clamp((clampedSec - shotSpan.startSec) / duration, 0, 1);
+        const currentIndex = Math.max(0, shot.keyframes.findIndex((item, idx) => idx < shot.keyframes.length - 1 && localT <= shot.keyframes[idx + 1].t));
+        const from = shot.keyframes[currentIndex] || shot.keyframes[0];
+        const to = shot.keyframes[Math.min(shot.keyframes.length - 1, currentIndex + 1)] || from;
+        const segmentDen = Math.max(0.0001, to.t - from.t || 1);
+        const ratio = clamp((localT - from.t) / segmentDen, 0, 1);
+        return {
+            shot,
+            shotId: shot.shotId,
+            keyframeId: from.keyframeId,
+            exactKeyframeId: (Math.abs(localT - from.t) < 0.001 ? from.keyframeId : null),
+            from,
+            to,
+            localT,
+            shotProgress: localT,
+            segmentRatio: ratio,
+            blended: this.blendCinematicKeyframes(from, to, ratio),
+            totalDurationSec: metrics.totalDurationSec,
+            currentTimeSec: clampedSec
+        };
+    }
+
+    private scrubCinematicTimeline(timeSec: number, snapToNearest = false) {
+        const metrics = this.cinematicTimelineData();
+        if (!metrics) return;
+        let targetSec = clamp(timeSec, 0, metrics.totalDurationSec);
+        if (snapToNearest) {
+            let nearest = metrics.keyframes[0];
+            let best = Number.POSITIVE_INFINITY;
+            metrics.keyframes.forEach((item) => {
+                const d = Math.abs(item.globalTimeSec - targetSec);
+                if (d < best) { best = d; nearest = item; }
+            });
+            targetSec = nearest?.globalTimeSec || targetSec;
+            this.selectedCinematicShotId = nearest?.shot.shotId || this.selectedCinematicShotId;
+            this.selectedCinematicKeyframeId = nearest?.keyframe.keyframeId || this.selectedCinematicKeyframeId;
+        }
+        const current = this.cinematicKeyframeAtTime(targetSec);
+        if (!current) return;
+        this.cinematicCurrentTimeSec = current.currentTimeSec;
+        this.selectedCinematicShotId = current.shotId;
+        if (current.exactKeyframeId) this.selectedCinematicKeyframeId = current.exactKeyframeId;
+        void this.options.setLiveCameraPose?.(this.cinematicPoseFromKeyframe(current.blended), clampFov(current.blended.fov, DEFAULT_POI_FOV));
+        this.applyCwMediaForTime(current.currentTimeSec);
+        this.renderCinematicTimeline();
+        this.renderCinematicKeyframeList();
+        this.renderCinematicMap();
+        this.drawViews();
+        this.syncPreviewSpeechAtTime(this.cinematicCurrentTimeSec);
+    }
+
+    private updateKeyframeTimeByGlobalTime(shotId: string, keyframeId: string, globalTimeSec: number) {
+        const metrics = this.cinematicTimelineData();
+        const shotSpan = metrics?.shots.find((item) => item.shot.shotId === shotId);
+        const shot = shotSpan?.shot || null;
+        if (!shot || !shotSpan) return;
+        const idx = shot.keyframes.findIndex((item) => item.keyframeId === keyframeId);
+        if (idx < 0) return;
+        const keyframe = shot.keyframes[idx];
+        if (idx === 0) { keyframe.t = 0; return; }
+        if (idx === shot.keyframes.length - 1) { keyframe.t = 1; return; }
+        const local = clamp((globalTimeSec - shotSpan.startSec) / Math.max(0.001, shot.durationSec), 0, 1);
+        const prev = shot.keyframes[idx - 1]?.t ?? 0;
+        const next = shot.keyframes[idx + 1]?.t ?? 1;
+        keyframe.t = clamp(local, prev + 0.02, next - 0.02);
+    }
+
+    private deleteSelectedCinematicKeyframe() {
+        const shot = this.selectedCinematicShot();
+        if (!shot || shot.keyframes.length <= 2 || !this.selectedCinematicKeyframeId) return;
+        const idx = shot.keyframes.findIndex((item) => item.keyframeId === this.selectedCinematicKeyframeId);
+        if (idx < 0) return;
+        shot.keyframes.splice(idx, 1);
+        this.selectedCinematicKeyframeId = shot.keyframes[Math.max(0, idx - 1)]?.keyframeId || shot.keyframes[0]?.keyframeId || null;
+        this.refreshCinematicUi();
+    }
+
+    private renderCinematicTimeline() {
+        this.cinematicTimelineEl.innerHTML = '';
+        const metrics = this.cinematicTimelineData();
+        if (!metrics) {
+            this.cinematicTimelineEl.innerHTML = '<div class="otl-muted">Generate plan first to see the timeline.</div>';
+            this.cinematicMiniTimelineEl.innerHTML = '';
+            this.cinematicMiniTimeEl.textContent = '0.0s';
+            return;
+        }
+        const timelineInset = 18;
+        const rulerStepCount = 10;
+        const mainLaneHeight = 112;
+        const audioLaneHeight = 52;
+        const musicLaneHeight = 52;
+        const pxPerSec = this.cinematicTimelinePixelsPerSecond;
+        const width = Math.max(760, Math.ceil(metrics.totalDurationSec * pxPerSec) + timelineInset * 2);
+        const bgm = this.cinematicPlan?.bgm || this.cinematicBgmSelection;
+        const hasBgm = Boolean(bgm && String(bgm.audioPath || '').trim());
+        const speechSegments = metrics.shots.flatMap((item) => {
+            const speech = String(item.shot.speechText || '').trim();
+            if (!speech) return [] as Array<{ lane: number; startSec: number; endSec: number; text: string; shotId: string }>;
+            const speechDuration = item.shot.speechMetrics?.durationSec
+                ? Math.max(0.2, item.shot.speechMetrics.durationSec)
+                : Math.max(0.2, item.endSec - item.startSec);
+            return [{ lane: 0, startSec: item.startSec, endSec: item.startSec + Math.max(0.2, speechDuration), text: speech, shotId: item.shot.shotId }];
+        });
+        const laneEnds: number[] = [];
+        speechSegments.forEach((segment) => {
+            let lane = 0;
+            while (lane < laneEnds.length && segment.startSec < laneEnds[lane] - 0.02) lane += 1;
+            if (lane === laneEnds.length) laneEnds.push(segment.endSec);
+            else laneEnds[lane] = segment.endSec;
+            segment.lane = lane;
+        });
+        const speechLaneCount = Math.max(1, laneEnds.length);
+        const shell = document.createElement('div');
+        shell.className = 'otl-cinematic-timeline-shell';
+
+        const side = document.createElement('div');
+        side.className = 'otl-cinematic-timeline-side';
+        side.innerHTML = '<div class="otl-cinematic-sequence-head empty"></div>';
+        const laneSide = document.createElement('div');
+        laneSide.className = 'otl-cinematic-lane-side';
+        const mainLane = document.createElement('div');
+        mainLane.className = 'otl-cinematic-lane-title';
+        mainLane.innerHTML = `<span class="otl-cinematic-lane-dot"></span><span>V1</span><span class="otl-cinematic-lane-tools"><span class="otl-cinematic-lane-tool" title="Lock">${CINE_ICON_LOCK}</span><span class="otl-cinematic-lane-tool" title="Eye">${CINE_ICON_EYE}</span></span>`;
+        laneSide.appendChild(mainLane);
+        for (let lane = 0; lane < speechLaneCount; lane += 1) {
+            const speechLane = document.createElement('div');
+            speechLane.className = 'otl-cinematic-lane-audio';
+            speechLane.innerHTML = `<span class="otl-cinematic-lane-dot"></span><span>A${lane + 1}</span><span class="otl-cinematic-lane-tools"><span class="otl-cinematic-lane-tool" title="Lock">${CINE_ICON_LOCK}</span><span class="otl-cinematic-lane-tool" title="Mute">${CINE_ICON_VOLUME}</span></span>`;
+            laneSide.appendChild(speechLane);
+        }
+        if (hasBgm) {
+            const musicLane = document.createElement('div');
+            musicLane.className = 'otl-cinematic-lane-audio';
+            musicLane.innerHTML = `<span class="otl-cinematic-lane-dot"></span><span>M1</span><span class="otl-cinematic-lane-tools"><span class="otl-cinematic-lane-tool" title="Lock">${CINE_ICON_LOCK}</span><span class="otl-cinematic-lane-tool" title="Music">${CINE_ICON_MUSIC}</span></span>`;
+            laneSide.appendChild(musicLane);
+        }
+        side.appendChild(laneSide);
+
+        const main = document.createElement('div');
+        main.className = 'otl-cinematic-timeline-main';
+        const rulerWrap = document.createElement('div');
+        rulerWrap.className = 'otl-cinematic-ruler-wrap';
+        const rulerInner = document.createElement('div');
+        rulerInner.className = 'otl-cinematic-ruler-inner';
+        rulerInner.style.width = `${width}px`;
+        rulerInner.setAttribute('data-total-sec', String(metrics.totalDurationSec));
+        const ruler = document.createElement('div');
+        ruler.className = 'otl-cinematic-time-ruler';
+        const tickCount = Math.ceil(metrics.totalDurationSec * rulerStepCount);
+        for (let step = 0; step <= tickCount; step += 1) {
+            const x = timelineInset + step * (pxPerSec / rulerStepCount);
+            const tick = document.createElement('div');
+            tick.className = `otl-cinematic-tick${step % rulerStepCount === 0 ? ' major' : (step % 5 === 0 ? ' mid' : '')}`;
+            tick.style.left = `${x}px`;
+            ruler.appendChild(tick);
+            if (step % rulerStepCount === 0) {
+                const label = document.createElement('div');
+                label.className = 'otl-cinematic-tick-label';
+                label.style.left = `${x}px`;
+                label.textContent = `${step / rulerStepCount}s`;
+                ruler.appendChild(label);
+            }
+        }
+        rulerInner.appendChild(ruler);
+        rulerWrap.appendChild(rulerInner);
+
+        const trackWrap = document.createElement('div');
+        trackWrap.className = 'otl-cinematic-track-wrap';
+        const trackScroll = document.createElement('div');
+        trackScroll.className = 'otl-cinematic-track-scroll';
+        trackScroll.style.width = `${width}px`;
+        trackScroll.style.height = `${mainLaneHeight + speechLaneCount * audioLaneHeight + (hasBgm ? musicLaneHeight : 0)}px`;
+        trackScroll.setAttribute('data-total-sec', String(metrics.totalDurationSec));
+
+        const trackGrid = document.createElement('div');
+        trackGrid.className = 'otl-cinematic-track-grid';
+        for (let step = 0; step <= tickCount; step += 1) {
+            const x = timelineInset + step * (pxPerSec / rulerStepCount);
+            const line = document.createElement('div');
+            line.className = `otl-cinematic-grid-line${step % rulerStepCount === 0 ? ' major' : (step % 5 === 0 ? ' mid' : '')}`;
+            line.style.left = `${x}px`;
+            trackGrid.appendChild(line);
+        }
+        trackScroll.appendChild(trackGrid);
+
+        const shotRow = document.createElement('div');
+        shotRow.className = 'otl-cinematic-shot-row';
+        metrics.shots.forEach((item) => {
+            const left = timelineInset + item.startSec * pxPerSec;
+            const bar = document.createElement('div');
+            bar.className = `otl-cinematic-shot-bar${item.shot.shotId === this.selectedCinematicShotId ? ' active' : ''}`;
+            bar.style.left = `${left}px`;
+            bar.style.width = `${Math.max(60, (item.endSec - item.startSec) * pxPerSec - 6)}px`;
+            bar.setAttribute('data-act', 'cinematic-shot-select');
+            bar.setAttribute('data-shot-id', item.shot.shotId);
+            const labels = item.shot.keyframes.map((keyframe, keyframeIndex) => {
+                const labelLeft = keyframeIndex === 0 ? '0%' : (keyframeIndex === item.shot.keyframes.length - 1 ? '100%' : `${clamp(keyframe.t, 0, 1) * 100}%`);
+                return `<span class="otl-cinematic-keyframe-label" style="left:${labelLeft};">K${metrics.keyframes.findIndex((entry) => entry.keyframe.keyframeId === keyframe.keyframeId) + 1}</span>`;
+            }).join('');
+            const dots = item.shot.keyframes.map((keyframe, keyframeIndex) => {
+                const isBoundaryStart = keyframe.t <= 0.001;
+                const isBoundaryEnd = keyframe.t >= 0.999;
+                const dotTop = '50%';
+                const dotLeft = keyframeIndex === 0 ? '0%' : (keyframeIndex === item.shot.keyframes.length - 1 ? '100%' : `${clamp(keyframe.t, 0, 1) * 100}%`);
+                return `<button type="button" class="otl-cinematic-keyframe-dot${keyframe.keyframeId === this.selectedCinematicKeyframeId ? ' active' : ''}" style="left:${dotLeft};top:${dotTop};" data-act="cinematic-keyframe-select" data-keyframe-id="${keyframe.keyframeId}" data-shot-id="${item.shot.shotId}" data-time-sec="${item.startSec + (item.endSec - item.startSec) * keyframe.t}" data-label="K${metrics.keyframes.findIndex((entry) => entry.keyframe.keyframeId === keyframe.keyframeId) + 1}"></button>`;
+            }).join('');
+            bar.innerHTML = `<div class="otl-cinematic-shot-line"><div class="otl-cinematic-shot-title">${item.index + 1}. ${item.shot.label}</div><div class="otl-cinematic-shot-meta">${(item.endSec - item.startSec).toFixed(1)}s</div></div><div class="otl-cinematic-shot-klabels">${labels}</div><div class="otl-cinematic-shot-dots">${dots}</div>`;
+            shotRow.appendChild(bar);
+        });
+        trackScroll.appendChild(shotRow);
+
+        const speechTrack = document.createElement('div');
+        speechTrack.className = 'otl-cinematic-speech-track';
+        speechTrack.style.top = `${mainLaneHeight}px`;
+        for (let lane = 0; lane < speechLaneCount; lane += 1) {
+            const row = document.createElement('div');
+            row.className = 'otl-cinematic-speech-row-lane';
+            speechSegments.filter((segment) => segment.lane === lane).forEach((segment) => {
+                const chip = document.createElement('div');
+                chip.className = 'otl-cinematic-speech-chip';
+                chip.style.left = `${timelineInset + segment.startSec * pxPerSec}px`;
+                chip.style.width = `${Math.max(60, (segment.endSec - segment.startSec) * pxPerSec - 6)}px`;
+                chip.textContent = segment.text;
+                row.appendChild(chip);
+            });
+            speechTrack.appendChild(row);
+        }
+        trackScroll.appendChild(speechTrack);
+
+        if (hasBgm && bgm) {
+            const musicTrack = document.createElement('div');
+            musicTrack.className = 'otl-cinematic-speech-track';
+            musicTrack.style.top = `${mainLaneHeight + speechLaneCount * audioLaneHeight}px`;
+            const row = document.createElement('div');
+            row.className = 'otl-cinematic-speech-row-lane';
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'otl-cinematic-speech-chip';
+            chip.style.background = 'linear-gradient(180deg, rgba(35, 56, 105, 0.92), rgba(18, 32, 65, 0.96))';
+            chip.style.borderColor = 'rgba(94, 152, 255, 0.55)';
+            chip.style.left = `${timelineInset}px`;
+            const clipDuration = Math.max(0.1, Number(bgm.audioEndSeconds || 0) - Number(bgm.audioStartSeconds || 0));
+            const playDuration = bgm.targetMusicDurationSeconds && Number(bgm.targetMusicDurationSeconds) > 0
+                ? Number(bgm.targetMusicDurationSeconds)
+                : clipDuration / Math.max(0.001, cinematicBgmEffectiveRate(bgm));
+            chip.style.width = `${Math.max(80, playDuration * pxPerSec)}px`;
+            chip.setAttribute('data-act', 'cinematic-bgm-edit');
+            chip.textContent = `${bgm.audioDisplayName || bgm.audioPath} (${Number(bgm.audioStartSeconds || 0).toFixed(1)}-${Number(bgm.audioEndSeconds || 0).toFixed(1)}s @ ${cinematicBgmEffectiveRate(bgm).toFixed(2)}x)`;
+            row.appendChild(chip);
+            musicTrack.appendChild(row);
+            trackScroll.appendChild(musicTrack);
+        }
+
+        const playhead = document.createElement('div');
+        playhead.className = 'otl-cinematic-playhead';
+        playhead.style.left = `${timelineInset + this.cinematicCurrentTimeSec * pxPerSec}px`;
+        trackScroll.appendChild(playhead);
+
+        trackWrap.appendChild(trackScroll);
+        trackWrap.addEventListener('scroll', () => {
+            rulerWrap.scrollLeft = trackWrap.scrollLeft;
+        });
+        rulerWrap.addEventListener('scroll', () => {
+            trackWrap.scrollLeft = rulerWrap.scrollLeft;
+        });
+        main.appendChild(rulerWrap);
+        main.appendChild(trackWrap);
+        shell.appendChild(side);
+        shell.appendChild(main);
+        this.cinematicTimelineEl.appendChild(shell);
+
+        const miniWidth = Math.max(1, this.cinematicMiniTimelineEl.clientWidth || 260);
+        const railLeft = 12;
+        const railWidth = Math.max(24, miniWidth - 24);
+        const progressWidth = railWidth * clamp(this.cinematicCurrentTimeSec / Math.max(metrics.totalDurationSec, 0.001), 0, 1);
+        this.cinematicMiniTimelineEl.innerHTML = `<div class="otl-cinematic-mini-track"></div><div class="otl-cinematic-mini-progress" style="width:${progressWidth}px"></div><div class="otl-cinematic-mini-playhead" style="left:${railLeft + progressWidth}px"></div>`;
+        this.cinematicMiniTimeEl.textContent = `${this.cinematicCurrentTimeSec.toFixed(1)}s`;
+    }
+
+    private renderCinematicMapCanvas(canvas: HTMLCanvasElement, mode: 'top' | 'front') {
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = '#0b0d12';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const bitmap = mode === 'top' ? this.topBitmapCanvas : this.frontBitmapCanvas;
+        if (bitmap) {
+            const view = mode === 'top' ? this.topView : this.frontView;
+            ctx.save();
+            ctx.setTransform(
+                view.zoom,
+                0,
+                0,
+                view.zoom,
+                canvas.width * 0.5 * (1 - view.zoom) + view.offsetX,
+                canvas.height * 0.5 * (1 - view.zoom) + view.offsetY
+            );
+            ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            ctx.restore();
+        }
+        const selected = this.selectedCinematicKeyframe();
+        const points = this.cinematicPlan?.shots.flatMap((shot) => shot.keyframes) || [];
+        if (this.cinematicShowRouteOverlay && points.length) {
+            ctx.beginPath();
+            points.forEach((kf, idx) => {
+                const p = mode === 'top'
+                    ? this.projectTopForCanvas(canvas, kf.x, kf.z)
+                    : this.projectFrontForCanvas(canvas, kf.x, kf.y + this.eyeHeightM);
+                if (idx === 0) ctx.moveTo(p.x, p.y);
+                else ctx.lineTo(p.x, p.y);
+            });
+            ctx.setLineDash([12, 12]);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = 'rgba(106, 134, 194, 0.46)';
+            ctx.stroke();
+            ctx.setLineDash([]);
+            points.forEach((kf) => {
+                const active = kf.keyframeId === this.selectedCinematicKeyframeId;
+                const p = mode === 'top'
+                    ? this.projectTopForCanvas(canvas, kf.x, kf.z)
+                    : this.projectFrontForCanvas(canvas, kf.x, kf.y + this.eyeHeightM);
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, active ? 6.5 : 4.5, 0, Math.PI * 2);
+                ctx.fillStyle = active ? '#4f8bff' : '#facc15';
+                ctx.fill();
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = '#f3f7ff';
+                ctx.stroke();
+            });
+        }
+        if (selected) {
+            const p = mode === 'top'
+                ? this.projectTopForCanvas(canvas, selected.x, selected.z)
+                : this.projectFrontForCanvas(canvas, selected.x, selected.y + this.eyeHeightM);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(69, 128, 255, 0.18)';
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 7.5, 0, Math.PI * 2);
+            ctx.fillStyle = '#4f8bff';
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = '#f3f7ff';
+            ctx.stroke();
+            if (mode === 'top') {
+                const yawR = degToRad(selected.yaw);
+                const hx = p.x + Math.sin(yawR) * 18;
+                const hy = p.y + Math.cos(yawR) * 18;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(hx, hy);
+                ctx.strokeStyle = '#4f8bff';
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(79, 139, 255, 0.22)';
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(hx, hy, 4.7, 0, Math.PI * 2);
+                ctx.fillStyle = '#facc15';
+                ctx.fill();
+                ctx.lineWidth = 1.8;
+                ctx.strokeStyle = '#f3f7ff';
+                ctx.stroke();
+            } else {
+                const pitchR = degToRad(selected.pitch);
+                const hx = p.x + Math.cos(pitchR) * 18;
+                const hy = p.y - Math.sin(pitchR) * 18;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+                ctx.lineTo(hx, hy);
+                ctx.strokeStyle = '#4f8bff';
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(79, 139, 255, 0.22)';
+                ctx.fill();
+                ctx.beginPath();
+                ctx.arc(hx, hy, 4.7, 0, Math.PI * 2);
+                ctx.fillStyle = '#facc15';
+                ctx.fill();
+                ctx.lineWidth = 1.8;
+                ctx.strokeStyle = '#f3f7ff';
+                ctx.stroke();
+            }
+        }
+    }
+
+    private cinematicPreviewCaptureQueued = 0;
+    private cinematicSpeechAudio: HTMLAudioElement | null = null;
+    private cinematicSpeechPlayingShotId: string | null = null;
+    private cinematicSpeechLoadingShotId: string | null = null;
+    private cinematicSpeechPlayedShotIds = new Set<string>();
+    private cinematicSpeechLastShotId: string | null = null;
+    private cinematicSpeechLastTimeSec: number | null = null;
+    private cinematicTimelinePixelsPerSecond = 150;
+
+    private async syncCinematicPreviewCamera() {
+        const selected = this.selectedCinematicKeyframe();
+        if (selected) {
+            await this.options.setLiveCameraPose?.(this.cinematicPoseFromKeyframe(selected), clampFov(selected.fov, DEFAULT_POI_FOV));
+            this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+            return;
+        }
+        const current = this.cinematicKeyframeAtTime(this.cinematicCurrentTimeSec);
+        if (!current) return;
+        await this.options.setLiveCameraPose?.(this.cinematicPoseFromKeyframe(current.blended), clampFov(current.blended.fov, DEFAULT_POI_FOV));
+        this.applyCwMediaForTime(current.currentTimeSec);
+    }
+
+    private scheduleCinematicPreviewCapture() {
+        const token = Date.now();
+        this.cinematicPreviewCaptureQueued = token;
+        window.setTimeout(async () => {
+            if (this.cinematicPreviewCaptureQueued !== token) return;
+            if (!this.options.captureScreenshotPng) return;
+            try {
+                await this.syncCinematicPreviewCamera();
+                if (this.cinematicPreviewCaptureQueued !== token) return;
+                const shot = await this.options.captureScreenshotPng();
+                if (this.cinematicPreviewCaptureQueued !== token) return;
+                this.cinematicPreviewImageEl.src = shot;
+            } catch {}
+        }, 80);
+    }
+
+    private renderCinematicMap() {
+        this.renderCinematicMapCanvas(this.cinematicTopCanvas, 'top');
+        this.renderCinematicMapCanvas(this.cinematicFrontCanvas, 'front');
+        const selected = this.selectedCinematicKeyframe();
+        const shot = this.selectedCinematicShot();
+        if (selected && shot) this.cinematicCurrentKfLabelEl.textContent = `K${shot.keyframes.findIndex((item) => item.keyframeId === selected.keyframeId) + 1} (t=${(selected.t * shot.durationSec).toFixed(2)}s)`;
+        else this.cinematicCurrentKfLabelEl.textContent = 'K1 (t=0.00s)';
+        this.scheduleCinematicPreviewCapture();
+    }
+
+    private resetCinematicDraftToDefaults() {
+        this.selectedCinematicVersionId = null;
+        this.cinematicSimplePrompt = DEFAULT_CINEMATIC_SIMPLE_PROMPT;
+        this.cinematicPlannerPrompt = DEFAULT_CINEMATIC_PLANNER_PROMPT;
+        this.cinematicSceneDescription = '';
+        this.cinematicStoryBackground = '';
+        this.cinematicStyleText = 'cinematic one take';
+        this.cinematicTargetDurationSec = 14;
+        this.cinematicPlan = null;
+        this.cinematicBgmSelection = null;
+        this.cinematicCurrentTimeSec = 0;
+        this.selectedCinematicShotId = null;
+        this.selectedCinematicKeyframeId = null;
+        if (!this.cinematicSelectedPoiIds.length) {
+            this.cinematicSelectedPoiIds = this.pois.slice(0, 4).map((poi) => poi.poiId);
+        }
+        this.syncCinematicInputsFromState();
+    }
+
+    private refreshCinematicUi() {
+        this.ensureCinematicSelection();
+        this.syncCinematicChrome();
+        this.renderCinematicVersionList();
+        this.renderCinematicPoiList();
+        this.renderCinematicTimeline();
+        this.renderCinematicKeyframeList();
+        this.renderCinematicMap();
+        this.drawViews();
+        this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+    }
+
+    private async loadCinematicVersionList(preferredVersionId?: number | null) {
+        if (!this.requireModel(false)) return;
+        const response = await fetch(`${this.apiBase()}/cinematic/versions?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        this.cinematicVersions = Array.isArray(data?.versions) ? data.versions as CinematicVersionSummary[] : [];
+        const targetId = preferredVersionId && this.cinematicVersions.some((item) => item.id === preferredVersionId)
+            ? preferredVersionId
+            : (this.cinematicVersions[0]?.id || null);
+        this.selectedCinematicVersionId = targetId;
+        this.renderCinematicVersionList();
+        if (targetId) await this.loadCinematicVersionDetail(targetId);
+        else {
+            this.resetCinematicDraftToDefaults();
+            this.refreshCinematicUi();
+            this.setCinematicStatus('Using default prompt template');
+        }
+    }
+
+    private async loadCinematicVersionDetail(versionId: number) {
+        if (!this.requireModel(false)) return;
+        const response = await fetch(`${this.apiBase()}/cinematic/versions/${encodeURIComponent(String(versionId))}?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`);
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.version) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        const detail = data.version as CinematicVersionDetail;
+        this.selectedCinematicVersionId = detail.id;
+        this.cinematicSimplePrompt = detail.simplePrompt || DEFAULT_CINEMATIC_SIMPLE_PROMPT;
+        this.cinematicPlannerPrompt = detail.plannerPrompt || DEFAULT_CINEMATIC_PLANNER_PROMPT;
+        this.cinematicSceneDescription = detail.sceneDescription || '';
+        this.cinematicStoryBackground = detail.storyBackground || '';
+        this.cinematicStyleText = detail.styleText || 'cinematic one take';
+        this.cinematicTargetDurationSec = Math.max(4, Number(detail.targetDurationSec || 14));
+        this.cinematicSelectedPoiIds = Array.isArray(detail.selectedPoiIds) && detail.selectedPoiIds.length > 0
+            ? detail.selectedPoiIds.filter(Boolean)
+            : this.pois.slice(0, 4).map((poi) => poi.poiId);
+        this.cinematicPlan = detail.plan || null;
+        this.normalizeCinematicPlanMedia(this.cinematicPlan);
+        if (this.cinematicPlan?.bgm && String(this.cinematicPlan.bgm.audioPath || '').trim()) {
+            this.cinematicBgmSelection = {
+                audioPath: String(this.cinematicPlan.bgm.audioPath || '').trim(),
+                audioStartSeconds: Math.max(0, Number(this.cinematicPlan.bgm.audioStartSeconds) || 0),
+                audioEndSeconds: Math.max(0, Number(this.cinematicPlan.bgm.audioEndSeconds) || 0),
+                audioPlaybackRate: clampMusicRate(Number(this.cinematicPlan.bgm.audioPlaybackRate) || 1),
+                targetMusicDurationSeconds: normalizeMusicDuration(this.cinematicPlan.bgm.targetMusicDurationSeconds),
+                audioDisplayName: this.cinematicPlan.bgm.audioDisplayName ? String(this.cinematicPlan.bgm.audioDisplayName) : undefined
+            };
+            this.cinematicPlan.bgm = { ...this.cinematicBgmSelection };
+        } else {
+            this.cinematicBgmSelection = null;
+            if (this.cinematicPlan) this.cinematicPlan.bgm = null;
+        }
+        this.applyStoredSpeechTimingToPlan(this.cinematicPlan);
+        this.cinematicCurrentTimeSec = 0;
+        this.syncCinematicInputsFromState();
+        this.refreshCinematicUi();
+        this.setCinematicStatus(`Loaded v${detail.versionNo}`);
+    }
+
+    private async saveCinematicVersion(asNew = false) {
+        if (!this.requireModel()) return;
+        this.syncCinematicStateFromInputs();
+        const body = {
+            modelFilename: this.modelFilename,
+            status: 'draft',
+            source: this.cinematicPlan ? 'edited' : 'manual',
+            simplePrompt: this.cinematicSimplePrompt,
+            plannerPrompt: this.cinematicPlannerPrompt,
+            sceneDescription: this.cinematicSceneDescription,
+            storyBackground: this.cinematicStoryBackground,
+            styleText: this.cinematicStyleText,
+            targetDurationSec: this.cinematicTargetDurationSec,
+            selectedPoiIds: this.cinematicSelectedPoiIds,
+            plan: this.cinematicPlan,
+            csvText: this.cinematicPlan ? this.compileCinematicPlanToCsv(this.cinematicPlan) : ''
+        };
+        const response = await fetch(asNew || !this.selectedCinematicVersionId
+            ? `${this.apiBase()}/cinematic/versions`
+            : `${this.apiBase()}/cinematic/versions/${encodeURIComponent(String(this.selectedCinematicVersionId))}`,
+        {
+            method: asNew || !this.selectedCinematicVersionId ? 'POST' : 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.version?.id) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        await this.loadCinematicVersionList(Number(data.version.id));
+        this.setCinematicStatus(`Saved v${data.version.versionNo}`);
+    }
+
+    private async deleteSelectedCinematicVersion() {
+        if (!this.requireModel()) return;
+        const versionId = this.selectedCinematicVersionId;
+        if (!versionId) {
+            this.setCinematicStatus('No cinematic version selected');
+            return;
+        }
+        const current = this.cinematicVersions.find((item) => item.id === versionId) || null;
+        const confirmed = window.confirm(`Delete cinematic version v${current?.versionNo || versionId}?`);
+        if (!confirmed) return;
+        const response = await fetch(`${this.apiBase()}/cinematic/versions/${encodeURIComponent(String(versionId))}?modelFilename=${encodeURIComponent(String(this.modelFilename || ''))}`, {
+            method: 'DELETE'
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        await this.loadCinematicVersionList();
+        this.setCinematicStatus(`Deleted v${current?.versionNo || versionId}`);
+    }
+
+    private expandCinematicPrompt() {
+        this.syncCinematicStateFromInputs();
+        const selectedSummary = this.pois
+            .filter((poi) => this.cinematicSelectedPoiIds.includes(poi.poiId))
+            .map((poi) => `${poi.poiName}(${poi.targetX.toFixed(2)},${poi.targetY.toFixed(2)},${poi.targetZ.toFixed(2)})`)
+            .join(' -> ');
+        this.cinematicPlannerPrompt = `${DEFAULT_CINEMATIC_PLANNER_PROMPT}\n\n用户工作流输入:\n${this.cinematicSimplePrompt}\n\n目标总时长:\n${this.cinematicTargetDurationSec}s\n\n选中POI:\n${selectedSummary || '未选择'}\n\n要求: 先生成可编辑时间轴, 让每个 shot 在横向时间轴上连续排列, 每个 keyframe 是时间轴上的单个点, 点与点之间驱动镜头运动。`;
+        this.cinematicPlannerPromptInput.value = this.cinematicPlannerPrompt;
+        this.setCinematicStatus('Planner prompt generated');
+    }
+
+    private cinematicPlanBounds() {
+        return {
+            top: { xMin: this.topBounds.xMin, xMax: this.topBounds.xMax, zMin: -this.topBounds.yMax, zMax: -this.topBounds.yMin },
+            front: { xMin: this.frontBounds.xMin, xMax: this.frontBounds.xMax, yMin: this.frontBounds.yMin, yMax: this.frontBounds.yMax }
+        };
+    }
+
+    private normalizeCinematicPlanMedia(plan: CinematicPlan | null) {
+        if (!plan?.shots?.length) return;
+        plan.shots.forEach((shot) => {
+            const legacy = (shot as CinematicShot & { mediaObject?: CinematicMediaObjectConfig }).mediaObject;
+            if (legacy && !shot.keyframes[0]?.mediaObject) {
+                shot.keyframes[0].mediaObject = normalizeCwMediaObjectConfig(legacy);
+            }
+            shot.keyframes.forEach((keyframe) => {
+                if (keyframe.mediaObject == null) return;
+                keyframe.mediaObject = normalizeCwMediaObjectConfig(keyframe.mediaObject);
+            });
+            delete (shot as CinematicShot & { mediaObject?: CinematicMediaObjectConfig }).mediaObject;
+        });
+    }
+
+    private cinematicTimelineOrderedKeyframes() {
+        const metrics = this.cinematicTimelineData();
+        return metrics?.keyframes || [];
+    }
+
+    private cinematicGlobalTimeForKeyframe(keyframeId: string) {
+        const ordered = this.cinematicTimelineOrderedKeyframes();
+        const hit = ordered.find((item) => item.keyframe.keyframeId === keyframeId);
+        return hit ? hit.globalTimeSec : null;
+    }
+
+    private removeMediaObjectFromKeyframeForward(keyframeId: string) {
+        const ordered = this.cinematicTimelineOrderedKeyframes();
+        const startIndex = ordered.findIndex((item) => item.keyframe.keyframeId === keyframeId);
+        if (startIndex < 0) return { cleared: 0, startIndex: -1 };
+        let cleared = 0;
+        for (let i = startIndex; i < ordered.length; i += 1) {
+            const kf = ordered[i].keyframe;
+            const media = kf.mediaObject ? normalizeCwMediaObjectConfig(kf.mediaObject) : null;
+            if (!media?.enabled && !media?.src && !media?.placeholder) continue;
+            kf.mediaObject = {
+                enabled: false,
+                src: '',
+                fileName: '',
+                anchorWorld: null,
+                scale: media?.scale || 1.6,
+                yaw: 0,
+                pitch: 0,
+                roll: 0,
+                depthOffset: media?.depthOffset ?? 0.06,
+                placeholder: false,
+                placeholderLabel: ''
+            };
+            cleared += 1;
+        }
+        return { cleared, startIndex };
+    }
+
+    private cinematicLabelForKeyframeId(keyframeId: string | null) {
+        if (!keyframeId) return 'unknown keyframe';
+        const ordered = this.cinematicTimelineOrderedKeyframes();
+        const index = ordered.findIndex((item) => item.keyframe.keyframeId === keyframeId);
+        return index >= 0 ? `K${index + 1}` : keyframeId;
+    }
+
+    private cinematicEffectiveMediaForKeyframe(keyframeId: string | null) {
+        if (!keyframeId) return { config: null as CinematicMediaObjectConfig | null, sourceKeyframeId: null as string | null };
+        const ordered = this.cinematicTimelineOrderedKeyframes();
+        let effective: CinematicMediaObjectConfig | null = null;
+        let sourceKeyframeId: string | null = null;
+        for (let i = 0; i < ordered.length; i += 1) {
+            const keyframe = ordered[i].keyframe;
+            if (keyframe.mediaObject != null) {
+                const normalized = normalizeCwMediaObjectConfig(keyframe.mediaObject);
+                keyframe.mediaObject = normalized;
+                effective = normalized.enabled ? normalized : null;
+                sourceKeyframeId = keyframe.keyframeId;
+            }
+            if (keyframe.keyframeId === keyframeId) break;
+        }
+        return { config: effective, sourceKeyframeId };
+    }
+
+    private cinematicEffectiveMediaAtTime(timeSec: number) {
+        const current = this.cinematicKeyframeAtTime(timeSec);
+        if (!current) return { config: null as CinematicMediaObjectConfig | null, sourceKeyframeId: null as string | null };
+        const ordered = this.cinematicTimelineOrderedKeyframes();
+        let effective: CinematicMediaObjectConfig | null = null;
+        let sourceKeyframeId: string | null = null;
+        for (let i = 0; i < ordered.length; i += 1) {
+            const item = ordered[i];
+            if (item.globalTimeSec > current.currentTimeSec + 1e-6) break;
+            if (item.keyframe.mediaObject != null) {
+                const normalized = normalizeCwMediaObjectConfig(item.keyframe.mediaObject);
+                item.keyframe.mediaObject = normalized;
+                effective = normalized.enabled ? normalized : null;
+                sourceKeyframeId = item.keyframe.keyframeId;
+            }
+        }
+        return { config: effective, sourceKeyframeId };
+    }
+
+    private ensureKeyframeMediaOverride(keyframe: CinematicKeyframe) {
+        if (keyframe.mediaObject) {
+            keyframe.mediaObject = normalizeCwMediaObjectConfig(keyframe.mediaObject);
+            return keyframe.mediaObject;
+        }
+        const inherited = this.cinematicEffectiveMediaForKeyframe(keyframe.keyframeId).config;
+        keyframe.mediaObject = normalizeCwMediaObjectConfig(inherited || null);
+        return keyframe.mediaObject;
+    }
+
+    private describeCinematicMediaInheritance(keyframe: CinematicKeyframe) {
+        const effective = this.cinematicEffectiveMediaForKeyframe(keyframe.keyframeId);
+        if (keyframe.mediaObject) {
+            return keyframe.mediaObject.enabled
+                ? `Defined from ${this.cinematicLabelForKeyframeId(keyframe.keyframeId)}`
+                : `Disabled from ${this.cinematicLabelForKeyframeId(keyframe.keyframeId)}`;
+        }
+        if (effective.sourceKeyframeId && effective.config) {
+            return `Inherited from ${this.cinematicLabelForKeyframeId(effective.sourceKeyframeId)}`;
+        }
+        return 'No active 3D media object';
+    }
+
+    private activeCwMediaSpecAt(timeSec: number) {
+        if (!this.cinematicWorkspaceOpen()) return null;
+        const effective = this.cinematicEffectiveMediaAtTime(timeSec).config;
+        if (!effective) return null;
+        if (!effective.enabled || !effective.anchorWorld) return null;
+        return {
+            mode: 'media-object' as const,
+            kind: 'video' as const,
+            src: this.resolveAsset(effective.src),
+            anchorWorld: effective.anchorWorld,
+            scale: effective.scale,
+            orientation: {
+                yaw: effective.yaw,
+                pitch: effective.pitch,
+                roll: effective.roll
+            },
+            depthOffset: effective.depthOffset,
+            selected: this.cinematicMediaEditor.active && this.cinematicMediaEditor.selected,
+            placeholder: effective.placeholder === true || !effective.src,
+            placeholderLabel: effective.placeholderLabel || '3D Media Placeholder',
+            billboard: false
+        };
+    }
+
+    private applyCwMediaForTime(timeSec: number) {
+        const spec = this.activeCwMediaSpecAt(timeSec);
+        this.options.showEmbeddedMedia?.(spec || null);
+    }
+
+    private cinematicMediaOrientationFromCurrentView(anchor: HotspotWorldPoint) {
+        const live = this.options.getLiveCameraPose?.();
+        if (!live) return { yaw: 0, pitch: 0, roll: 0 };
+        const dx = live.pose.eye.x - anchor.x;
+        const dy = live.pose.eye.y - anchor.y;
+        const dz = live.pose.eye.z - anchor.z;
+        const planar = Math.max(0.0001, Math.hypot(dx, dz));
+        return {
+            yaw: radToDeg(Math.atan2(dx, dz)),
+            pitch: radToDeg(Math.atan2(dy, planar)),
+            roll: 0
+        };
+    }
+
+    private async uploadCinematicMediaFile(file: File) {
+        const mimeType = String(file.type || '').trim() || 'application/octet-stream';
+        const buffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+        const base64 = btoa(binary);
+        const response = await fetch(`${this.apiBase()}/cinematic/media`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileName: file.name, mimeType, dataBase64: base64 })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.ok || !data?.mediaUrl) throw new Error(data?.error?.message || `HTTP ${response.status}`);
+        return {
+            src: String(data.mediaUrl || ''),
+            fileName: String(data.fileName || file.name || 'video')
+        };
+    }
+
+    private closeCinematicMediaPlace(statusText?: string) {
+        if (!this.cinematicMediaPlace.active) return;
+        if (this.cinematicMediaPlace.cleanup) {
+            this.cinematicMediaPlace.cleanup();
+            this.cinematicMediaPlace.cleanup = null;
+        }
+        this.cinematicMediaPlace.active = false;
+        this.cinematicMediaPlace.pointerDown = false;
+        this.cinematicMiniMode = this.cinematicMediaPlace.restoreMiniMode;
+        this.syncCinematicChrome();
+        if (this.cinematicMediaPlace.reopenKeyframeEditor) this.cinematicKeyframeModal.classList.remove('hidden');
+        if (statusText) this.setCinematicStatus(statusText);
+    }
+
+    private cancelCinematicMediaPick(statusText?: string) {
+        this.closeCinematicMediaPlace(statusText);
+    }
+
+    private cancelCinematicMediaResize(statusText?: string) {
+        if (this.cinematicMediaResize.cleanup) {
+            this.cinematicMediaResize.cleanup();
+            this.cinematicMediaResize.cleanup = null;
+        }
+        this.cinematicMediaResize.active = false;
+        this.cinematicMediaResize.pointerDown = false;
+        if (statusText) this.setCinematicStatus(statusText);
+    }
+
+    private startCinematicMediaPick(keyframeId: string) {
+        const canvas = this.options.getCaptureCanvas?.();
+        const pick = this.options.pickWorldPointAtScreen;
+        if (!canvas || !pick) {
+            this.setCinematicStatus('Main view placing is unavailable');
+            this.logDebug('cw.media.place', `unavailable canvas=${Boolean(canvas)} pick=${Boolean(pick)}`);
+            return;
+        }
+        const keyframe = this.selectedCinematicKeyframe();
+        if (!keyframe || keyframe.keyframeId !== keyframeId) {
+            this.setCinematicStatus('Select the target keyframe first');
+            this.logDebug('cw.media.place', `reject keyframe mismatch selected=${keyframe?.keyframeId || '-'} target=${keyframeId}`);
+            return;
+        }
+        const media = this.ensureKeyframeMediaOverride(keyframe);
+        if (!media.src) {
+            this.setCinematicStatus('Choose a video file before placing the 3D object');
+            this.logDebug('cw.media.place', `reject no video source keyframe=${keyframeId}`);
+            return;
+        }
+        this.logDebug('cw.media.place', `start keyframe=${keyframeId} miniBefore=${this.cinematicMiniMode} src=${media.src}`);
+        this.closeCinematicMediaEditor();
+        this.closeCinematicMediaPlace();
+        this.cinematicMediaPlace.active = true;
+        this.cinematicMediaPlace.keyframeId = keyframeId;
+        this.cinematicMediaPlace.restoreMiniMode = this.cinematicMiniMode;
+        this.cinematicMediaPlace.reopenKeyframeEditor = !this.cinematicKeyframeModal.classList.contains('hidden');
+        this.cinematicMiniMode = true;
+        this.syncCinematicChrome();
+
+        const prevCursor = canvas.style.cursor;
+        canvas.style.cursor = 'crosshair';
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') this.closeCinematicMediaPlace('Placing cancelled');
+        };
+        const onPointerDown = (event: PointerEvent) => {
+            if (!this.cinematicMediaPlace.active || this.cinematicMediaPlace.keyframeId !== keyframeId) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.cinematicMediaPlace.pointerDown = true;
+            this.cinematicMediaPlace.startClientX = event.clientX;
+            this.cinematicMediaPlace.startClientY = event.clientY;
+            this.cinematicMediaPlace.currentClientX = event.clientX;
+            this.cinematicMediaPlace.currentClientY = event.clientY;
+            const rect = canvas.getBoundingClientRect();
+            const sx = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+            const sy = clamp((event.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+            this.logDebug('cw.media.place', `pointerdown client=(${event.clientX.toFixed(1)},${event.clientY.toFixed(1)}) norm=(${sx.toFixed(4)},${sy.toFixed(4)})`);
+            void pick(sx, sy).then((point) => {
+                if (this.cinematicMediaPlace.active && point) {
+                    this.cinematicMediaPlace.startWorld = point;
+                    this.logDebug('cw.media.place', `startWorld=(${point.x.toFixed(3)},${point.y.toFixed(3)},${point.z.toFixed(3)})`);
+                } else {
+                    this.logDebug('cw.media.place', 'startWorld miss');
+                }
+            });
+        };
+        let moveLogAt = 0;
+        const onPointerMove = (event: PointerEvent) => {
+            if (!this.cinematicMediaPlace.active || !this.cinematicMediaPlace.pointerDown) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.cinematicMediaPlace.currentClientX = Math.max(this.cinematicMediaPlace.startClientX + 4, event.clientX);
+            this.cinematicMediaPlace.currentClientY = Math.max(this.cinematicMediaPlace.startClientY + 4, event.clientY);
+            const widthPx = Math.max(8, this.cinematicMediaPlace.currentClientX - this.cinematicMediaPlace.startClientX);
+            media.scale = clamp(widthPx / 120, 0.1, 120);
+            this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+            const now = performance.now();
+            if (now - moveLogAt > 140) {
+                moveLogAt = now;
+                this.logDebug('cw.media.place', `drag widthPx=${widthPx.toFixed(1)} scale=${media.scale.toFixed(3)}`);
+            }
+        };
+        const onPointerUp = (event: PointerEvent) => {
+            if (!this.cinematicMediaPlace.active || !this.cinematicMediaPlace.pointerDown) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.cinematicMediaPlace.pointerDown = false;
+            const rect = canvas.getBoundingClientRect();
+            const centerClientX = this.cinematicMediaPlace.startClientX + (this.cinematicMediaPlace.currentClientX - this.cinematicMediaPlace.startClientX) * 0.5;
+            const centerClientY = this.cinematicMediaPlace.startClientY + (this.cinematicMediaPlace.currentClientY - this.cinematicMediaPlace.startClientY) * 0.5;
+            const cx = clamp((centerClientX - rect.left) / Math.max(1, rect.width), 0, 1);
+            const cy = clamp((centerClientY - rect.top) / Math.max(1, rect.height), 0, 1);
+            const finalScale = clamp((this.cinematicMediaPlace.currentClientX - this.cinematicMediaPlace.startClientX) / 120, 0.1, 120);
+            this.logDebug('cw.media.place', `pointerup centerNorm=(${cx.toFixed(4)},${cy.toFixed(4)}) dragPx=(${(this.cinematicMediaPlace.currentClientX - this.cinematicMediaPlace.startClientX).toFixed(1)},${(this.cinematicMediaPlace.currentClientY - this.cinematicMediaPlace.startClientY).toFixed(1)})`);
+            void pick(cx, cy).then((centerPoint) => {
+                const target = this.selectedCinematicKeyframe();
+                if (!target || target.keyframeId !== keyframeId) return;
+                const activeMedia = this.ensureKeyframeMediaOverride(target);
+                activeMedia.enabled = true;
+                activeMedia.anchorWorld = centerPoint || this.cinematicMediaPlace.startWorld || activeMedia.anchorWorld || { x: target.x, y: target.y, z: target.z };
+                activeMedia.scale = finalScale;
+                const orientation = this.cinematicMediaOrientationFromCurrentView(activeMedia.anchorWorld);
+                activeMedia.yaw = orientation.yaw;
+                activeMedia.pitch = orientation.pitch;
+                activeMedia.roll = 0;
+                this.renderCinematicKeyframeList();
+                this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                this.logDebug('cw.media.place', `placed keyframe=${keyframeId} anchor=(${activeMedia.anchorWorld.x.toFixed(3)},${activeMedia.anchorWorld.y.toFixed(3)},${activeMedia.anchorWorld.z.toFixed(3)}) scale=${activeMedia.scale.toFixed(3)} fallbackCenter=${!centerPoint}`);
+                this.closeCinematicMediaPlace('Placed 3D media object (drag from top-left corner).');
+            });
+        };
+        const onWheel = (event: WheelEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        const onContext = (event: MouseEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        canvas.addEventListener('pointerdown', onPointerDown, true);
+        canvas.addEventListener('pointermove', onPointerMove, true);
+        canvas.addEventListener('pointerup', onPointerUp, true);
+        canvas.addEventListener('wheel', onWheel, { passive: false, capture: true });
+        canvas.addEventListener('contextmenu', onContext, true);
+        window.addEventListener('keydown', onKeyDown);
+        this.cinematicMediaPlace.cleanup = () => {
+            canvas.style.cursor = prevCursor;
+            canvas.removeEventListener('pointerdown', onPointerDown, true);
+            canvas.removeEventListener('pointermove', onPointerMove, true);
+            canvas.removeEventListener('pointerup', onPointerUp, true);
+            canvas.removeEventListener('wheel', onWheel, true);
+            canvas.removeEventListener('contextmenu', onContext, true);
+            window.removeEventListener('keydown', onKeyDown);
+        };
+        this.setCinematicStatus('Place mode: press as top-left corner, drag to set size, release to place. Camera is locked.');
+        this.logDebug('cw.media.place', 'listeners attached on canvas');
+    }
+
+    private cinematicMediaEditorKeyframe() {
+        if (!this.cinematicMediaEditor.keyframeId || !this.cinematicPlan?.shots?.length) return null;
+        for (let i = 0; i < this.cinematicPlan.shots.length; i += 1) {
+            const keyframe = this.cinematicPlan.shots[i].keyframes.find((row) => row.keyframeId === this.cinematicMediaEditor.keyframeId);
+            if (keyframe) return keyframe;
+        }
+        return null;
+    }
+
+    private cinematicMediaEditorCurrentMedia() {
+        const keyframe = this.cinematicMediaEditorKeyframe();
+        if (!keyframe) return null;
+        return this.ensureKeyframeMediaOverride(keyframe);
+    }
+
+    private cinematicMediaEditorPointerToScreenRatio(clientX: number, clientY: number) {
+        const canvas = this.options.getCaptureCanvas?.();
+        if (!canvas) return null;
+        const rect = canvas.getBoundingClientRect();
+        const x = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+        const y = clamp((clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+        return { x, y, width: rect.width, height: rect.height };
+    }
+
+    private cinematicMediaEditorPickHit(clientX: number, clientY: number) {
+        const media = this.cinematicMediaEditorCurrentMedia();
+        if (!media?.anchorWorld || !this.options.projectWorldToScreen) return false;
+        const projected = this.options.projectWorldToScreen(media.anchorWorld);
+        if (!projected?.visible) return false;
+        const canvas = this.options.getCaptureCanvas?.();
+        if (!canvas) return false;
+        const rect = canvas.getBoundingClientRect();
+        const centerX = rect.left + projected.x * rect.width;
+        const centerY = rect.top + projected.y * rect.height;
+        const distance = Math.hypot(clientX - centerX, clientY - centerY);
+        const threshold = 120;
+        return distance <= threshold;
+    }
+
+    private cinematicMediaEditorMoveWithDelta(dxPx: number, dyPx: number) {
+        const media = this.cinematicMediaEditorCurrentMedia();
+        if (!media) return;
+        const live = this.options.getLiveCameraPose?.();
+        const canvas = this.options.getCaptureCanvas?.();
+        if (!live || !canvas) return;
+        const anchor = this.cinematicMediaEditor.startAnchor;
+        const eye = live.pose.eye;
+        const forwardRaw = live.pose.forward;
+        const fMag = Math.hypot(forwardRaw.x, forwardRaw.y, forwardRaw.z) || 1;
+        const forward = { x: forwardRaw.x / fMag, y: forwardRaw.y / fMag, z: forwardRaw.z / fMag };
+        const worldUp = { x: 0, y: 1, z: 0 };
+        const rightRaw = {
+            x: worldUp.y * forward.z - worldUp.z * forward.y,
+            y: worldUp.z * forward.x - worldUp.x * forward.z,
+            z: worldUp.x * forward.y - worldUp.y * forward.x
+        };
+        const rMag = Math.hypot(rightRaw.x, rightRaw.y, rightRaw.z) || 1;
+        const right = { x: rightRaw.x / rMag, y: rightRaw.y / rMag, z: rightRaw.z / rMag };
+        const up = {
+            x: forward.y * right.z - forward.z * right.y,
+            y: forward.z * right.x - forward.x * right.z,
+            z: forward.x * right.y - forward.y * right.x
+        };
+        const distance = Math.max(0.2, Math.hypot(anchor.x - eye.x, anchor.y - eye.y, anchor.z - eye.z));
+        const worldPerPixel = (2 * distance * Math.tan(degToRad(live.fovDeg * 0.5))) / Math.max(1, canvas.clientHeight);
+        const moveX = dxPx * worldPerPixel;
+        const moveY = -dyPx * worldPerPixel;
+        media.anchorWorld = {
+            x: anchor.x + right.x * moveX + up.x * moveY,
+            y: anchor.y + right.y * moveX + up.y * moveY,
+            z: anchor.z + right.z * moveX + up.z * moveY
+        };
+    }
+
+    private closeCinematicMediaEditor(status?: string) {
+        if (!this.cinematicMediaEditor.active) return;
+        if (this.cinematicMediaEditor.cleanup) {
+            this.cinematicMediaEditor.cleanup();
+            this.cinematicMediaEditor.cleanup = null;
+        }
+        this.cinematicMediaEditor.active = false;
+        this.cinematicMediaEditor.selected = false;
+        this.cinematicMediaEditor.pointerDown = false;
+        this.cinematicMediaEditor.dragMode = null;
+        if (this.cinematicMediaEditor.overlayEl) {
+            this.cinematicMediaEditor.overlayEl.remove();
+            this.cinematicMediaEditor.overlayEl = null;
+        }
+        this.cinematicMiniMode = this.cinematicMediaEditor.restoreMiniMode;
+        this.syncCinematicChrome();
+        if (this.cinematicMediaEditor.reopenKeyframeEditor) this.cinematicKeyframeModal.classList.remove('hidden');
+        this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+        this.renderCinematicKeyframeList();
+        if (status) this.setCinematicStatus(status);
+    }
+
+    private openCinematicMediaEditor(keyframeId: string) {
+        if (!this.cinematicWorkspaceOpen()) return;
+        if (!this.options.getCaptureCanvas || !this.options.pickWorldPointAtScreen) {
+            this.setCinematicStatus('Main view editing is unavailable');
+            this.logDebug('cw.media.edit', 'unavailable resources');
+            return;
+        }
+        const shot = this.cinematicPlan?.shots.find((item) => item.keyframes.some((kf) => kf.keyframeId === keyframeId));
+        const keyframe = shot?.keyframes.find((item) => item.keyframeId === keyframeId) || null;
+        if (!keyframe) {
+            this.setCinematicStatus('Select a keyframe first');
+            this.logDebug('cw.media.edit', `reject missing keyframe=${keyframeId}`);
+            return;
+        }
+        this.stopCinematicPreview();
+        this.cancelCinematicMediaPick();
+        this.cancelCinematicMediaResize();
+        this.closeCinematicMediaEditor();
+        this.cinematicMediaEditor.active = true;
+        this.cinematicMediaEditor.keyframeId = keyframeId;
+        this.cinematicMediaEditor.mode = 'move';
+        const initialMedia = this.ensureKeyframeMediaOverride(keyframe);
+        this.cinematicMediaEditor.selected = Boolean(initialMedia.anchorWorld);
+        this.cinematicMediaEditor.restoreMiniMode = this.cinematicMiniMode;
+        this.cinematicMediaEditor.reopenKeyframeEditor = !this.cinematicKeyframeModal.classList.contains('hidden');
+        this.cinematicMiniMode = true;
+        this.syncCinematicChrome();
+        const canvas = this.options.getCaptureCanvas?.();
+        if (!canvas) {
+            this.closeCinematicMediaEditor('Main view editing is unavailable');
+            return;
+        }
+        this.logDebug('cw.media.edit', `start keyframe=${keyframeId} selected=${this.cinematicMediaEditor.selected} anchor=${initialMedia.anchorWorld ? `${initialMedia.anchorWorld.x.toFixed(3)},${initialMedia.anchorWorld.y.toFixed(3)},${initialMedia.anchorWorld.z.toFixed(3)}` : 'none'} mode=${this.cinematicMediaEditor.mode}`);
+        this.cinematicMediaEditor.overlayEl = null;
+        const prevCursor = canvas.style.cursor;
+        canvas.style.cursor = 'grab';
+
+        const onWheel = (event: WheelEvent) => {
+            if (!this.cinematicMediaEditor.active) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const media = this.cinematicMediaEditorCurrentMedia();
+            if (!media) return;
+            const step = event.deltaY < 0 ? 0.08 : -0.08;
+            media.scale = clamp(media.scale + step, 0.1, 120);
+            this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+            this.renderCinematicKeyframeList();
+            this.setCinematicStatus(`Scale ${media.scale.toFixed(2)} (camera locked, wheel)`);
+            this.logDebug('cw.media.edit', `wheel scale=${media.scale.toFixed(3)}`);
+        };
+
+        const onPointerDown = (event: PointerEvent) => {
+            if (!this.cinematicMediaEditor.active) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const media = this.cinematicMediaEditorCurrentMedia();
+            if (!media) return;
+            this.logDebug('cw.media.edit', `pointerdown mode=${this.cinematicMediaEditor.mode} client=(${event.clientX.toFixed(1)},${event.clientY.toFixed(1)})`);
+            this.cinematicMediaEditor.pointerDown = true;
+            this.cinematicMediaEditor.pointerId = event.pointerId;
+            this.cinematicMediaEditor.dragMode = event.button === 2
+                ? 'rotate'
+                : (event.shiftKey ? 'scale' : this.cinematicMediaEditor.mode);
+            this.cinematicMediaEditor.startClientX = event.clientX;
+            this.cinematicMediaEditor.startClientY = event.clientY;
+            this.cinematicMediaEditor.startYaw = media.yaw;
+            this.cinematicMediaEditor.startPitch = media.pitch;
+            this.cinematicMediaEditor.startRoll = media.roll;
+            this.cinematicMediaEditor.startScale = media.scale;
+            const anchor = media.anchorWorld || { x: keyframe.x, y: keyframe.y, z: keyframe.z };
+            this.cinematicMediaEditor.startAnchor = { ...anchor };
+            if (!media.anchorWorld) {
+                const ratio = this.cinematicMediaEditorPointerToScreenRatio(event.clientX, event.clientY);
+                if (!ratio) return;
+                void this.options.pickWorldPointAtScreen?.(ratio.x, ratio.y).then((point) => {
+                    if (!point) {
+                        this.logDebug('cw.media.edit', 'pointerdown pick miss');
+                        return;
+                    }
+                    media.anchorWorld = point;
+                    this.cinematicMediaEditor.startAnchor = { ...point };
+                    this.cinematicMediaEditor.selected = true;
+                    media.enabled = true;
+                    this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                    this.logDebug('cw.media.edit', `anchor auto-picked (${point.x.toFixed(3)},${point.y.toFixed(3)},${point.z.toFixed(3)})`);
+                    this.setCinematicStatus('3D object selected. Drag to move/rotate/scale with locked camera.');
+                });
+                return;
+            }
+            this.cinematicMediaEditor.selected = true;
+            this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+            if (!this.cinematicMediaEditor.selected) {
+                this.setCinematicStatus('Click near the 3D screen to select it.');
+                this.cinematicMediaEditor.pointerDown = false;
+                return;
+            }
+            this.setCinematicStatus(`3D object selected. Mode: ${this.cinematicMediaEditor.dragMode?.toUpperCase() || this.cinematicMediaEditor.mode.toUpperCase()} (camera locked)`);
+            this.logDebug('cw.media.edit', `selected dragMode=${this.cinematicMediaEditor.dragMode} button=${event.button}`);
+        };
+
+        let transformLogAt = 0;
+        const onPointerMove = (event: PointerEvent) => {
+            if (!this.cinematicMediaEditor.active || !this.cinematicMediaEditor.pointerDown || !this.cinematicMediaEditor.selected) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const media = this.cinematicMediaEditorCurrentMedia();
+            if (!media) return;
+            const dx = event.clientX - this.cinematicMediaEditor.startClientX;
+            const dy = event.clientY - this.cinematicMediaEditor.startClientY;
+            const mode = this.cinematicMediaEditor.dragMode || this.cinematicMediaEditor.mode;
+            if (mode === 'move') {
+                this.cinematicMediaEditorMoveWithDelta(dx, dy);
+            }
+            if (mode === 'rotate') {
+                media.yaw = this.cinematicMediaEditor.startYaw + dx * 0.25;
+                media.pitch = clamp(this.cinematicMediaEditor.startPitch - dy * 0.18, -89, 89);
+            }
+            if (mode === 'scale') {
+                media.scale = clamp(this.cinematicMediaEditor.startScale + dx / 220, 0.1, 120);
+            }
+            this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+            this.renderCinematicKeyframeList();
+            const now = performance.now();
+            if (now - transformLogAt > 140) {
+                transformLogAt = now;
+                this.logDebug('cw.media.edit', `drag mode=${mode} dx=${dx.toFixed(1)} dy=${dy.toFixed(1)} anchor=${media.anchorWorld ? `${media.anchorWorld.x.toFixed(3)},${media.anchorWorld.y.toFixed(3)},${media.anchorWorld.z.toFixed(3)}` : 'none'} yaw=${media.yaw.toFixed(2)} pitch=${media.pitch.toFixed(2)} scale=${media.scale.toFixed(3)}`);
+            }
+        };
+
+        const onPointerUp = (event: PointerEvent) => {
+            if (!this.cinematicMediaEditor.active) return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.cinematicMediaEditor.pointerDown = false;
+            this.cinematicMediaEditor.dragMode = null;
+            this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+            this.renderCinematicKeyframeList();
+            const media = this.cinematicMediaEditorCurrentMedia();
+            this.logDebug('cw.media.edit', `pointerup mode=${this.cinematicMediaEditor.mode} final anchor=${media?.anchorWorld ? `${media.anchorWorld.x.toFixed(3)},${media.anchorWorld.y.toFixed(3)},${media.anchorWorld.z.toFixed(3)}` : 'none'} yaw=${media?.yaw.toFixed(2)} pitch=${media?.pitch.toFixed(2)} scale=${media?.scale.toFixed(3)}`);
+        };
+
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                this.closeCinematicMediaEditor('3D object edit exited');
+                return;
+            }
+            if (event.key === '1') this.cinematicMediaEditor.mode = 'move';
+            if (event.key === '2') this.cinematicMediaEditor.mode = 'rotate';
+            if (event.key === '3') this.cinematicMediaEditor.mode = 'scale';
+            if (event.key === '1' || event.key === '2' || event.key === '3') {
+                this.renderCinematicKeyframeList();
+                this.setCinematicStatus(`3D object mode: ${this.cinematicMediaEditor.mode.toUpperCase()} (camera locked)`);
+                this.logDebug('cw.media.edit', `hotkey mode=${this.cinematicMediaEditor.mode}`);
+            }
+        };
+
+        const onContextMenu = (event: MouseEvent) => {
+            if (!this.cinematicMediaEditor.active) return;
+            event.preventDefault();
+            event.stopPropagation();
+        };
+        canvas.addEventListener('pointerdown', onPointerDown, true);
+        canvas.addEventListener('pointermove', onPointerMove, true);
+        canvas.addEventListener('pointerup', onPointerUp, true);
+        canvas.addEventListener('wheel', onWheel, { passive: false, capture: true });
+        canvas.addEventListener('contextmenu', onContextMenu, true);
+        window.addEventListener('keydown', onKeyDown);
+        this.cinematicMediaEditor.cleanup = () => {
+            canvas.style.cursor = prevCursor;
+            canvas.removeEventListener('pointerdown', onPointerDown, true);
+            canvas.removeEventListener('pointermove', onPointerMove, true);
+            canvas.removeEventListener('pointerup', onPointerUp, true);
+            canvas.removeEventListener('wheel', onWheel, true);
+            canvas.removeEventListener('contextmenu', onContextMenu, true);
+            window.removeEventListener('keydown', onKeyDown);
+        };
+        this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+        this.renderCinematicKeyframeList();
+        this.setCinematicStatus('Object edit mode: camera locked. Select screen then drag to move/rotate/scale.');
+        this.logDebug('cw.media.edit', 'listeners attached on canvas');
+    }
+
+    private cinematicTimelinePosition(clientX: number) {
+        const inner = this.cinematicTimelineEl.querySelector('.otl-cinematic-ruler-inner') as HTMLDivElement | null;
+        if (!inner) return null;
+        const rect = inner.getBoundingClientRect();
+        const totalSec = Number(inner.getAttribute('data-total-sec') || 0);
+        if (!Number.isFinite(totalSec) || totalSec <= 0) return null;
+        const inset = 18;
+        const ratio = clamp((clientX - rect.left - inset) / Math.max(1, rect.width - inset * 2), 0, 1);
+        return { totalSec, ratio };
+    }
+
+    private cinematicTimelineScrollbarHit(target: HTMLElement | null, clientY: number) {
+        const trackWrap = target?.closest('.otl-cinematic-track-wrap') as HTMLDivElement | null;
+        if (!trackWrap) return false;
+        const hasHorizontalScrollbar = trackWrap.scrollWidth > trackWrap.clientWidth + 1;
+        if (!hasHorizontalScrollbar) return false;
+        const rect = trackWrap.getBoundingClientRect();
+        const nativeScrollbarHeight = Math.max(14, Math.ceil(rect.height - trackWrap.clientHeight));
+        return clientY >= rect.bottom - nativeScrollbarHeight;
+    }
+
+    private createCinematicMidKeyframe(from: TourPoi, to: TourPoi, shotId: string, suffix: string, t: number, mix = 0.5): CinematicKeyframe {
+        const lerp = (a: number, b: number, m: number) => a + (b - a) * m;
+        return {
+            keyframeId: `${shotId}_${suffix}`,
+            shotId,
+            t,
+            x: lerp(from.targetX, to.targetX, mix),
+            y: lerp(from.targetY, to.targetY, mix),
+            z: lerp(from.targetZ, to.targetZ, mix),
+            yaw: lerp(from.targetYaw, to.targetYaw, mix),
+            pitch: lerp(from.targetPitch, to.targetPitch, mix),
+            fov: clampFov(lerp(from.targetFov, to.targetFov, mix) - 8, DEFAULT_POI_FOV),
+            moveSpeedMps: Math.max(0.45, lerp(from.moveSpeedMps, to.moveSpeedMps, mix))
+        };
+    }
+
+    private generateCinematicPlan() {
+        this.syncCinematicStateFromInputs();
+        const selected = this.pois
+            .filter((poi) => this.cinematicSelectedPoiIds.includes(poi.poiId))
+            .sort((a, b) => a.sortOrder - b.sortOrder);
+        const source = selected.length >= 2 ? selected : this.pois.slice().sort((a, b) => a.sortOrder - b.sortOrder).slice(0, 4);
+        if (source.length < 2) throw new Error('Need at least 2 POIs for cinematic plan');
+        const shots: CinematicShot[] = [];
+        const total = Math.max(4, this.cinematicTargetDurationSec);
+        const shotDefs = [
+            { label: '建立推进', intent: 'establish', from: source[0], to: source[Math.min(1, source.length - 1)], duration: total * 0.22, pitchLift: 4, fovDrop: 6 },
+            { label: '抬升揭示', intent: 'reveal', from: source[Math.min(1, source.length - 1)], to: source[Math.min(1, source.length - 1)], duration: total * 0.18, pitchLift: 18, fovDrop: 16 },
+            { label: '继续深入', intent: 'approach', from: source[Math.min(1, source.length - 1)], to: source[Math.min(2, source.length - 1)], duration: total * 0.22, pitchLift: 0, fovDrop: 12 },
+            { label: '侧移蓄势', intent: 'sidestep', from: source[Math.min(2, source.length - 1)], to: source[Math.min(3, source.length - 1)] || source[source.length - 1], duration: total * 0.18, pitchLift: -4, fovDrop: 10 },
+            { label: '回望收束', intent: 'turnback', from: source[source.length - 2] || source[0], to: source[source.length - 1], duration: total * 0.20, pitchLift: 6, fovDrop: 2 }
+        ];
+        shotDefs.forEach((def, idx) => {
+            const shotId = `shot_${idx + 1}`;
+            const from = def.from;
+            const to = def.to;
+            const start: CinematicKeyframe = {
+                keyframeId: `${shotId}_a`, shotId, t: 0,
+                x: from.targetX, y: from.targetY, z: from.targetZ,
+                yaw: from.targetYaw, pitch: from.targetPitch, fov: clampFov(from.targetFov), moveSpeedMps: Math.max(0.45, from.moveSpeedMps || 0.6)
+            };
+            const mid = this.createCinematicMidKeyframe(from, to, shotId, 'b', 0.56, 0.52);
+            mid.pitch = clamp(mid.pitch + def.pitchLift, -50, 45);
+            mid.fov = clampFov(mid.fov - def.fovDrop, DEFAULT_POI_FOV);
+            const end: CinematicKeyframe = {
+                keyframeId: `${shotId}_c`, shotId, t: 1,
+                x: to.targetX, y: to.targetY, z: to.targetZ,
+                yaw: to.targetYaw + (idx === shotDefs.length - 1 ? 0 : (idx % 2 === 0 ? -10 : 12)),
+                pitch: clamp(to.targetPitch + def.pitchLift * 0.4, -50, 45),
+                fov: clampFov(to.targetFov - def.fovDrop, DEFAULT_POI_FOV),
+                moveSpeedMps: Math.max(0.45, to.moveSpeedMps || 0.6)
+            };
+            shots.push({
+                shotId,
+                label: def.label,
+                intent: def.intent,
+                durationSec: Number(def.duration.toFixed(2)),
+                speechText: `${def.label}，让视线沿着山径与银河自然过渡。`,
+                speechMode: 'INTERRUPTIBLE',
+                speechMatchEnabled: false,
+                speechAudioUrl: null,
+                keyframes: [start, mid, end]
+            });
+        });
+        this.cinematicPlan = {
+            version: 'cine_v1',
+            modelFilename: String(this.modelFilename || ''),
+            selectedPoiIds: source.map((poi) => poi.poiId),
+            sceneDescription: this.cinematicSceneDescription,
+            storyBackground: this.cinematicStoryBackground,
+            styleText: this.cinematicStyleText,
+            targetDurationSec: total,
+            bgm: this.cinematicBgmSelection ? { ...this.cinematicBgmSelection } : null,
+            bounds: this.cinematicPlanBounds(),
+            shots
+        };
+        this.applyPromptedMediaFallbackToPlan(this.cinematicPlan, this.cinematicPlannerPrompt || this.cinematicSimplePrompt);
+        this.applyStoredSpeechTimingToPlan(this.cinematicPlan);
+        this.cinematicCurrentTimeSec = 0;
+        this.selectedCinematicShotId = shots[0]?.shotId || null;
+        this.selectedCinematicKeyframeId = shots[0]?.keyframes[0]?.keyframeId || null;
+        this.refreshCinematicUi();
+        this.setCinematicStatus(`Plan generated with ${shots.length} shots`);
+    }
+
+    private applyPromptedMediaFallbackToPlan(plan: CinematicPlan, promptText: string) {
+        if (!plan?.shots?.length || !plannerPromptRequestsMediaObject(promptText)) return;
+        const hasExisting = plan.shots.some((shot) => shot.keyframes.some((kf) => kf.mediaObject?.enabled));
+        if (hasExisting) return;
+        const selected = this.pois
+            .filter((poi) => plan.selectedPoiIds.includes(poi.poiId))
+            .sort((a, b) => a.sortOrder - b.sortOrder);
+        const anchorPoi = selected[Math.min(1, Math.max(0, selected.length - 1))] || selected[0] || null;
+        if (!anchorPoi) return;
+        const anchor = { x: anchorPoi.targetX, y: anchorPoi.targetY + 0.35, z: anchorPoi.targetZ };
+        const firstShot = plan.shots[0];
+        if (!firstShot?.keyframes?.length) return;
+        firstShot.keyframes[0].mediaObject = normalizeCwMediaObjectConfig({
+            enabled: true,
+            src: '',
+            fileName: '',
+            anchorWorld: anchor,
+            scale: 2.2,
+            yaw: anchorPoi.targetYaw,
+            pitch: 0,
+            roll: 0,
+            depthOffset: 0.06,
+            placeholder: true,
+            placeholderLabel: 'Generated 3D Media Placeholder'
+        });
+        if (plannerPromptRequestsOrbitLikeCamera(promptText) && firstShot.keyframes.length >= 3) {
+            const orbitSamples = [
+                { x: anchor.x - 1.8, y: anchor.y + 0.2, z: anchor.z - 2.6, yaw: -18, pitch: -8, fov: 92 },
+                { x: anchor.x, y: anchor.y + 0.35, z: anchor.z - 2.1, yaw: 0, pitch: -6, fov: 86 },
+                { x: anchor.x + 1.7, y: anchor.y + 0.15, z: anchor.z - 2.45, yaw: 18, pitch: -8, fov: 92 }
+            ];
+            firstShot.keyframes.forEach((kf, index) => {
+                const sample = orbitSamples[Math.min(index, orbitSamples.length - 1)];
+                kf.x = clamp(sample.x, plan.bounds.top.xMin, plan.bounds.top.xMax);
+                kf.y = clamp(sample.y, plan.bounds.front.yMin, plan.bounds.front.yMax);
+                kf.z = clamp(sample.z, plan.bounds.top.zMin, plan.bounds.top.zMax);
+                kf.yaw = sample.yaw;
+                kf.pitch = sample.pitch;
+                kf.fov = sample.fov;
+                kf.cameraBehavior = { type: 'orbit', target: 'mediaObject', radius: 2.4, angleDeg: sample.yaw, heightOffset: sample.y - anchor.y };
+            });
+        }
+        this.logDebug('cine.timeline.media', 'frontend fallback injected media placeholder into plan');
+    }
+
+    private cinematicPoseFromKeyframe(kf: CinematicKeyframe): CameraPose {
+        const yaw = degToRad(kf.yaw);
+        const pitch = degToRad(kf.pitch);
+        return {
+            eye: { x: kf.x, y: kf.y + this.eyeHeightM, z: kf.z },
+            forward: { x: Math.sin(yaw) * Math.cos(pitch), y: Math.sin(pitch), z: Math.cos(yaw) * Math.cos(pitch) }
+        };
+    }
+
+    private stopCinematicPreview(statusText?: string) {
+        if (this.cinematicPreview.rafId) window.cancelAnimationFrame(this.cinematicPreview.rafId);
+        this.cinematicPreview = { playing: false, paused: false, rafId: 0, shotIndex: 0, keyframeIndex: 0, segmentStartMs: 0, segmentDurationMs: 0 };
+        this.cinematicRecordingSubtitleText = '';
+        this.stopCinematicSpeechPreview();
+        this.cinematicBgmStopPreview();
+        this.resetCinematicShotSpeechState();
+        this.syncCinematicChrome();
+        if (statusText) this.setCinematicStatus(statusText);
+    }
+
+    private async startCinematicPreview() {
+        if (!this.cinematicPlan?.shots?.length) {
+            this.setCinematicStatus('No cinematic plan to preview');
+            return;
+        }
+        const metrics = this.cinematicTimelineData();
+        if (!metrics) return;
+        for (const shot of this.cinematicPlan.shots) {
+            if (!String(shot.speechText || '').trim()) continue;
+            try {
+                await this.ensureShotSpeechAudio(shot);
+            } catch (error) {
+                this.logDebug('cine.speech.prefetch', String(error));
+            }
+        }
+        if (this.cinematicCurrentTimeSec >= metrics.totalDurationSec - 0.001) {
+            this.cinematicCurrentTimeSec = 0;
+            this.drawViews();
+        }
+        this.stopPlayback();
+        this.stopCinematicPreview();
+        this.cinematicPreview.playing = true;
+        this.cinematicBgmStartTimelinePlayback();
+        this.syncCinematicChrome();
+        const playbackStart = performance.now() - (this.cinematicCurrentTimeSec * 1000);
+        const tick = (now: number) => {
+            this.cinematicPreview.rafId = 0;
+            if (!this.cinematicPreview.playing) return;
+            const elapsedSec = (now - playbackStart) / 1000;
+            if (elapsedSec >= metrics.totalDurationSec) {
+                this.scrubCinematicTimeline(metrics.totalDurationSec, true);
+                this.stopCinematicPreview('Preview finished');
+                if (this.activeCinematicRecording && this.cinematicRecordingSettings.stopWithPlayback) {
+                    void this.stopCinematicRecording(true, 'preview-finished');
+                }
+                return;
+            }
+            this.scrubCinematicTimeline(elapsedSec, false);
+            this.cinematicPreview.rafId = window.requestAnimationFrame(tick);
+        };
+        this.cinematicPreview.rafId = window.requestAnimationFrame(tick);
+        this.setCinematicStatus('Preview playing');
+    }
+
+    private setCinematicRecordingStatus(text: string) {
+        this.cinematicRecordingModalStatusEl.textContent = text;
+    }
+
+    private closeCinematicRecordingConfigPopovers() {
+        this.cinematicRecordingModalEl.querySelectorAll('[data-record-popover]').forEach((el) => el.classList.remove('open'));
+    }
+
+    private syncCinematicRecordingForm() {
+        this.cinematicRecordingFrameRateSelect.value = String(this.cinematicRecordingSettings.frameRate);
+        this.cinematicRecordingQualitySelect.value = this.cinematicRecordingSettings.videoBitsPerSecond >= 40_000_000
+            ? 'ultra'
+            : this.cinematicRecordingSettings.videoBitsPerSecond >= 28_000_000
+                ? 'high'
+                : 'standard';
+        this.cinematicRecordingCompressionSelect.value = this.cinematicRecordingSettings.mp4CompressionPreset;
+        this.cinematicRecordingIncludeTtsInput.checked = this.cinematicRecordingSettings.includeTts;
+        this.cinematicRecordingAutoPlayInput.checked = this.cinematicRecordingSettings.autoPlay;
+        this.cinematicRecordingStopWithPlaybackInput.checked = this.cinematicRecordingSettings.stopWithPlayback;
+        this.cinematicRecordingHidePanelInput.checked = this.cinematicRecordingSettings.hidePanelDuringRecording;
+        this.cinematicRecordingDisableInterruptsInput.checked = this.cinematicRecordingSettings.disableInterrupts;
+        this.cinematicRecordingMasterVolumeInput.value = String(Math.round(this.cinematicRecordingSettings.masterVolume * 100));
+        this.cinematicRecordingTtsVolumeInput.value = String(Math.round(this.cinematicRecordingSettings.ttsVolume * 100));
+        this.cinematicRecordingBgmVolumeInput.value = String(Math.round(this.cinematicRecordingSettings.bgmVolume * 100));
+        this.cinematicRecordingSubtitlesEnabledInput.checked = this.cinematicRecordingSettings.subtitlesEnabled;
+        this.cinematicRecordingSubtitleFontSelect.value = this.cinematicRecordingSettings.subtitleFont;
+        this.cinematicRecordingSubtitleSizeInput.value = String(this.cinematicRecordingSettings.subtitleFontSize);
+        this.cinematicRecordingSubtitleColorInput.value = this.cinematicRecordingSettings.subtitleColor;
+        this.cinematicRecordingMasterVolumeOut.textContent = `${this.cinematicRecordingMasterVolumeInput.value}%`;
+        this.cinematicRecordingTtsVolumeOut.textContent = `${this.cinematicRecordingTtsVolumeInput.value}%`;
+        this.cinematicRecordingBgmVolumeOut.textContent = `${this.cinematicRecordingBgmVolumeInput.value}%`;
+        this.cinematicRecordingSubtitleSizeOut.textContent = `${this.cinematicRecordingSubtitleSizeInput.value}px`;
+    }
+
+    private collectCinematicRecordingSettings(): CinematicRecordingSettings {
+        const quality = this.cinematicRecordingQualitySelect.value;
+        const videoBitsPerSecond = quality === 'ultra' ? 40_000_000 : quality === 'high' ? 28_000_000 : 18_000_000;
+        return {
+            frameRate: Math.max(24, Number(this.cinematicRecordingFrameRateSelect.value || '24')),
+            videoBitsPerSecond,
+            audioBitsPerSecond: 256_000,
+            mp4CompressionPreset: (this.cinematicRecordingCompressionSelect.value || 'balanced') as Mp4CompressionPreset,
+            includeTts: this.cinematicRecordingIncludeTtsInput.checked,
+            autoPlay: this.cinematicRecordingAutoPlayInput.checked,
+            stopWithPlayback: this.cinematicRecordingStopWithPlaybackInput.checked,
+            hidePanelDuringRecording: this.cinematicRecordingHidePanelInput.checked,
+            disableInterrupts: this.cinematicRecordingDisableInterruptsInput.checked,
+            masterVolume: Math.max(0, Math.min(1, Number(this.cinematicRecordingMasterVolumeInput.value || '100') / 100)),
+            ttsVolume: Math.max(0, Math.min(1, Number(this.cinematicRecordingTtsVolumeInput.value || '100') / 100)),
+            bgmVolume: Math.max(0, Math.min(1, Number(this.cinematicRecordingBgmVolumeInput.value || '50') / 100)),
+            subtitlesEnabled: this.cinematicRecordingSubtitlesEnabledInput.checked,
+            subtitleFont: this.cinematicRecordingSubtitleFontSelect.value || 'PingFang SC',
+            subtitleFontSize: Math.max(24, Math.min(64, Number(this.cinematicRecordingSubtitleSizeInput.value || '26'))),
+            subtitleColor: this.cinematicRecordingSubtitleColorInput.value || '#d7a733'
+        };
+    }
+
+    private openCinematicRecordingModal() {
+        this.syncCinematicRecordingForm();
+        this.renderCinematicRecordingResults();
+        this.closeCinematicRecordingConfigPopovers();
+        this.setCinematicRecordingStatus('Ready to record.');
+        this.cinematicRecordingModalEl.classList.remove('hidden');
+    }
+
+    private closeCinematicRecordingModal() {
+        this.closeCinematicRecordingConfigPopovers();
+        this.cinematicRecordingModalEl.classList.add('hidden');
+    }
+
+    private refreshCinematicRecordingButtons() {
+        const recording = Boolean(this.activeCinematicRecording);
+        const paused = Boolean(this.activeCinematicRecording?.paused);
+        this.cinematicRecordBtn.classList.toggle('hidden', recording);
+        this.cinematicRecordPauseBtn.classList.toggle('hidden', !recording);
+        this.cinematicRecordStopBtn.classList.toggle('hidden', !recording);
+        this.cinematicRecordPauseBtn.textContent = paused ? 'Resume' : 'Pause';
+        this.cinematicRecordTimerEl.textContent = recording ? (paused ? 'PAUSED' : 'REC 00:00') : '';
+    }
+
+    private updateCinematicRecordTimer() {
+        if (!this.activeCinematicRecording) {
+            this.cinematicRecordTimerEl.textContent = '';
+            return;
+        }
+        if (this.activeCinematicRecording.paused) {
+            this.cinematicRecordTimerEl.textContent = 'PAUSED';
+            return;
+        }
+        const elapsedMs = Math.max(0, performance.now() - this.activeCinematicRecording.startedAt);
+        const totalSec = Math.floor(elapsedMs / 1000);
+        const minutes = Math.floor(totalSec / 60).toString().padStart(2, '0');
+        const seconds = (totalSec % 60).toString().padStart(2, '0');
+        this.cinematicRecordTimerEl.textContent = `REC ${minutes}:${seconds}`;
+    }
+
+    private startCinematicRecordTimer() {
+        this.stopCinematicRecordTimer();
+        this.updateCinematicRecordTimer();
+        this.cinematicRecordTimerId = window.setInterval(() => this.updateCinematicRecordTimer(), 250);
+    }
+
+    private stopCinematicRecordTimer() {
+        if (this.cinematicRecordTimerId) {
+            window.clearInterval(this.cinematicRecordTimerId);
+            this.cinematicRecordTimerId = 0;
+        }
+        this.updateCinematicRecordTimer();
+    }
+
+    private setCinematicRecordingUiLock(locked: boolean) {
+        this.cinematicRecordingDisableUi = locked;
+        this.cinematicWorkspacePanel.classList.toggle('recording-lock', locked);
+    }
+
+    private startCinematicRecordingCompositor(sourceCanvas: HTMLCanvasElement) {
+        this.stopCinematicRecordingCompositor();
+        const canvas = document.createElement('canvas');
+        canvas.width = sourceCanvas.width || sourceCanvas.clientWidth || 1920;
+        canvas.height = sourceCanvas.height || sourceCanvas.clientHeight || 1080;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Failed to create recording compositor context.');
+        this.cinematicRecordingCompositorCanvas = canvas;
+        this.cinematicRecordingCompositorCtx = ctx;
+
+        const draw = () => {
+            if (!this.cinematicRecordingCompositorCanvas || !this.cinematicRecordingCompositorCtx) return;
+            this.options.requestCaptureRender?.();
+            const target = this.cinematicRecordingCompositorCanvas;
+            const targetCtx = this.cinematicRecordingCompositorCtx;
+            targetCtx.clearRect(0, 0, target.width, target.height);
+            targetCtx.drawImage(sourceCanvas, 0, 0, target.width, target.height);
+            if (this.cinematicRecordingSettings.subtitlesEnabled && this.cinematicRecordingSubtitleText.trim()) {
+                const lines = this.wrapCinematicSubtitleText(this.cinematicRecordingSubtitleText.trim(), target.width * 0.76);
+                const fontSize = this.cinematicRecordingSettings.subtitleFontSize;
+                const lineHeight = Math.round(fontSize * 1.34);
+                const padX = Math.round(fontSize * 0.68);
+                const padY = Math.round(fontSize * 0.34);
+                targetCtx.font = `600 ${fontSize}px "${this.cinematicRecordingSettings.subtitleFont}", "Source Han Sans SC", "PingFang SC", "Hiragino Sans GB", sans-serif`;
+                targetCtx.textAlign = 'center';
+                targetCtx.textBaseline = 'middle';
+                const textWidth = Math.max(...lines.map((line) => targetCtx.measureText(line).width), 0);
+                const boxWidth = Math.min(target.width * 0.86, textWidth + padX * 2);
+                const boxHeight = lineHeight * lines.length + padY * 2;
+                const x = (target.width - boxWidth) / 2;
+                const y = target.height - boxHeight - Math.round(target.height * 0.055);
+                this.drawCinematicRoundedRect(targetCtx, x, y, boxWidth, boxHeight, Math.round(fontSize * 0.38));
+                targetCtx.fillStyle = 'rgba(0, 0, 0, 0.52)';
+                targetCtx.fill();
+                targetCtx.fillStyle = this.cinematicRecordingSettings.subtitleColor;
+                lines.forEach((line, index) => {
+                    targetCtx.fillText(line, target.width / 2, y + padY + lineHeight * index + lineHeight / 2);
+                });
+            }
+            this.cinematicRecordingCompositorRaf = window.requestAnimationFrame(draw);
+        };
+        draw();
+    }
+
+    private stopCinematicRecordingCompositor() {
+        if (this.cinematicRecordingCompositorRaf) {
+            window.cancelAnimationFrame(this.cinematicRecordingCompositorRaf);
+            this.cinematicRecordingCompositorRaf = 0;
+        }
+        this.cinematicRecordingCompositorCanvas = null;
+        this.cinematicRecordingCompositorCtx = null;
+        this.cinematicRecordingSubtitleText = '';
+    }
+
+    private wrapCinematicSubtitleText(text: string, maxWidth: number) {
+        const ctx = this.cinematicRecordingCompositorCtx;
+        if (!ctx) return [text];
+        const words = text.split(/\s+/).filter(Boolean);
+        if (words.length < 2) {
+            const chars = Array.from(text);
+            const lines: string[] = [];
+            let current = '';
+            chars.forEach((char) => {
+                const next = `${current}${char}`;
+                if (ctx.measureText(next).width <= maxWidth || !current) current = next;
+                else {
+                    lines.push(current);
+                    current = char;
+                }
+            });
+            if (current) lines.push(current);
+            return lines;
+        }
+        const lines: string[] = [];
+        let current = '';
+        words.forEach((word) => {
+            const next = current ? `${current} ${word}` : word;
+            if (ctx.measureText(next).width <= maxWidth || !current) current = next;
+            else {
+                lines.push(current);
+                current = word;
+            }
+        });
+        if (current) lines.push(current);
+        return lines;
+    }
+
+    private drawCinematicRoundedRect(ctx: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+        const r = Math.min(radius, width / 2, height / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + width, y, x + width, y + height, r);
+        ctx.arcTo(x + width, y + height, x, y + height, r);
+        ctx.arcTo(x, y + height, x, y, r);
+        ctx.arcTo(x, y, x + width, y, r);
+        ctx.closePath();
+    }
+
+    private toggleCinematicRecordingPause() {
+        const runtime = this.activeCinematicRecording;
+        if (!runtime) return;
+        if (runtime.paused) {
+            runtime.recorder.resume();
+            runtime.paused = false;
+            if (!this.cinematicPreview.playing && this.cinematicRecordingSettings.autoPlay) void this.startCinematicPreview();
+            this.setCinematicStatus('Recording resumed.');
+        } else {
+            runtime.recorder.pause();
+            runtime.paused = true;
+            if (this.cinematicPreview.playing) this.stopCinematicPreview('Preview paused');
+            this.setCinematicStatus('Recording paused.');
+        }
+        this.refreshCinematicRecordingButtons();
+        this.updateCinematicRecordTimer();
+    }
+
+    private formatCinematicRecordingEta(seconds: number | null | undefined) {
+        if (!Number.isFinite(seconds ?? NaN) || (seconds ?? 0) < 0) return '--:--';
+        const total = Math.max(0, Math.round(seconds || 0));
+        const mins = Math.floor(total / 60).toString().padStart(2, '0');
+        const secs = Math.floor(total % 60).toString().padStart(2, '0');
+        return `${mins}:${secs}`;
+    }
+
+    private formatCinematicRecordingHeartbeat(timestamp: number | null | undefined) {
+        if (!timestamp) return 'waiting';
+        const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+        return `${seconds}s ago`;
+    }
+
+    private buildCinematicProcessingNote(entry: CinematicStoredRecordingEntry) {
+        const percent = Math.max(0, Math.min(100, Number(entry.transcodePercent) || 0));
+        const eta = this.formatCinematicRecordingEta(entry.transcodeEtaSec);
+        const heartbeat = this.formatCinematicRecordingHeartbeat(entry.transcodeHeartbeatAt);
+        return `MP4 ${percent.toFixed(0)}% · ETA ${eta} · heartbeat ${heartbeat}`;
+    }
+
+    private async createCinematicTranscodeJob(blob: Blob, settings: CinematicRecordingSettings, width: number, height: number, durationSec: number) {
+        const transcodeMeta = {
+            frameRate: settings.frameRate,
+            width,
+            height,
+            durationSec,
+            compressionPreset: settings.mp4CompressionPreset,
+            videoBitsPerSecond: settings.videoBitsPerSecond,
+            audioBitsPerSecond: settings.audioBitsPerSecond
+        };
+        const response = await fetch(`${this.recordingApiBase()}/transcode/jobs`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'X-OT-TP-Meta': btoa(unescape(encodeURIComponent(JSON.stringify(transcodeMeta))))
+            },
+            body: blob
+        });
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        return payload?.job as {
+            jobId: string;
+            progress?: { percent?: number; etaSec?: number | null; heartbeatAt?: string; phase?: string };
+        };
+    }
+
+    private async fetchCinematicTranscodeJob(jobId: string) {
+        const response = await fetch(`${this.recordingApiBase()}/transcode/jobs/${encodeURIComponent(jobId)}`);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        return payload?.job as {
+            status: 'pending' | 'running' | 'done' | 'error';
+            progress?: { percent?: number; etaSec?: number | null; heartbeatAt?: string; phase?: string };
+            error?: { message?: string } | null;
+        };
+    }
+
+    private async fetchCinematicTranscodeJobResult(jobId: string) {
+        const response = await fetch(`${this.recordingApiBase()}/transcode/jobs/${encodeURIComponent(jobId)}/result`);
+        if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+        return response.blob();
+    }
+
+    private async transcodeCinematicRecordingEntry(entry: CinematicStoredRecordingEntry, settings: CinematicRecordingSettings, width: number, height: number) {
+        this.setCinematicRecordingStatus('Uploading WebM to local backend for MP4 transcoding...');
+        const createdJob = await this.createCinematicTranscodeJob(entry.blob, settings, width, height, entry.durationSec);
+        await this.updateCinematicRecordingResult({
+            ...entry,
+            transcodeJobId: createdJob.jobId,
+            transcodePercent: Number(createdJob.progress?.percent) || 0,
+            transcodeEtaSec: createdJob.progress?.etaSec ?? null,
+            transcodeHeartbeatAt: createdJob.progress?.heartbeatAt ? Date.parse(createdJob.progress.heartbeatAt) : Date.now(),
+            transcodePhase: createdJob.progress?.phase || 'queued',
+            note: this.buildCinematicProcessingNote({
+                ...entry,
+                transcodePercent: Number(createdJob.progress?.percent) || 0,
+                transcodeEtaSec: createdJob.progress?.etaSec ?? null,
+                transcodeHeartbeatAt: createdJob.progress?.heartbeatAt ? Date.parse(createdJob.progress.heartbeatAt) : Date.now()
+            })
+        });
+
+        while (true) {
+            await new Promise((resolve) => window.setTimeout(resolve, 1000));
+            const job = await this.fetchCinematicTranscodeJob(createdJob.jobId);
+            const heartbeatAt = job.progress?.heartbeatAt ? Date.parse(job.progress.heartbeatAt) : Date.now();
+            const progressEntry: CinematicStoredRecordingEntry = {
+                ...entry,
+                transcodeJobId: createdJob.jobId,
+                transcodePercent: Number(job.progress?.percent) || 0,
+                transcodeEtaSec: job.progress?.etaSec ?? null,
+                transcodeHeartbeatAt: heartbeatAt,
+                transcodePhase: job.progress?.phase || job.status,
+                note: this.buildCinematicProcessingNote({
+                    ...entry,
+                    transcodePercent: Number(job.progress?.percent) || 0,
+                    transcodeEtaSec: job.progress?.etaSec ?? null,
+                    transcodeHeartbeatAt: heartbeatAt
+                })
+            };
+            await this.updateCinematicRecordingResult(progressEntry);
+            this.setCinematicRecordingStatus(`MP4 transcoding ${Math.round(progressEntry.transcodePercent || 0)}% (ETA ${this.formatCinematicRecordingEta(progressEntry.transcodeEtaSec)})...`);
+            if (job.status === 'done') {
+                const mp4Blob = await this.fetchCinematicTranscodeJobResult(createdJob.jobId);
+                return { mp4Blob, jobId: createdJob.jobId };
+            }
+            if (job.status === 'error') {
+                throw new Error(job.error?.message || 'MP4 transcode job failed');
+            }
+        }
+    }
+
+    private openCinematicRecordingDb() {
+        if (this.cinematicRecordingDbPromise) return this.cinematicRecordingDbPromise;
+        this.cinematicRecordingDbPromise = new Promise((resolve, reject) => {
+            const request = indexedDB.open('ot-tour-player-recordings', 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains('recordings')) {
+                    db.createObjectStore('recordings', { keyPath: 'id' });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('Failed to open recordings database'));
+        });
+        return this.cinematicRecordingDbPromise;
+    }
+
+    private async loadCinematicRecordingResults() {
+        try {
+            const db = await this.openCinematicRecordingDb();
+            const results = await new Promise<CinematicStoredRecordingEntry[]>((resolve, reject) => {
+                const tx = db.transaction('recordings', 'readonly');
+                const store = tx.objectStore('recordings');
+                const request = store.getAll();
+                request.onsuccess = () => resolve((request.result || []) as CinematicStoredRecordingEntry[]);
+                request.onerror = () => reject(request.error || new Error('Failed to read recordings'));
+            });
+            this.cinematicRecordingResults = results.map((item) => ({
+                ...item,
+                status: item.status || (item.extension === 'mp4' ? 'ready' : 'mp4_failed'),
+                transcodeJobId: item.transcodeJobId || undefined,
+                transcodePercent: Number(item.transcodePercent) || 0,
+                transcodeEtaSec: item.transcodeEtaSec ?? null,
+                transcodeHeartbeatAt: item.transcodeHeartbeatAt ?? null,
+                transcodePhase: item.transcodePhase || undefined,
+                note: item.note || undefined
+            })).sort((a, b) => b.createdAt - a.createdAt);
+            this.renderCinematicRecordingResults();
+            void this.recoverPendingCinematicRecordingEntries();
+        } catch (error) {
+            this.logDebug('record.load.error', String(error));
+        }
+    }
+
+    private shouldRetryCinematicRecordingTranscode(entry: CinematicStoredRecordingEntry) {
+        const extension = String(entry.extension || '').toLowerCase();
+        const mimeType = String(entry.mimeType || '').toLowerCase();
+        const isWebmSource = extension === 'webm' || mimeType.includes('webm');
+        return isWebmSource && (entry.status === 'processing' || entry.status === 'mp4_failed');
+    }
+
+    private async recoverPendingCinematicRecordingEntries() {
+        const pending = this.cinematicRecordingResults.filter((item) => this.shouldRetryCinematicRecordingTranscode(item) && !this.recoveringCinematicRecordingIds.has(item.id));
+        for (const entry of pending) {
+            this.recoveringCinematicRecordingIds.add(entry.id);
+            try {
+                const retryEntry: CinematicStoredRecordingEntry = {
+                    ...entry,
+                    status: 'processing',
+                    transcodePhase: entry.status === 'mp4_failed' ? 'retrying' : (entry.transcodePhase || 'queued'),
+                    note: this.buildCinematicProcessingNote({
+                        ...entry,
+                        status: 'processing',
+                        transcodePhase: entry.status === 'mp4_failed' ? 'retrying' : (entry.transcodePhase || 'queued')
+                    })
+                };
+                await this.updateCinematicRecordingResult(retryEntry);
+                const recoveredSettings: CinematicRecordingSettings = {
+                    ...this.cinematicRecordingSettings,
+                    frameRate: 24,
+                    videoBitsPerSecond: 18_000_000,
+                    audioBitsPerSecond: 256_000
+                };
+                const { mp4Blob, jobId } = await this.transcodeCinematicRecordingEntry(entry, recoveredSettings, entry.width || 1920, entry.height || 1080);
+                const mp4Meta = await this.captureCinematicRecordingThumbnail(mp4Blob);
+                await this.updateCinematicRecordingResult({
+                    ...entry,
+                    name: entry.name.replace(/\.[^.]+$/, '.mp4'),
+                    status: 'ready',
+                    transcodeJobId: jobId,
+                    transcodePercent: 100,
+                    transcodeEtaSec: 0,
+                    transcodeHeartbeatAt: Date.now(),
+                    transcodePhase: 'done',
+                    mimeType: 'video/mp4',
+                    extension: 'mp4',
+                    size: mp4Blob.size,
+                    durationSec: mp4Meta.durationSec,
+                    width: mp4Meta.width,
+                    height: mp4Meta.height,
+                    thumbnailDataUrl: mp4Meta.thumbnailDataUrl,
+                    note: undefined,
+                    blob: mp4Blob
+                });
+                await this.registerCinematicMp4ToTourProducer(entry.name.replace(/\.[^.]+$/, '.mp4'), mp4Blob);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                await this.updateCinematicRecordingResult({
+                    ...entry,
+                    status: 'mp4_failed',
+                    transcodePhase: 'error',
+                    note: `Recovered transcode failed: ${message}`
+                });
+            } finally {
+                this.recoveringCinematicRecordingIds.delete(entry.id);
+            }
+        }
+    }
+
+    private async storeCinematicRecordingResult(entry: CinematicStoredRecordingEntry) {
+        const db = await this.openCinematicRecordingDb();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction('recordings', 'readwrite');
+            tx.objectStore('recordings').put(entry);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Failed to store recording'));
+        });
+    }
+
+    private renderCinematicRecordingMeta(entry: CinematicStoredRecordingEntry) {
+        const durationMin = Math.floor(entry.durationSec / 60).toString().padStart(2, '0');
+        const durationSec = Math.floor(entry.durationSec % 60).toString().padStart(2, '0');
+        const createdAt = new Date(entry.createdAt);
+        const stamp = `${createdAt.getMonth() + 1}/${createdAt.getDate()} ${String(createdAt.getHours()).padStart(2, '0')}:${String(createdAt.getMinutes()).padStart(2, '0')}`;
+        return `${durationMin}:${durationSec} | ${entry.width}x${entry.height} | ${(entry.size / 1024 / 1024).toFixed(1)} MB | ${stamp}${entry.note ? ` | ${entry.note}` : ''}`;
+    }
+
+    private renderCinematicRecordingStatus(entry: CinematicStoredRecordingEntry) {
+        const label = entry.status === 'ready'
+            ? 'MP4 Ready'
+            : entry.status === 'processing'
+                ? `Processing MP4 ${Math.round(entry.transcodePercent || 0)}%`
+                : 'WebM Fallback';
+        const className = entry.status === 'ready'
+            ? 'otl-cine-record-status'
+            : entry.status === 'processing'
+                ? 'otl-cine-record-status processing'
+                : 'otl-cine-record-status warn';
+        return { label, className };
+    }
+
+    private patchCinematicRecordingCard(entry: CinematicStoredRecordingEntry) {
+        const card = this.cinematicRecordingResultsEl.querySelector(`[data-record-id="${entry.id}"]`) as HTMLDivElement | null;
+        if (!card) return false;
+        const statusEl = card.querySelector('[data-record-role="status"]') as HTMLDivElement | null;
+        const nameEl = card.querySelector('[data-record-role="name"]') as HTMLDivElement | null;
+        const metaEl = card.querySelector('[data-record-role="meta"]') as HTMLDivElement | null;
+        const videoEl = card.querySelector('video') as HTMLVideoElement | null;
+        const status = this.renderCinematicRecordingStatus(entry);
+        if (statusEl) {
+            statusEl.className = status.className;
+            statusEl.textContent = status.label;
+        }
+        if (nameEl) nameEl.textContent = entry.name;
+        if (metaEl) metaEl.textContent = this.renderCinematicRecordingMeta(entry);
+        if (videoEl) videoEl.poster = entry.thumbnailDataUrl;
+        return true;
+    }
+
+    private async updateCinematicRecordingResult(entry: CinematicStoredRecordingEntry) {
+        const previous = this.cinematicRecordingResults.find((item) => item.id === entry.id) || null;
+        await this.storeCinematicRecordingResult(entry);
+        const index = this.cinematicRecordingResults.findIndex((item) => item.id === entry.id);
+        if (index >= 0) this.cinematicRecordingResults[index] = entry;
+        else {
+            this.cinematicRecordingResults.unshift(entry);
+            this.cinematicRecordingPageIndex = 0;
+        }
+        const blobChanged = Boolean(previous && previous.blob !== entry.blob);
+        const structureChanged = !previous
+            || previous.name !== entry.name
+            || previous.status !== entry.status
+            || blobChanged
+            || previous.thumbnailDataUrl !== entry.thumbnailDataUrl;
+        if (blobChanged) this.revokeCinematicRecordingObjectUrl(entry.id);
+        this.cinematicRecordingResults.sort((a, b) => b.createdAt - a.createdAt);
+        if (structureChanged || !this.patchCinematicRecordingCard(entry)) this.renderCinematicRecordingResults();
+    }
+
+    private async registerCinematicMp4ToTourProducer(name: string, blob: Blob) {
+        if (String(blob.type || '').toLowerCase() !== 'video/mp4') return;
+        try {
+            const healthy = await fetch('http://localhost:3034/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            if (!healthy) return;
+            const modelFilename = String(this.modelFilename || '__UNSCOPED__').trim() || '__UNSCOPED__';
+            await fetch('http://localhost:3034/api/ot-tour-producer/videos/register', {
+                method: 'POST',
+                headers: {
+                    'X-OT-Name': name,
+                    'X-OT-Mime-Type': 'video/mp4',
+                    'X-OT-Model-Filename': modelFilename
+                },
+                body: blob
+            });
+        } catch {
+            // ignore sync failure
+        }
+    }
+
+    private async backfillCinematicReadyMp4ToModelDb() {
+        if (this.cinematicRecordingBackfillInProgress) return;
+        this.cinematicRecordingBackfillInProgress = true;
+        this.cinematicRecordingSyncToModelDbBtn.disabled = true;
+        try {
+            const healthy = await fetch('http://localhost:3034/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            if (!healthy) {
+                this.setCinematicRecordingStatus('Sync failed: ot-tour-producer backend is offline (3034).');
+                return;
+            }
+            const ready = this.cinematicRecordingResults.filter((item) => {
+                const mime = String(item.mimeType || '').toLowerCase();
+                return item.status === 'ready' && (mime === 'video/mp4' || item.extension === 'mp4') && item.blob instanceof Blob;
+            });
+            if (!ready.length) {
+                this.setCinematicRecordingStatus('No MP4 READY recordings to sync.');
+                return;
+            }
+            const modelFilename = String(this.modelFilename || '__UNSCOPED__').trim() || '__UNSCOPED__';
+            let uploaded = 0;
+            let skipped = 0;
+            let failed = 0;
+            for (let i = 0; i < ready.length; i += 1) {
+                const item = ready[i];
+                this.setCinematicRecordingStatus(`Sync MP4 to Model DB ${i + 1}/${ready.length}...`);
+                try {
+                    const response = await fetch('http://localhost:3034/api/ot-tour-producer/videos/register', {
+                        method: 'POST',
+                        headers: {
+                            'X-OT-Name': String(item.name || `tour-recording-${item.createdAt}.mp4`),
+                            'X-OT-Mime-Type': 'video/mp4',
+                            'X-OT-Model-Filename': modelFilename
+                        },
+                        body: item.blob
+                    });
+                    if (!response.ok) {
+                        failed += 1;
+                        continue;
+                    }
+                    const payload = await response.json().catch((): null => null);
+                    if (payload?.existed === true) {
+                        skipped += 1;
+                        continue;
+                    }
+                    uploaded += 1;
+                } catch {
+                    failed += 1;
+                }
+            }
+            this.setCinematicRecordingStatus(`Sync done. uploaded=${uploaded}, skipped=${skipped}, failed=${failed}`);
+        } finally {
+            this.cinematicRecordingBackfillInProgress = false;
+            this.cinematicRecordingSyncToModelDbBtn.disabled = false;
+        }
+    }
+
+    private async deleteCinematicRecordingResult(recordingId: string) {
+        const db = await this.openCinematicRecordingDb();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction('recordings', 'readwrite');
+            tx.objectStore('recordings').delete(recordingId);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Failed to delete recording'));
+        });
+    }
+
+    private async captureCinematicRecordingThumbnail(blob: Blob) {
+        const url = URL.createObjectURL(blob);
+        try {
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            video.muted = true;
+            video.playsInline = true;
+            const meta = await new Promise<{ durationSec: number; width: number; height: number }>((resolve, reject) => {
+                video.onloadedmetadata = () => {
+                    resolve({
+                        durationSec: Number.isFinite(video.duration) ? video.duration : 0,
+                        width: video.videoWidth || 0,
+                        height: video.videoHeight || 0
+                    });
+                };
+                video.onerror = () => reject(new Error('Failed to load recording metadata'));
+                video.src = url;
+            });
+            if (meta.durationSec > 0) {
+                const seekTime = Math.min(Math.max(meta.durationSec * 0.2, 0.1), Math.max(meta.durationSec - 0.1, 0.1));
+                await new Promise<void>((resolve) => {
+                    video.onseeked = () => resolve();
+                    try {
+                        video.currentTime = seekTime;
+                    } catch {
+                        resolve();
+                    }
+                });
+            }
+            const canvas = document.createElement('canvas');
+            const aspect = meta.width > 0 && meta.height > 0 ? meta.width / meta.height : 16 / 9;
+            canvas.width = 320;
+            canvas.height = Math.round(canvas.width / aspect);
+            const ctx = canvas.getContext('2d');
+            if (ctx) ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            return {
+                durationSec: meta.durationSec,
+                width: meta.width,
+                height: meta.height,
+                thumbnailDataUrl: canvas.toDataURL('image/jpeg', 0.82)
+            };
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+    }
+
+    private getCinematicRecordingObjectUrl(entry: CinematicStoredRecordingEntry) {
+        const existing = this.cinematicRecordingObjectUrls.get(entry.id);
+        if (existing) return existing;
+        const url = URL.createObjectURL(entry.blob);
+        this.cinematicRecordingObjectUrls.set(entry.id, url);
+        return url;
+    }
+
+    private revokeCinematicRecordingObjectUrl(recordingId: string) {
+        const existing = this.cinematicRecordingObjectUrls.get(recordingId);
+        if (!existing) return;
+        URL.revokeObjectURL(existing);
+        this.cinematicRecordingObjectUrls.delete(recordingId);
+    }
+
+    private getCinematicRecordingPageTotal() {
+        if (this.cinematicRecordingResults.length < 1) return 1;
+        return Math.ceil(this.cinematicRecordingResults.length / this.cinematicRecordingPageSize);
+    }
+
+    private clampCinematicRecordingPageIndex() {
+        const totalPages = this.getCinematicRecordingPageTotal();
+        if (this.cinematicRecordingPageIndex < 0) this.cinematicRecordingPageIndex = 0;
+        if (this.cinematicRecordingPageIndex > totalPages - 1) this.cinematicRecordingPageIndex = totalPages - 1;
+    }
+
+    private renderCinematicRecordingResults() {
+        this.clampCinematicRecordingPageIndex();
+        const totalItems = this.cinematicRecordingResults.length;
+        const totalPages = this.getCinematicRecordingPageTotal();
+        const pageIndex = this.cinematicRecordingPageIndex;
+        const start = pageIndex * this.cinematicRecordingPageSize;
+        this.cinematicRecordingResultsEl.innerHTML = '';
+        const visibleItems = this.cinematicRecordingResults.slice(start, start + this.cinematicRecordingPageSize);
+        this.cinematicRecordingResultsEmptyEl.classList.toggle('hidden', totalItems > 0);
+        this.cinematicRecordingPageLabelEl.textContent = totalItems > 0 ? `${pageIndex + 1} / ${totalPages}` : '0 / 0';
+        this.cinematicRecordingPagePrevBtn.disabled = totalItems < 1 || pageIndex <= 0;
+        this.cinematicRecordingPageNextBtn.disabled = totalItems < 1 || pageIndex >= totalPages - 1;
+        for (let index = 0; index < this.cinematicRecordingPageSize; index += 1) {
+            const item = visibleItems[index];
+            if (!item) {
+                const empty = document.createElement('div');
+                empty.className = 'otl-cine-record-card-item';
+                empty.style.minHeight = '220px';
+                this.cinematicRecordingResultsEl.appendChild(empty);
+                continue;
+            }
+            const card = document.createElement('div');
+            card.className = 'otl-cine-record-card-item';
+            card.dataset.recordId = item.id;
+            const status = this.renderCinematicRecordingStatus(item);
+            const objectUrl = this.getCinematicRecordingObjectUrl(item);
+            card.innerHTML = `
+                <video class="otl-cine-record-video" controls playsinline preload="metadata" src="${objectUrl}"></video>
+                <div class="otl-cine-record-card-body">
+                    <div class="otl-cine-record-name" data-record-role="name">${item.name}</div>
+                    <div class="otl-cine-record-meta" data-record-role="meta">${this.renderCinematicRecordingMeta(item)}</div>
+                    <div class="${status.className}" data-record-role="status">${status.label}</div>
+                    <div class="otl-cine-record-actions"><button class="otl-cine-record-delete" data-action="delete" type="button">Delete</button></div>
+                </div>
+            `;
+            const deleteBtn = card.querySelector('[data-action="delete"]') as HTMLButtonElement;
+            deleteBtn.addEventListener('click', () => {
+                void this.removeCinematicRecordingResult(item.id);
+            });
+            this.cinematicRecordingResultsEl.appendChild(card);
+        }
+    }
+
+    private async addCinematicRecordingResult(
+        blob: Blob,
+        mimeType: string,
+        extension: string,
+        status: CinematicStoredRecordingEntry['status'],
+        note?: string,
+        options?: { durationSecFallback?: number }
+    ) {
+        const createdAt = Date.now();
+        const meta = await this.captureCinematicRecordingThumbnail(blob);
+        const resolvedDurationSec = meta.durationSec > 0
+            ? meta.durationSec
+            : Math.max(0, Number(options?.durationSecFallback) || 0);
+        const entry: CinematicStoredRecordingEntry = {
+            id: `rec_${createdAt.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+            name: `tour-recording-${createdAt}.${extension}`,
+            status,
+            transcodeJobId: undefined,
+            transcodePercent: status === 'processing' ? 0 : undefined,
+            transcodeEtaSec: status === 'processing' ? null : undefined,
+            transcodeHeartbeatAt: status === 'processing' ? Date.now() : undefined,
+            transcodePhase: status === 'processing' ? 'queued' : undefined,
+            mimeType,
+            extension,
+            size: blob.size,
+            durationSec: resolvedDurationSec,
+            width: meta.width,
+            height: meta.height,
+            createdAt,
+            thumbnailDataUrl: meta.thumbnailDataUrl,
+            note,
+            blob
+        };
+        await this.storeCinematicRecordingResult(entry);
+        this.cinematicRecordingResults.unshift(entry);
+        this.cinematicRecordingPageIndex = 0;
+        this.renderCinematicRecordingResults();
+        return entry;
+    }
+
+    private async removeCinematicRecordingResult(recordingId: string) {
+        const entry = this.cinematicRecordingResults.find((item) => item.id === recordingId);
+        if (!entry) return;
+        const confirmed = window.confirm(`Delete recording ${entry.name}? This removes saved MP4/WebM data permanently.`);
+        if (!confirmed) return;
+        await this.deleteCinematicRecordingResult(recordingId);
+        this.cinematicRecordingResults = this.cinematicRecordingResults.filter((item) => item.id !== recordingId);
+        this.revokeCinematicRecordingObjectUrl(recordingId);
+        this.renderCinematicRecordingResults();
+    }
+
+    private async stopCinematicRecording(save = true, reason = 'manual-stop') {
+        const runtime = this.activeCinematicRecording;
+        if (!runtime) return;
+        this.stopCinematicRecordTimer();
+        if (runtime.paused && runtime.recorder.state === 'paused') {
+            runtime.recorder.resume();
+            runtime.paused = false;
+        }
+        const recordedBlob = await new Promise<Blob>((resolve) => {
+            runtime.recorder.onstop = () => {
+                resolve(new Blob(runtime.chunks, { type: runtime.mimeType }));
+            };
+            try {
+                runtime.recorder.requestData();
+            } catch {
+                // ignore requestData failures during shutdown
+            }
+            runtime.recorder.stop();
+        });
+        runtime.stream.getTracks().forEach((track) => track.stop());
+        runtime.displayStream?.getTracks().forEach((track) => track.stop());
+        this.stopCinematicRecordingCompositor();
+        this.stopCinematicRecordingAudioMix();
+        this.activeCinematicRecording = null;
+        this.refreshCinematicRecordingButtons();
+        this.setCinematicRecordingUiLock(false);
+        if (this.cinematicRecordingHideRootOnStop) {
+            this.cinematicWorkspaceModal.classList.remove('hidden');
+            this.cinematicRecordingHideRootOnStop = false;
+        }
+        this.setCinematicStatus(save ? 'Recording complete. Saved to Recordings.' : 'Recording cancelled.');
+        if (save && recordedBlob.size > 0) {
+            this.setCinematicRecordingStatus('Recording finished. Saving WebM and preparing MP4...');
+            const recordedDurationSec = Math.max(0, (performance.now() - runtime.startedAt) / 1000);
+            let processingEntry: CinematicStoredRecordingEntry | null = null;
+            try {
+                processingEntry = await this.addCinematicRecordingResult(
+                    recordedBlob,
+                    runtime.mimeType,
+                    runtime.extension,
+                    'processing',
+                    'MP4 0% · ETA --:-- · heartbeat 0s ago',
+                    { durationSecFallback: recordedDurationSec }
+                );
+                this.setCinematicRecordingStatus('WebM saved. MP4 transcoding in progress...');
+                const { mp4Blob, jobId } = await this.transcodeCinematicRecordingEntry(processingEntry, runtime.settings, this.options.getCaptureCanvas?.()?.width || 1920, this.options.getCaptureCanvas?.()?.height || 1080);
+                const mp4Meta = await this.captureCinematicRecordingThumbnail(mp4Blob);
+                await this.updateCinematicRecordingResult({
+                    ...processingEntry,
+                    name: processingEntry.name.replace(/\.[^.]+$/, '.mp4'),
+                    status: 'ready',
+                    transcodeJobId: jobId,
+                    transcodePercent: 100,
+                    transcodeEtaSec: 0,
+                    transcodeHeartbeatAt: Date.now(),
+                    transcodePhase: 'done',
+                    mimeType: 'video/mp4',
+                    extension: 'mp4',
+                    size: mp4Blob.size,
+                    durationSec: mp4Meta.durationSec,
+                    width: mp4Meta.width,
+                    height: mp4Meta.height,
+                    thumbnailDataUrl: mp4Meta.thumbnailDataUrl,
+                    note: undefined,
+                    blob: mp4Blob
+                });
+                await this.registerCinematicMp4ToTourProducer(processingEntry.name.replace(/\.[^.]+$/, '.mp4'), mp4Blob);
+                this.setCinematicRecordingStatus('MP4 ready in Recordings.');
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (processingEntry) {
+                    await this.updateCinematicRecordingResult({
+                        ...processingEntry,
+                        status: 'mp4_failed',
+                        transcodePhase: 'error',
+                        note: `MP4 transcode failed: ${message}`
+                    });
+                }
+                this.setCinematicRecordingStatus(`MP4 transcode failed. Kept WebM fallback. ${message}`);
+            }
+        }
+        this.cinematicRecordingSubtitleText = '';
+        if (this.cinematicRecordingSettings.stopWithPlayback && reason !== 'preview-finished' && this.cinematicPreview.playing) {
+            this.stopCinematicPreview('Preview stopped');
+        }
+    }
+
+    private async startCinematicRecording() {
+        if (this.activeCinematicRecording) {
+            await this.stopCinematicRecording(true, 'button-stop');
+            return;
+        }
+        const canvas = this.options.getCaptureCanvas?.() || document.querySelector('canvas');
+        if (!canvas) {
+            this.setCinematicStatus('Recording failed: canvas unavailable.');
+            return;
+        }
+
+        this.cinematicRecordingSettings = this.collectCinematicRecordingSettings();
+        this.syncCinematicRecordingForm();
+        const shouldCaptureAudio = this.cinematicRecordingSettings.includeTts || Boolean(this.cinematicCurrentBgmConfig());
+
+        try {
+            this.startCinematicRecordingCompositor(canvas as HTMLCanvasElement);
+            const recordingCanvas = this.cinematicRecordingCompositorCanvas || (canvas as HTMLCanvasElement);
+            const canvasStream = recordingCanvas.captureStream(this.cinematicRecordingSettings.frameRate);
+            const outputStream = new MediaStream();
+            const videoTrack = canvasStream.getVideoTracks()[0];
+            if (!videoTrack) throw new Error('No canvas video track available');
+            outputStream.addTrack(videoTrack);
+
+            let audioTrack: MediaStreamTrack | null = null;
+            if (shouldCaptureAudio) {
+                const mix = await this.ensureCinematicRecordingAudioMix();
+                if (this.cinematicBgmPreviewAudio) this.connectCinematicRecordingAudioElement(this.cinematicBgmPreviewAudio, 'bgm');
+                if (this.cinematicSpeechAudio) this.connectCinematicRecordingAudioElement(this.cinematicSpeechAudio, 'speech');
+                audioTrack = mix.destination.stream.getAudioTracks()[0] || null;
+                if (!audioTrack) throw new Error('Failed to create cinematic recording audio mix track.');
+            }
+            if (audioTrack) outputStream.addTrack(audioTrack);
+
+            const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+                ? 'video/webm;codecs=vp9,opus'
+                : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+                    ? 'video/webm;codecs=vp8,opus'
+                    : 'video/webm';
+            const chunks: BlobPart[] = [];
+            const recorder = new MediaRecorder(outputStream, {
+                mimeType,
+                videoBitsPerSecond: this.cinematicRecordingSettings.videoBitsPerSecond,
+                audioBitsPerSecond: this.cinematicRecordingSettings.audioBitsPerSecond
+            });
+            recorder.ondataavailable = (event) => {
+                if (!event.data || event.data.size < 1 || !this.activeCinematicRecording) return;
+                chunks.push(event.data);
+                this.activeCinematicRecording.bytesWritten += event.data.size;
+                const now = performance.now();
+                if (now - this.activeCinematicRecording.lastProgressLogAt > 1000) {
+                    this.activeCinematicRecording.lastProgressLogAt = now;
+                }
+            };
+
+            this.activeCinematicRecording = {
+                settings: this.cinematicRecordingSettings,
+                recorder,
+                stream: outputStream,
+                displayStream: null,
+                chunks,
+                startedAt: performance.now(),
+                mimeType,
+                extension: 'webm',
+                bytesWritten: 0,
+                lastProgressLogAt: 0,
+                paused: false
+            };
+            recorder.start(1000);
+            this.closeCinematicRecordingModal();
+            if (this.cinematicRecordingSettings.hidePanelDuringRecording) {
+                this.cinematicWorkspaceModal.classList.add('hidden');
+                this.cinematicRecordingHideRootOnStop = true;
+            }
+            if (this.cinematicRecordingSettings.disableInterrupts) {
+                this.setCinematicRecordingUiLock(true);
+            }
+            this.refreshCinematicRecordingButtons();
+            this.startCinematicRecordTimer();
+            this.setCinematicStatus('Recording started.');
+            this.setCinematicRecordingStatus('Recording WebM... MP4 will be produced after capture finishes.');
+            if (this.cinematicRecordingSettings.autoPlay && !this.cinematicPreview.playing) {
+                await this.startCinematicPreview();
+            }
+        } catch (error) {
+            this.stopCinematicRecordingCompositor();
+            this.stopCinematicRecordingAudioMix();
+            this.activeCinematicRecording = null;
+            this.stopCinematicRecordTimer();
+            this.refreshCinematicRecordingButtons();
+            this.cinematicWorkspaceModal.classList.remove('hidden');
+            this.cinematicRecordingHideRootOnStop = false;
+            this.setCinematicRecordingUiLock(false);
+            const message = error instanceof Error ? error.message : String(error);
+            this.setCinematicStatus(`Recording failed: ${message}`);
+            this.setCinematicRecordingStatus(message);
+        }
+    }
+
+    private compileCinematicPlanToCsv(plan: CinematicPlan) {
+        const rows: string[] = [];
+        rows.push(OT_TOUR_CSV_HEADERS.join(','));
+        let seq = 1;
+        let voiceIdx = 0;
+        
+        plan.shots.forEach((shot, shotIdx) => {
+            let ttsVoice = shot.speechMetrics?.ttsVoice;
+            if (!ttsVoice) {
+                if (this.csvVoiceConfig.enabled && this.csvVoiceConfig.voicePool.length > 0) {
+                    ttsVoice = this.csvVoiceConfig.voicePool[voiceIdx % this.csvVoiceConfig.voicePool.length];
+                    voiceIdx++;
+                } else {
+                    ttsVoice = this.csvVoiceConfig.fixedVoice || DEFAULT_TTS_VOICE;
+                }
+            }
+
+            for (let i = 0; i < shot.keyframes.length; i += 1) {
+                const kf = shot.keyframes[i];
+                const isLast = shotIdx === plan.shots.length - 1 && i === shot.keyframes.length - 1;
+                const dwell = isLast ? 120 : 0;
+                rows.push([
+                    OT_TOUR_CSV_VERSION,
+                    seq++,
+                    i === shot.keyframes.length - 1 ? 'LOOK' : 'MOVE',
+                    shot.speechMode,
+                    kf.keyframeId,
+                    `${shot.label}-${i + 1}`,
+                    kf.x.toFixed(3),
+                    kf.y.toFixed(3),
+                    kf.z.toFixed(3),
+                    kf.yaw.toFixed(2),
+                    kf.pitch.toFixed(2),
+                    kf.fov.toFixed(2),
+                    kf.moveSpeedMps.toFixed(2),
+                    String(dwell),
+                    i === 0 ? shot.speechText : '',
+                    'zh-CN',
+                    ttsVoice,
+                    plan.modelFilename,
+                    this.eyeHeightM.toFixed(2)
+                ].map(escapeCsv).join(','));
+            }
+        });
+        return rows.join('\n');
+    }
+
+    private async compileCurrentCinematicPlanToCsvVersion() {
+        if (!this.requireModel()) return;
+        if (!this.cinematicPlan) throw new Error('No cinematic plan');
+        const csvText = this.compileCinematicPlanToCsv(this.cinematicPlan);
+        const response = await fetch(`${this.apiBase()}/csv/versions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ modelFilename: this.modelFilename, csvText })
+        });
+        if (response.ok) {
+            const data = await response.json().catch(() => ({}));
+            if (data?.ok) {
+                this.setCinematicStatus(`Compiled to CSV v${data?.version?.versionNo || ''}`.trim());
+                await this.loadCsvVersionList(Number(data?.version?.id || 0));
+                return;
+            }
+        }
+        throw new Error('Compile to CSV failed');
+    }
+
+    private cinematicWorkspaceOpen() {
+        return !this.cinematicWorkspaceModal.classList.contains('hidden');
     }
 
     private bindEvents() {
@@ -3607,6 +10791,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.poiSelect.addEventListener('change', () => {
             this.selectedPoiId = this.poiSelect.value || null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
         });
 
         this.poiNameInput.addEventListener('change', () => {
@@ -3624,7 +10809,17 @@ class TourLoaderPanel implements TourLoaderController {
             this.pois.forEach((p, i) => { p.sortOrder = i; });
             this.selectedPoiId = this.pois[0]?.poiId || null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
             this.debounceSave('poi-delete');
+        });
+
+        (this.root.querySelector('[data-act="goto-selected"]') as HTMLButtonElement).addEventListener('click', () => {
+            const poi = this.selectedPoi();
+            if (!poi) return;
+            void this.moveToPoi(poi, 1).then(() => {
+                this.hotspotController.activatePoi(poi.poiId);
+                this.setStatus(`Arrived at ${poi.poiName}`);
+            });
         });
 
         (this.root.querySelector('[data-act="update-current"]') as HTMLButtonElement).addEventListener('click', () => {
@@ -3823,13 +11018,21 @@ class TourLoaderPanel implements TourLoaderController {
         (this.root.querySelector('[data-act="csv-workspace-fullscreen"]') as HTMLButtonElement).addEventListener('click', () => {
             this.toggleCsvWorkspaceFullscreen();
         });
-        (this.root.querySelector('[data-act="csv-timing-config"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.renderCsvTimingConfig();
-            this.csvTimingModal.classList.remove('hidden');
+        this.root.querySelectorAll('[data-act="csv-timing-config"]').forEach((el) => {
+            el.addEventListener('click', (event) => {
+                const target = event.currentTarget as HTMLElement | null;
+                this.attachCsvTimingModalToCurrentWorkspace(Boolean(target?.closest('[data-role="cinematic-workspace-panel"]')));
+                this.renderCsvTimingConfig();
+                this.csvTimingModal.classList.remove('hidden');
+            });
         });
-        (this.root.querySelector('[data-act="csv-voice-config"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.renderCsvVoiceConfig();
-            this.csvVoiceModal.classList.remove('hidden');
+        this.root.querySelectorAll('[data-act="csv-voice-config"]').forEach((el) => {
+            el.addEventListener('click', (event) => {
+                const target = event.currentTarget as HTMLElement | null;
+                this.attachCsvVoiceModalToCurrentWorkspace(Boolean(target?.closest('[data-role="cinematic-workspace-panel"]')));
+                this.renderCsvVoiceConfig();
+                this.csvVoiceModal.classList.remove('hidden');
+            });
         });
         this.csvTimingEnabledInput.addEventListener('change', () => {
             this.csvTimingConfig.enabled = this.csvTimingEnabledInput.checked;
@@ -3843,7 +11046,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.renderCsvTimingConfig();
         });
         this.csvVoiceEnabledInput.addEventListener('change', () => {
-            this.csvVoiceConfig.enabled = this.csvVoiceEnabledInput.checked && this.csvVoiceConfig.voicePool.length > 0;
+            this.csvVoiceConfig.enabled = this.csvVoiceEnabledInput.checked;
             this.renderCsvVoiceConfig();
         });
         this.csvVoiceModelSelect.addEventListener('change', () => {
@@ -3860,12 +11063,15 @@ class TourLoaderPanel implements TourLoaderController {
             this.renderCsvVoiceConfig();
         });
         this.csvVoiceListEl.addEventListener('change', (event) => {
-            const target = event.target as HTMLInputElement;
-            if (!target.matches('[data-role="csv-voice-item"]')) return;
-            const picked = Array.from(this.csvVoiceListEl.querySelectorAll('[data-role="csv-voice-item"]:checked'))
-                .map((item) => String((item as HTMLInputElement).value || ''));
+            const input = event.target as HTMLInputElement;
+            if (input.type !== 'checkbox') return;
+            const checked = input.checked;
+            const val = input.value;
+            let picked = [...this.csvVoiceConfig.voicePool];
+            if (checked && !picked.includes(val)) picked.push(val);
+            else if (!checked) picked = picked.filter(v => v !== val);
             this.csvVoiceConfig.voicePool = picked;
-            this.csvVoiceConfig.enabled = this.csvVoiceEnabledInput.checked && picked.length > 0;
+            this.csvVoiceConfig.enabled = this.csvVoiceEnabledInput.checked;
             this.renderCsvVoiceConfig();
         });
         (this.root.querySelector('[data-act="csv-voice-save"]') as HTMLButtonElement).addEventListener('click', () => {
@@ -4000,6 +11206,1175 @@ class TourLoaderPanel implements TourLoaderController {
                 this.setCsvWorkspaceStatus(`Download failed: ${String(error)}`);
             });
         });
+        (this.root.querySelector('[data-act="cinematic-workspace-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.closeCinematicWorkspace();
+        });
+        (this.root.querySelector('[data-act="cinematic-generate-prompt"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.generateCinematicPromptViaLlm().catch((error) => {
+                this.logDebug('cine.prompt.error', String(error));
+                this.setCinematicStatus(`Generate prompt failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-generate-plan"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.generateCinematicPlanViaLlm().then(() => {
+                this.cinematicPoiExpanded = false;
+            }).catch((error) => {
+                this.logDebug('cine.timeline.error', String(error));
+                this.setCinematicStatus(`Generate plan failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-preview"]') as HTMLButtonElement).addEventListener('click', () => {
+            if (this.cinematicPreview.playing) {
+                this.stopCinematicPreview('Preview stopped');
+                if (this.activeCinematicRecording && this.cinematicRecordingSettings.stopWithPlayback) {
+                    void this.stopCinematicRecording(true, 'preview-stopped');
+                }
+            }
+            else void this.startCinematicPreview();
+        });
+        this.cinematicRecordBtn.addEventListener('click', () => {
+            if (this.activeCinematicRecording) {
+                void this.stopCinematicRecording(true, 'record-button');
+                return;
+            }
+            this.openCinematicRecordingModal();
+        });
+        this.cinematicRecordPauseBtn.addEventListener('click', () => this.toggleCinematicRecordingPause());
+        this.cinematicRecordStopBtn.addEventListener('click', () => {
+            void this.stopCinematicRecording(true, 'record-stop-button');
+        });
+        this.cinematicRecordingModalEl.querySelector('[data-record-modal="close"]')?.addEventListener('click', () => this.closeCinematicRecordingModal());
+        this.cinematicRecordingModalEl.querySelector('[data-record-modal="start"]')?.addEventListener('click', () => {
+            void this.startCinematicRecording();
+        });
+        this.cinematicRecordingSyncToModelDbBtn.addEventListener('click', () => {
+            void this.backfillCinematicReadyMp4ToModelDb();
+        });
+        this.cinematicRecordingPagePrevBtn.addEventListener('click', () => {
+            if (this.cinematicRecordingPageIndex <= 0) return;
+            this.cinematicRecordingPageIndex -= 1;
+            this.renderCinematicRecordingResults();
+        });
+        this.cinematicRecordingPageNextBtn.addEventListener('click', () => {
+            const totalPages = this.getCinematicRecordingPageTotal();
+            if (this.cinematicRecordingPageIndex >= totalPages - 1) return;
+            this.cinematicRecordingPageIndex += 1;
+            this.renderCinematicRecordingResults();
+        });
+        this.cinematicRecordingModalEl.querySelectorAll('[data-record-popover-trigger]').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const target = (button as HTMLButtonElement).dataset.recordPopoverTrigger || '';
+                const popover = this.cinematicRecordingModalEl.querySelector(`[data-record-popover="${target}"]`) as HTMLDivElement | null;
+                if (!popover) return;
+                const willOpen = !popover.classList.contains('open');
+                this.closeCinematicRecordingConfigPopovers();
+                if (willOpen) popover.classList.add('open');
+            });
+        });
+        this.cinematicRecordingModalEl.querySelectorAll('[data-record-popover-close]').forEach((button) => {
+            button.addEventListener('click', (event) => {
+                event.stopPropagation();
+                const target = (button as HTMLButtonElement).dataset.recordPopoverClose || '';
+                const popover = this.cinematicRecordingModalEl.querySelector(`[data-record-popover="${target}"]`) as HTMLDivElement | null;
+                popover?.classList.remove('open');
+            });
+        });
+        this.cinematicRecordingModalEl.addEventListener('click', (event) => {
+            if (event.target === this.cinematicRecordingModalEl) {
+                this.closeCinematicRecordingModal();
+                return;
+            }
+            if (!(event.target as HTMLElement).closest('[data-record-popover]') && !(event.target as HTMLElement).closest('[data-record-popover-trigger]')) {
+                this.closeCinematicRecordingConfigPopovers();
+            }
+        });
+        const syncRecordingOut = (input: HTMLInputElement, output: HTMLSpanElement, suffix: string) => {
+            input.addEventListener('input', () => {
+                output.textContent = `${input.value}${suffix}`;
+                this.cinematicRecordingSettings = this.collectCinematicRecordingSettings();
+                if (this.cinematicSpeechAudio) {
+                    this.cinematicSpeechAudio.volume = Math.max(0, Math.min(1, this.cinematicRecordingSettings.masterVolume * this.cinematicRecordingSettings.ttsVolume));
+                }
+                if (this.cinematicBgmPreviewAudio) {
+                    this.cinematicBgmPreviewAudio.volume = Math.max(0, Math.min(1, this.cinematicRecordingSettings.masterVolume * this.cinematicRecordingSettings.bgmVolume));
+                }
+            });
+        };
+        syncRecordingOut(this.cinematicRecordingMasterVolumeInput, this.cinematicRecordingMasterVolumeOut, '%');
+        syncRecordingOut(this.cinematicRecordingTtsVolumeInput, this.cinematicRecordingTtsVolumeOut, '%');
+        syncRecordingOut(this.cinematicRecordingBgmVolumeInput, this.cinematicRecordingBgmVolumeOut, '%');
+        syncRecordingOut(this.cinematicRecordingSubtitleSizeInput, this.cinematicRecordingSubtitleSizeOut, 'px');
+        [
+            this.cinematicRecordingSubtitlesEnabledInput,
+            this.cinematicRecordingSubtitleFontSelect,
+            this.cinematicRecordingSubtitleColorInput,
+            this.cinematicRecordingFrameRateSelect,
+            this.cinematicRecordingQualitySelect,
+            this.cinematicRecordingCompressionSelect,
+            this.cinematicRecordingIncludeTtsInput,
+            this.cinematicRecordingAutoPlayInput,
+            this.cinematicRecordingStopWithPlaybackInput,
+            this.cinematicRecordingHidePanelInput,
+            this.cinematicRecordingDisableInterruptsInput
+        ].forEach((el) => {
+            el.addEventListener('change', () => {
+                this.cinematicRecordingSettings = this.collectCinematicRecordingSettings();
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-save"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.saveCinematicVersion().catch((error) => {
+                this.setCinematicStatus(`Save failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-save-new"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.saveCinematicVersion(true).catch((error) => {
+                this.setCinematicStatus(`Save version failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-version-refresh"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.loadCinematicVersionList(this.selectedCinematicVersionId).catch((error) => {
+                this.setCinematicStatus(`Refresh failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-version-delete"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.deleteSelectedCinematicVersion().catch((error) => {
+                this.setCinematicStatus(`Delete failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-open-cw-csv"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.openCinematicCwCsvWorkspace().catch((error) => {
+                this.setCinematicStatus(`Open CSV workspace failed: ${String(error)}`);
+            });
+        });
+        this.cinematicCwCsvWorkspaceModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicCwCsvWorkspaceModal) this.cinematicCwCsvWorkspaceModal.classList.add('hidden');
+        });
+        const cwCsvHandle = this.cinematicCwCsvWorkspacePanel.querySelector('[data-role="cinematic-cw-csv-workspace-drag-handle"]') as HTMLDivElement;
+        cwCsvHandle.addEventListener('pointerdown', (event) => {
+            if (this.cinematicCwCsvWorkspaceFullscreen) return;
+            const target = event.target as HTMLElement;
+            if (target.closest('.otl-icon-btn') || target.closest('button')) return;
+            const rect = this.cinematicCwCsvWorkspacePanel.getBoundingClientRect();
+            this.cinematicCwCsvWorkspacePanel.classList.add('floating');
+            this.cinematicCwCsvWorkspacePanel.style.left = `${rect.left}px`;
+            this.cinematicCwCsvWorkspacePanel.style.top = `${rect.top}px`;
+            this.cinematicCwCsvWorkspaceDrag = {
+                active: true,
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                left: rect.left,
+                top: rect.top
+            };
+            cwCsvHandle.setPointerCapture(event.pointerId);
+        });
+        cwCsvHandle.addEventListener('pointermove', (event) => {
+            if (!this.cinematicCwCsvWorkspaceDrag.active || event.pointerId !== this.cinematicCwCsvWorkspaceDrag.pointerId) return;
+            const dx = event.clientX - this.cinematicCwCsvWorkspaceDrag.startX;
+            const dy = event.clientY - this.cinematicCwCsvWorkspaceDrag.startY;
+            const maxX = Math.max(0, window.innerWidth - this.cinematicCwCsvWorkspacePanel.offsetWidth);
+            const maxY = Math.max(0, window.innerHeight - this.cinematicCwCsvWorkspacePanel.offsetHeight);
+            const nextLeft = clamp(this.cinematicCwCsvWorkspaceDrag.left + dx, 0, maxX);
+            const nextTop = clamp(this.cinematicCwCsvWorkspaceDrag.top + dy, 0, maxY);
+            this.cinematicCwCsvWorkspacePanel.style.left = `${nextLeft}px`;
+            this.cinematicCwCsvWorkspacePanel.style.top = `${nextTop}px`;
+        });
+        const stopCwCsvDrag = (event: PointerEvent) => {
+            if (!this.cinematicCwCsvWorkspaceDrag.active || event.pointerId !== this.cinematicCwCsvWorkspaceDrag.pointerId) return;
+            this.cinematicCwCsvWorkspaceDrag.active = false;
+            try { cwCsvHandle.releasePointerCapture(event.pointerId); } catch {}
+        };
+        cwCsvHandle.addEventListener('pointerup', stopCwCsvDrag);
+        cwCsvHandle.addEventListener('pointercancel', stopCwCsvDrag);
+        this.cinematicCwCsvWorkspacePanel.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button[data-act="cinematic-cw-csv-version-select"]') as HTMLButtonElement | null;
+            if (!button) return;
+            const versionId = Number(button.getAttribute('data-version-id') || '0');
+            if (!versionId) return;
+            void this.loadCinematicCwCsvVersionDetail(versionId).catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Load failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-workspace-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicCwCsvWorkspaceModal.classList.add('hidden');
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-workspace-fullscreen"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.setCinematicCwCsvWorkspaceFullscreen(!this.cinematicCwCsvWorkspaceFullscreen);
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-version-generate"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.generateCinematicCwCsvVersion().catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Generate failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-version-save"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.saveCinematicCwCsvVersion().catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Save failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-version-save-new"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.saveCinematicCwCsvVersionAsNew().catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Save as new failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-version-delete"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.deleteCinematicCwCsvVersion().catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Delete failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-version-download"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.downloadCinematicCwCsvVersion().catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Download failed: ${String(error)}`);
+            });
+        });
+        this.root.querySelectorAll('[data-act="cinematic-cw-csv-voice-config"]').forEach((el) => {
+            el.addEventListener('click', () => {
+                this.renderCinematicCwCsvVoiceConfig();
+                this.cinematicCwCsvVoiceModal.classList.remove('hidden');
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-voice-save"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicCwCsvVoiceModal.classList.add('hidden');
+            this.renderCinematicCwCsvVoiceConfig();
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-voice-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicCwCsvVoiceModal.classList.add('hidden');
+            this.renderCinematicCwCsvVoiceConfig();
+        });
+        this.cinematicCwCsvVoiceModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicCwCsvVoiceModal) this.cinematicCwCsvVoiceModal.classList.add('hidden');
+        });
+        this.cinematicCwCsvVoiceModelSelect.addEventListener('change', () => {
+            this.cinematicCwCsvVoiceConfig.model = this.cinematicCwCsvVoiceModelSelect.value || DEFAULT_TTS_MODEL;
+            const options = TTS_VOICE_OPTIONS_BY_MODEL[this.cinematicCwCsvVoiceConfig.model] || [];
+            if (!options.some((item) => item.value === this.cinematicCwCsvVoiceConfig.fixedVoice)) {
+                this.cinematicCwCsvVoiceConfig.fixedVoice = options[0]?.value || DEFAULT_TTS_VOICE;
+            }
+            this.cinematicCwCsvVoiceConfig.voicePool = this.cinematicCwCsvVoiceConfig.voicePool.filter((item) => options.some((opt) => opt.value === item));
+            this.renderCinematicCwCsvVoiceConfig();
+        });
+        this.cinematicCwCsvVoiceFixedSelect.addEventListener('change', () => {
+            this.cinematicCwCsvVoiceConfig.fixedVoice = this.cinematicCwCsvVoiceFixedSelect.value || DEFAULT_TTS_VOICE;
+            this.renderCinematicCwCsvVoiceConfig();
+        });
+        this.cinematicCwCsvVoiceEnabledInput.addEventListener('change', () => {
+            this.cinematicCwCsvVoiceConfig.enabled = this.cinematicCwCsvVoiceEnabledInput.checked;
+            this.renderCinematicCwCsvVoiceConfig();
+        });
+        this.cinematicCwCsvVoiceListEl.addEventListener('change', (event) => {
+            const target = event.target as HTMLInputElement;
+            if (target.getAttribute('data-role') !== 'cinematic-cw-csv-voice-item') return;
+            const value = String(target.value || '').trim();
+            if (!value) return;
+            if (target.checked) {
+                if (!this.cinematicCwCsvVoiceConfig.voicePool.includes(value)) this.cinematicCwCsvVoiceConfig.voicePool.push(value);
+            }
+            else {
+                this.cinematicCwCsvVoiceConfig.voicePool = this.cinematicCwCsvVoiceConfig.voicePool.filter((item) => item !== value);
+            }
+            this.renderCinematicCwCsvVoiceConfig();
+        });
+        this.root.querySelectorAll('[data-act="cinematic-cw-csv-timing-config"]').forEach((el) => {
+            el.addEventListener('click', () => {
+                this.renderCinematicCwCsvTimingConfig();
+                this.cinematicCwCsvTimingModal.classList.remove('hidden');
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-timing-save"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicCwCsvTimingModal.classList.add('hidden');
+            this.renderCinematicCwCsvTimingConfig();
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-timing-estimate"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.estimateCinematicCwCsvTiming().catch((error) => {
+                this.setCinematicCwCsvWorkspaceStatus(`Timing estimate failed: ${String(error)}`);
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-timing-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicCwCsvTimingModal.classList.add('hidden');
+            this.renderCinematicCwCsvTimingConfig();
+        });
+        this.cinematicCwCsvTimingModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicCwCsvTimingModal) this.cinematicCwCsvTimingModal.classList.add('hidden');
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-content-cancel"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.closeCinematicCwCsvContentEditor();
+        });
+        (this.root.querySelector('[data-act="cinematic-cw-csv-content-save"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.saveCinematicCwCsvContentEditor();
+        });
+        (this.root.querySelector('[data-act="cinematic-open-simple-prompt"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.openCinematicPromptModal('simple');
+        });
+        (this.root.querySelector('[data-act="cinematic-open-complex-prompt"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.openCinematicPromptModal('complex');
+        });
+        (this.root.querySelector('[data-act="cinematic-open-keyframe-editor"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.openCinematicKeyframeEditor();
+        });
+        (this.root.querySelector('[data-act="cinematic-open-shot-editor"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.openCinematicShotEditor();
+        });
+        (this.root.querySelector('[data-act="cinematic-open-bgm"]') as HTMLButtonElement).addEventListener('click', () => {
+            void this.openCinematicBgmModal().catch((error) => this.setCinematicStatus(`Open BGM failed: ${String(error)}`));
+        });
+        (this.root.querySelector('[data-act="cinematic-keyframe-editor-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicKeyframeModal.classList.add('hidden');
+        });
+        (this.root.querySelector('[data-act="cinematic-shot-editor-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicShotModal.classList.add('hidden');
+        });
+        (this.root.querySelector('[data-act="cinematic-toggle-pois"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicPoiExpanded = !this.cinematicPoiExpanded;
+            this.renderCinematicPoiList();
+        });
+        this.cinematicMiniToggleBtn.addEventListener('click', () => {
+            this.cinematicMiniMode = !this.cinematicMiniMode;
+            this.syncCinematicChrome();
+            this.renderCinematicTimeline();
+        });
+        this.cinematicMiniPlayBtn.addEventListener('click', () => {
+            if (this.cinematicPreview.playing) {
+                this.stopCinematicPreview('Preview stopped');
+                if (this.activeCinematicRecording && this.cinematicRecordingSettings.stopWithPlayback) {
+                    void this.stopCinematicRecording(true, 'preview-stopped');
+                }
+            }
+            else void this.startCinematicPreview();
+        });
+        (this.root.querySelector('[data-act="cinematic-workspace-fullscreen"]') as HTMLButtonElement).addEventListener('click', () => {
+            if (!this.cinematicWorkspaceFullscreen) {
+                const left = Number.parseFloat(this.cinematicWorkspacePanel.style.left || '0');
+                const top = Number.parseFloat(this.cinematicWorkspacePanel.style.top || '0');
+                if (Number.isFinite(left) && Number.isFinite(top)) {
+                    this.cinematicWorkspaceFloatPos = { left, top, initialized: true };
+                }
+            }
+            this.cinematicWorkspaceFullscreen = !this.cinematicWorkspaceFullscreen;
+            if (this.cinematicWorkspaceFullscreen) {
+                this.cinematicWorkspacePanel.classList.add('fullscreen');
+                this.cinematicWorkspacePanel.classList.remove('floating');
+                this.cinematicWorkspacePanel.style.left = '';
+                this.cinematicWorkspacePanel.style.top = '';
+            } else {
+                this.cinematicWorkspacePanel.classList.remove('fullscreen');
+                if (this.cinematicWorkspaceFloatPos.initialized) this.pinCinematicWorkspacePanel();
+                else {
+                    this.cinematicWorkspacePanel.classList.remove('floating');
+                    this.cinematicWorkspacePanel.style.left = '';
+                    this.cinematicWorkspacePanel.style.top = '';
+                }
+            }
+        });
+        this.cinematicSimplePromptInput.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicPlannerPromptInput.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicSimplePromptEditor.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicComplexPromptEditor.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicSceneInput.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicStoryInput.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicStyleInput.addEventListener('input', () => this.syncCinematicStateFromInputs());
+        this.cinematicDurationInput.addEventListener('change', () => this.syncCinematicStateFromInputs());
+        this.cinematicPoiListEl.addEventListener('change', () => {
+            const picked = Array.from(this.cinematicPoiListEl.querySelectorAll('[data-role="cinematic-poi-item"]:checked'))
+                .map((item) => String((item as HTMLInputElement).value || ''));
+            this.cinematicSelectedPoiIds = picked;
+            this.renderCinematicPoiList();
+        });
+        this.cinematicMiniTimelineEl.addEventListener('click', (event) => {
+            const metrics = this.cinematicTimelineData();
+            if (!metrics) return;
+            const rect = this.cinematicMiniTimelineEl.getBoundingClientRect();
+            const ratio = clamp((event.clientX - rect.left - 12) / Math.max(1, rect.width - 24), 0, 1);
+            this.scrubCinematicTimeline(metrics.totalDurationSec * ratio, false);
+        });
+        this.cinematicVersionListEl.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button[data-act="cinematic-version-select"]') as HTMLButtonElement | null;
+            if (!button) return;
+            const id = Number(button.getAttribute('data-version-id') || 0);
+            if (!id) return;
+            void this.loadCinematicVersionDetail(id).catch((error) => this.setCinematicStatus(`Load failed: ${String(error)}`));
+        });
+        const promptVersionClick = (event: Event) => {
+            const target = event.target as HTMLElement;
+            const button = target.closest('button[data-act="cinematic-version-select"]') as HTMLButtonElement | null;
+            if (!button) return;
+            const id = Number(button.getAttribute('data-version-id') || 0);
+            if (!id) return;
+            void this.loadCinematicVersionDetail(id).catch((error) => this.setCinematicStatus(`Load failed: ${String(error)}`));
+        };
+        this.cinematicSimpleVersionListEl.addEventListener('click', promptVersionClick);
+        this.cinematicComplexVersionListEl.addEventListener('click', promptVersionClick);
+        this.cinematicTimelineEl.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            if (this.cinematicTimelineScrollbarHit(target, event.clientY)) return;
+            const keyButton = target.closest('button[data-act="cinematic-keyframe-select"]') as HTMLButtonElement | null;
+            if (keyButton) {
+                this.selectedCinematicKeyframeId = String(keyButton.getAttribute('data-keyframe-id') || '');
+                const timeSec = Number(keyButton.getAttribute('data-time-sec') || 0);
+                this.scrubCinematicTimeline(timeSec, true);
+                return;
+            }
+            const bgmButton = target.closest('[data-act="cinematic-bgm-edit"]') as HTMLButtonElement | null;
+            if (bgmButton) {
+                const current = this.cinematicCurrentBgmConfig();
+                if (current?.audioPath) {
+                    void this.cinematicBgmLoadAudio(current.audioPath, current.audioDisplayName).then(() => {
+                        this.setCinematicStatus('BGM loaded from timeline segment');
+                    }).catch((error) => {
+                        this.setCinematicStatus(`Load BGM failed: ${String(error)}`);
+                    });
+                }
+                void this.openCinematicBgmModal().catch((error) => this.setCinematicStatus(`Open BGM failed: ${String(error)}`));
+                return;
+            }
+            const shotButton = target.closest('button[data-act="cinematic-shot-select"]') as HTMLButtonElement | null;
+            if (shotButton) {
+                this.selectedCinematicShotId = String(shotButton.getAttribute('data-shot-id') || '');
+                this.selectedCinematicKeyframeId = this.selectedCinematicShot()?.keyframes[0]?.keyframeId || null;
+                this.refreshCinematicUi();
+                return;
+            }
+            const position = this.cinematicTimelinePosition(event.clientX);
+            if (!position) return;
+            this.scrubCinematicTimeline(position.totalSec * position.ratio, false);
+        });
+        this.cinematicTimelineEl.addEventListener('dblclick', (event) => {
+            const target = event.target as HTMLElement;
+            const keyButton = target.closest('button[data-act="cinematic-keyframe-select"]') as HTMLButtonElement | null;
+            if (keyButton) {
+                this.selectedCinematicKeyframeId = String(keyButton.getAttribute('data-keyframe-id') || '');
+                this.openCinematicKeyframeEditor();
+                return;
+            }
+            const shotButton = target.closest('[data-act="cinematic-shot-select"]') as HTMLDivElement | null;
+            if (shotButton) {
+                this.selectedCinematicShotId = String(shotButton.getAttribute('data-shot-id') || '');
+                this.selectedCinematicKeyframeId = this.selectedCinematicShot()?.keyframes[0]?.keyframeId || null;
+                this.openCinematicShotEditor();
+            }
+        });
+        this.cinematicTimelineEl.addEventListener('pointerdown', (event) => {
+            const target = event.target as HTMLElement;
+            if (this.cinematicTimelineScrollbarHit(target, event.clientY)) return;
+            const dot = target.closest('button[data-act="cinematic-keyframe-select"]') as HTMLButtonElement | null;
+            if (dot) {
+                this.cinematicTimelineKeyframeDrag = {
+                    active: true,
+                    pointerId: event.pointerId,
+                    keyframeId: String(dot.getAttribute('data-keyframe-id') || ''),
+                    shotId: String(dot.getAttribute('data-shot-id') || '')
+                };
+                this.selectedCinematicKeyframeId = this.cinematicTimelineKeyframeDrag.keyframeId;
+                this.selectedCinematicShotId = this.cinematicTimelineKeyframeDrag.shotId;
+                this.cinematicTimelineEl.setPointerCapture(event.pointerId);
+                return;
+            }
+            this.cinematicTimelineDrag = { active: true, pointerId: event.pointerId };
+            this.cinematicTimelineEl.setPointerCapture(event.pointerId);
+            const position = this.cinematicTimelinePosition(event.clientX);
+            if (!position) return;
+            this.stopCinematicPreview();
+            this.scrubCinematicTimeline(position.totalSec * position.ratio, false);
+        });
+        this.cinematicTimelineEl.addEventListener('pointermove', (event) => {
+            if (this.cinematicTimelineKeyframeDrag.active && event.pointerId === this.cinematicTimelineKeyframeDrag.pointerId) {
+                const position = this.cinematicTimelinePosition(event.clientX);
+                if (!position) return;
+                const targetSec = position.totalSec * position.ratio;
+                this.updateKeyframeTimeByGlobalTime(this.cinematicTimelineKeyframeDrag.shotId, this.cinematicTimelineKeyframeDrag.keyframeId, targetSec);
+                this.scrubCinematicTimeline(targetSec, false);
+                return;
+            }
+            if (!this.cinematicTimelineDrag.active || event.pointerId !== this.cinematicTimelineDrag.pointerId) return;
+            const position = this.cinematicTimelinePosition(event.clientX);
+            if (!position) return;
+            this.scrubCinematicTimeline(position.totalSec * position.ratio, false);
+        });
+        const endCinematicTimelineDrag = (event: PointerEvent) => {
+            if (this.cinematicTimelineKeyframeDrag.active && event.pointerId === this.cinematicTimelineKeyframeDrag.pointerId) {
+                this.cinematicTimelineKeyframeDrag = { active: false, pointerId: -1, keyframeId: '', shotId: '' };
+                if (this.cinematicTimelineEl.hasPointerCapture(event.pointerId)) this.cinematicTimelineEl.releasePointerCapture(event.pointerId);
+                return;
+            }
+            if (!this.cinematicTimelineDrag.active || event.pointerId !== this.cinematicTimelineDrag.pointerId) return;
+            this.cinematicTimelineDrag.active = false;
+            if (this.cinematicTimelineEl.hasPointerCapture(event.pointerId)) this.cinematicTimelineEl.releasePointerCapture(event.pointerId);
+        };
+        this.cinematicTimelineEl.addEventListener('pointerup', endCinematicTimelineDrag);
+        this.cinematicTimelineEl.addEventListener('pointercancel', endCinematicTimelineDrag);
+        const cinematicEditorClick = (event: Event) => {
+            const target = event.target as HTMLElement;
+            const speechBtn = target.closest('button[data-act="cinematic-shot-play-speech"]') as HTMLButtonElement | null;
+            if (speechBtn) {
+                const shotId = String(speechBtn.getAttribute('data-shot-id') || '');
+                if (!shotId) return;
+                void this.previewCinematicShotSpeech(shotId).catch((error) => {
+                    this.stopCinematicSpeechPreview();
+                    this.renderCinematicKeyframeList();
+                    this.setCinematicStatus(`Speech preview failed: ${String(error)}`);
+                });
+                return;
+            }
+            const mediaBtn = target.closest('button[data-act^="cinematic-kf-media-"]') as HTMLButtonElement | null;
+            if (mediaBtn) {
+                const keyframeId = String(mediaBtn.getAttribute('data-keyframe-id') || this.selectedCinematicKeyframeId || '');
+                const shot = this.cinematicPlan?.shots.find((item) => item.keyframes.some((kf) => kf.keyframeId === keyframeId)) || null;
+                const keyframe = shot?.keyframes.find((item) => item.keyframeId === keyframeId) || null;
+                if (!keyframe) return;
+                const act = String(mediaBtn.getAttribute('data-act') || '');
+                if (act === 'cinematic-kf-media-choose-video') {
+                    this.cinematicMediaFileTargetKeyframeId = keyframeId;
+                    this.cinematicMediaFileInput.click();
+                    return;
+                }
+                if (act === 'cinematic-kf-media-pick-main') {
+                    this.startCinematicMediaPick(keyframeId);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-toggle-editor') {
+                    if (this.cinematicMediaEditor.active) this.closeCinematicMediaEditor('3D object edit exited');
+                    else this.openCinematicMediaEditor(keyframeId);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-mode-move') {
+                    if (!this.cinematicMediaEditor.active) this.openCinematicMediaEditor(keyframeId);
+                    this.cinematicMediaEditor.mode = 'move';
+                    this.renderCinematicKeyframeList();
+                    this.setCinematicStatus('3D object mode: MOVE');
+                    this.logDebug('cw.media.edit', `ui mode=move active=${this.cinematicMediaEditor.active}`);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-mode-rotate') {
+                    if (!this.cinematicMediaEditor.active) this.openCinematicMediaEditor(keyframeId);
+                    this.cinematicMediaEditor.mode = 'rotate';
+                    this.renderCinematicKeyframeList();
+                    this.setCinematicStatus('3D object mode: ROTATE');
+                    this.logDebug('cw.media.edit', `ui mode=rotate active=${this.cinematicMediaEditor.active}`);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-mode-scale') {
+                    if (!this.cinematicMediaEditor.active) this.openCinematicMediaEditor(keyframeId);
+                    this.cinematicMediaEditor.mode = 'scale';
+                    this.renderCinematicKeyframeList();
+                    this.setCinematicStatus('3D object mode: SCALE');
+                    this.logDebug('cw.media.edit', `ui mode=scale active=${this.cinematicMediaEditor.active}`);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-clear-anchor') {
+                    const media = this.ensureKeyframeMediaOverride(keyframe);
+                    media.anchorWorld = null;
+                    this.renderCinematicKeyframeList();
+                    this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-remove') {
+                    this.stopCinematicPreview();
+                    this.closeCinematicMediaEditor();
+                    const cleared = this.removeMediaObjectFromKeyframeForward(keyframeId);
+                    const removeTime = this.cinematicGlobalTimeForKeyframe(keyframeId);
+                    if (Number.isFinite(removeTime)) {
+                        this.scrubCinematicTimeline(removeTime as number, true);
+                    } else {
+                        this.renderCinematicKeyframeList();
+                        this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                    }
+                    this.options.showEmbeddedMedia?.(null);
+                    this.logDebug('cw.media.remove.scope', `from=${this.cinematicLabelForKeyframeId(keyframeId)} startIndex=${cleared.startIndex}`);
+                    this.logDebug('cw.media.remove.clearedCount', `cleared=${cleared.cleared}`);
+                    this.logDebug('cw.media.remove', `remove keyframe=${keyframeId} time=${removeTime ?? 'unknown'} immediate=true`);
+                    this.setCinematicStatus(`3D media removed from ${this.cinematicLabelForKeyframeId(keyframeId)} onward (${cleared.cleared} keyframes)`);
+                    return;
+                }
+                if (act === 'cinematic-kf-media-align-view') {
+                    const media = this.ensureKeyframeMediaOverride(keyframe);
+                    if (!media.anchorWorld) {
+                        media.anchorWorld = { x: keyframe.x, y: keyframe.y, z: keyframe.z };
+                    }
+                    const orientation = this.cinematicMediaOrientationFromCurrentView(media.anchorWorld);
+                    media.yaw = orientation.yaw;
+                    media.pitch = orientation.pitch;
+                    media.roll = 0;
+                    this.renderCinematicKeyframeList();
+                    this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                    this.setCinematicStatus('3D media aligned to current camera view');
+                    return;
+                }
+                if (act === 'cinematic-kf-media-reset-inherit') {
+                    keyframe.mediaObject = null;
+                    this.renderCinematicKeyframeList();
+                    this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                    return;
+                }
+            }
+            const button = target.closest('button[data-act="cinematic-keyframe-select"]') as HTMLButtonElement | null;
+            if (!button) return;
+            const nextKeyframeId = String(button.getAttribute('data-keyframe-id') || '');
+            if (this.cinematicMediaEditor.active && this.cinematicMediaEditor.keyframeId !== nextKeyframeId) {
+                this.closeCinematicMediaEditor('3D object edit exited due to keyframe change');
+            }
+            this.selectedCinematicKeyframeId = nextKeyframeId;
+            const metrics = this.cinematicTimelineData();
+            const selected = metrics?.keyframes.find((item) => item.keyframe.keyframeId === this.selectedCinematicKeyframeId);
+            if (selected) this.scrubCinematicTimeline(selected.globalTimeSec, true);
+            else {
+                this.drawViews();
+                this.renderCinematicKeyframeList();
+            }
+        };
+        this.cinematicKeyframeModal.addEventListener('click', cinematicEditorClick);
+        this.cinematicKeyframeEditorBodyEl.addEventListener('click', cinematicEditorClick);
+        this.cinematicShotEditorBodyEl.addEventListener('click', cinematicEditorClick);
+        const cinematicEditorChange = (event: Event) => {
+            const target = event.target as HTMLInputElement | HTMLTextAreaElement;
+            const act = String(target.getAttribute('data-act') || '');
+            const shotId = String(target.getAttribute('data-shot-id') || '');
+            const shot = this.cinematicPlan?.shots.find((item) => item.shotId === shotId)
+                || this.cinematicPlan?.shots.find((item) => item.keyframes.some((kf) => kf.keyframeId === String(target.getAttribute('data-keyframe-id') || '')));
+            if (!shot) return;
+            if (act === 'cinematic-shot-speech-match') {
+                shot.speechMatchEnabled = (target as HTMLInputElement).checked && Boolean(shot.speechMetrics?.charsPerSecond);
+                this.updateShotDurationFromSpeechMatch(shot);
+                this.renderCinematicTimeline();
+                this.renderCinematicKeyframeList();
+                return;
+            }
+            if (act === 'cinematic-shot-duration') {
+                shot.durationSec = Math.max(1, Number(target.value) || shot.durationSec);
+                this.drawViews();
+                this.renderCinematicTimeline();
+                this.renderCinematicKeyframeList();
+                this.renderCinematicMap();
+                return;
+            }
+            if (act === 'cinematic-shot-speech') {
+                shot.speechText = target.value.trim();
+                shot.speechAudioUrl = null;
+                this.applyStoredSpeechTimingToShot(shot);
+                this.updateShotDurationFromSpeechMatch(shot);
+                this.renderCinematicTimeline();
+                this.renderCinematicKeyframeList();
+                return;
+            }
+            if (act === 'cinematic-shot-speech-mode') {
+                shot.speechMode = String((target as unknown as HTMLSelectElement).value || 'INTERRUPTIBLE') === 'BLOCKING' ? 'BLOCKING' : 'INTERRUPTIBLE';
+                this.renderCinematicKeyframeList();
+                return;
+            }
+            if (act === 'cinematic-shot-tts-voice') {
+                const value = String((target as unknown as HTMLSelectElement).value || DEFAULT_TTS_VOICE);
+                const ttsModel = this.resolveShotSpeechTtsConfig(shot).model;
+                shot.speechMetrics = { ...shot.speechMetrics, ttsModel, ttsVoice: value, updatedAt: new Date().toISOString() };
+                shot.speechAudioUrl = null;
+                if (this.cinematicSpeechPlayingShotId === shot.shotId) this.stopCinematicSpeechPreview();
+                this.renderCinematicKeyframeList();
+                return;
+            }
+            const keyframeId = String(target.getAttribute('data-keyframe-id') || '');
+            const keyframe = shot.keyframes.find((kf) => kf.keyframeId === keyframeId);
+            if (!keyframe) return;
+            if (act.startsWith('cinematic-kf-media-')) {
+                const media = this.ensureKeyframeMediaOverride(keyframe);
+                if (act === 'cinematic-kf-media-enabled') media.enabled = (target as HTMLInputElement).checked;
+                if (act === 'cinematic-kf-media-scale') media.scale = clamp(Number(target.value) || media.scale, 0.1, 120);
+                if (act === 'cinematic-kf-media-yaw') media.yaw = Number(target.value) || 0;
+                if (act === 'cinematic-kf-media-pitch') media.pitch = Number(target.value) || 0;
+                if (act === 'cinematic-kf-media-roll') media.roll = Number(target.value) || 0;
+                if (act === 'cinematic-kf-media-depth') media.depthOffset = clamp(Number(target.value) || media.depthOffset, -2, 2);
+                if (act === 'cinematic-kf-media-anchor-x' || act === 'cinematic-kf-media-anchor-y' || act === 'cinematic-kf-media-anchor-z') {
+                    const base = media.anchorWorld || { x: keyframe.x, y: keyframe.y, z: keyframe.z };
+                    const value = Number(target.value);
+                    if (Number.isFinite(value)) {
+                        media.anchorWorld = {
+                            x: act === 'cinematic-kf-media-anchor-x' ? value : base.x,
+                            y: act === 'cinematic-kf-media-anchor-y' ? value : base.y,
+                            z: act === 'cinematic-kf-media-anchor-z' ? value : base.z
+                        };
+                    }
+                }
+                this.renderCinematicKeyframeList();
+                this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                return;
+            }
+            if (act === 'cinematic-kf-x') keyframe.x = Number(target.value) || keyframe.x;
+            if (act === 'cinematic-kf-y') keyframe.y = Number(target.value) || keyframe.y;
+            if (act === 'cinematic-kf-z') keyframe.z = Number(target.value) || keyframe.z;
+            if (act === 'cinematic-kf-yaw') keyframe.yaw = Number(target.value) || keyframe.yaw;
+            if (act === 'cinematic-kf-pitch') keyframe.pitch = Number(target.value) || keyframe.pitch;
+            if (act === 'cinematic-kf-fov') keyframe.fov = clampFov(Number(target.value), keyframe.fov);
+            if (act === 'cinematic-kf-speed') keyframe.moveSpeedMps = Math.max(0.1, Number(target.value) || keyframe.moveSpeedMps);
+            this.drawViews();
+            this.renderCinematicTimeline();
+            this.renderCinematicKeyframeList();
+            this.renderCinematicMap();
+        };
+        this.cinematicKeyframeEditorBodyEl.addEventListener('change', cinematicEditorChange);
+        this.cinematicShotEditorBodyEl.addEventListener('change', cinematicEditorChange);
+        (this.root.querySelector('[data-act="cinematic-delete-keyframe"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.deleteSelectedCinematicKeyframe();
+        });
+        (this.root.querySelector('[data-act="cinematic-top-center"]') as HTMLButtonElement).addEventListener('click', () => { this.topView.offsetX = 0; this.topView.offsetY = 0; this.renderCinematicMap(); });
+        (this.root.querySelector('[data-act="cinematic-front-center"]') as HTMLButtonElement).addEventListener('click', () => { this.frontView.offsetX = 0; this.frontView.offsetY = 0; this.renderCinematicMap(); });
+        (this.root.querySelector('[data-act="cinematic-top-zoom-in"]') as HTMLButtonElement).addEventListener('click', () => { this.topView.zoom = clamp(this.topView.zoom * 1.15, 0.5, 5); this.renderCinematicMap(); });
+        (this.root.querySelector('[data-act="cinematic-top-zoom-out"]') as HTMLButtonElement).addEventListener('click', () => { this.topView.zoom = clamp(this.topView.zoom / 1.15, 0.5, 5); this.renderCinematicMap(); });
+        (this.root.querySelector('[data-act="cinematic-front-zoom-in"]') as HTMLButtonElement).addEventListener('click', () => { this.frontView.zoom = clamp(this.frontView.zoom * 1.15, 0.5, 5); this.renderCinematicMap(); });
+        (this.root.querySelector('[data-act="cinematic-front-zoom-out"]') as HTMLButtonElement).addEventListener('click', () => { this.frontView.zoom = clamp(this.frontView.zoom / 1.15, 0.5, 5); this.renderCinematicMap(); });
+        (this.root.querySelector('[data-act="cinematic-toggle-route"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicShowRouteOverlay = !this.cinematicShowRouteOverlay;
+            this.syncCinematicChrome();
+            this.renderCinematicMap();
+        });
+        (this.root.querySelector('[data-act="cinematic-timeline-zoom-in"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond + 20, 80, 260);
+            const input = this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
+            if (input) input.value = String(this.cinematicTimelinePixelsPerSecond);
+            this.renderCinematicTimeline();
+        });
+        (this.root.querySelector('[data-act="cinematic-timeline-zoom-out"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond - 20, 80, 260);
+            const input = this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
+            if (input) input.value = String(this.cinematicTimelinePixelsPerSecond);
+            this.renderCinematicTimeline();
+        });
+        (this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement).addEventListener('input', (event) => {
+            this.cinematicTimelinePixelsPerSecond = clamp(Number((event.target as HTMLInputElement).value) || this.cinematicTimelinePixelsPerSecond, 80, 260);
+            this.renderCinematicTimeline();
+        });
+        this.cinematicWorkspaceModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicWorkspaceModal) {
+                this.closeCinematicWorkspace();
+            }
+        });
+        this.cinematicBgmModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicBgmModal) this.closeCinematicBgmModal();
+        });
+        (this.root.querySelector('[data-act="cinematic-bgm-close"]') as HTMLButtonElement).addEventListener('click', () => this.closeCinematicBgmModal());
+        (this.root.querySelector('[data-act="cinematic-bgm-browse-folder"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicBgmFolderInput.click();
+        });
+        (this.root.querySelector('[data-act="cinematic-bgm-browse-files"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicBgmFileInput.click();
+        });
+        this.cinematicBgmSearchInput.addEventListener('input', () => {
+            this.cinematicBgmFilter = this.cinematicBgmSearchInput.value;
+            this.cinematicBgmRenderLibrary();
+        });
+        this.cinematicBgmLibraryEl.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            const itemBtn = target.closest('button[data-act="cinematic-bgm-select-item"]') as HTMLButtonElement | null;
+            if (!itemBtn) return;
+            const audioPath = String(itemBtn.getAttribute('data-audio-path') || '').trim();
+            if (!audioPath) return;
+            const item = this.cinematicBgmLibrary.find((row) => row.audioPath === audioPath) || null;
+            if (!item) return;
+            void this.cinematicBgmLoadAudio(item.audioPath, item.name).catch((error) => {
+                this.setCinematicStatus(`Load BGM failed: ${String(error)}`);
+            });
+        });
+        const absorbBgmFiles = (files: File[], source: 'folder' | 'path') => {
+            const audioFiles = files.filter((file) => file.type.startsWith('audio/') || isAudioFileName(file.name));
+            if (audioFiles.length < 1) {
+                this.setCinematicStatus('No audio files found');
+                return;
+            }
+            const newItems: CinematicBgmLibraryItem[] = audioFiles.map((file, idx) => {
+                const audioPath = String(file.webkitRelativePath || file.name || `audio-${Date.now()}-${idx}`);
+                const audioUrl = URL.createObjectURL(file);
+                this.cinematicBgmObjectUrls.push(audioUrl);
+                return {
+                    id: `${Date.now().toString(36)}_${idx}`,
+                    name: file.name,
+                    audioPath,
+                    audioUrl,
+                    source
+                };
+            });
+            const map = new Map<string, CinematicBgmLibraryItem>();
+            [...newItems, ...this.cinematicBgmLibrary].forEach((item) => {
+                if (!map.has(item.audioPath)) map.set(item.audioPath, item);
+            });
+            this.cinematicBgmLibrary = Array.from(map.values());
+            this.cinematicBgmRenderLibrary();
+            const first = newItems[0];
+            if (first) {
+                void this.cinematicBgmLoadAudio(first.audioPath, first.name).catch((error) => {
+                    this.setCinematicStatus(`Load BGM failed: ${String(error)}`);
+                });
+            }
+        };
+        this.cinematicBgmFolderInput.addEventListener('change', () => {
+            absorbBgmFiles(Array.from(this.cinematicBgmFolderInput.files || []), 'folder');
+            this.cinematicBgmFolderInput.value = '';
+        });
+        this.cinematicBgmFileInput.addEventListener('change', () => {
+            absorbBgmFiles(Array.from(this.cinematicBgmFileInput.files || []), 'folder');
+            this.cinematicBgmFileInput.value = '';
+        });
+        this.cinematicMediaFileInput.addEventListener('change', () => {
+            const file = this.cinematicMediaFileInput.files?.[0];
+            const keyframeId = this.cinematicMediaFileTargetKeyframeId;
+            this.cinematicMediaFileInput.value = '';
+            this.cinematicMediaFileTargetKeyframeId = '';
+            if (!file || !keyframeId) return;
+            const shot = this.cinematicPlan?.shots.find((item) => item.keyframes.some((kf) => kf.keyframeId === keyframeId)) || null;
+            const keyframe = shot?.keyframes.find((item) => item.keyframeId === keyframeId) || null;
+            if (!keyframe) return;
+            void this.uploadCinematicMediaFile(file).then((asset) => {
+                const media = this.ensureKeyframeMediaOverride(keyframe);
+                media.enabled = true;
+                media.src = asset.src;
+                media.fileName = asset.fileName;
+                media.placeholder = false;
+                media.placeholderLabel = '';
+                let propagated = 0;
+                this.cinematicPlan?.shots.forEach((shotRow) => {
+                    shotRow.keyframes.forEach((kfRow) => {
+                        const rowMedia = kfRow.mediaObject ? normalizeCwMediaObjectConfig(kfRow.mediaObject) : null;
+                        if (!rowMedia?.enabled) return;
+                        const sameAnchor = rowMedia.anchorWorld && media.anchorWorld
+                            ? Math.abs(rowMedia.anchorWorld.x - media.anchorWorld.x) < 0.01
+                                && Math.abs(rowMedia.anchorWorld.y - media.anchorWorld.y) < 0.01
+                                && Math.abs(rowMedia.anchorWorld.z - media.anchorWorld.z) < 0.01
+                            : false;
+                        if (kfRow.keyframeId !== keyframeId && rowMedia.placeholder && !rowMedia.src && sameAnchor) {
+                            rowMedia.src = asset.src;
+                            rowMedia.fileName = asset.fileName;
+                            rowMedia.placeholder = false;
+                            rowMedia.placeholderLabel = '';
+                            kfRow.mediaObject = rowMedia;
+                            propagated += 1;
+                        }
+                    });
+                });
+                this.renderCinematicKeyframeList();
+                this.applyCwMediaForTime(this.cinematicCurrentTimeSec);
+                this.logDebug('cw.media.file', `loaded fileName=${asset.fileName} src=${asset.src} keyframe=${keyframeId} propagated=${propagated}`);
+                this.setCinematicStatus(`Loaded media file ${asset.fileName}`);
+            }).catch((error) => {
+                this.logDebug('cw.media.file', `upload failed keyframe=${keyframeId} error=${String(error)}`);
+                this.setCinematicStatus(`Video upload failed: ${String(error)}`);
+            });
+        });
+        this.cinematicBgmPlayerBtn.addEventListener('click', () => {
+            const audio = this.cinematicBgmPreviewAudio;
+            if (!audio) return;
+            if (audio.paused) {
+                audio.playbackRate = clampMusicRate(Number(this.cinematicBgmRateInput.value) || 1);
+                void audio.play().then(() => {
+                    this.cinematicBgmClipPreviewPlaying = false;
+                    this.cinematicBgmPlayerBtn.textContent = 'Pause';
+                    if (!this.cinematicBgmPreviewRaf) this.cinematicBgmPreviewRaf = window.requestAnimationFrame(this.cinematicBgmPreviewTick);
+                }).catch((error) => this.setCinematicStatus(`Preview failed: ${String(error)}`));
+            } else {
+                audio.pause();
+                this.cinematicBgmPlayerBtn.textContent = 'Play';
+            }
+        });
+        this.cinematicBgmRateInput.addEventListener('change', () => {
+            if (this.cinematicBgmPreviewAudio) this.cinematicBgmPreviewAudio.playbackRate = clampMusicRate(Number(this.cinematicBgmRateInput.value) || 1);
+        });
+        this.cinematicBgmProgressInput.addEventListener('input', () => {
+            const audio = this.cinematicBgmPreviewAudio;
+            if (!audio || this.cinematicBgmAudioDurationSec <= 0) return;
+            const ratio = clamp(Number(this.cinematicBgmProgressInput.value) / 1000, 0, 1);
+            audio.currentTime = ratio * this.cinematicBgmAudioDurationSec;
+            this.cinematicBgmTimeEl.textContent = `${formatSecondsLabel(audio.currentTime)} / ${formatSecondsLabel(this.cinematicBgmAudioDurationSec)}`;
+            this.cinematicBgmRenderWaveform();
+        });
+        this.cinematicBgmStartInput.addEventListener('change', () => {
+            this.cinematicBgmSyncSelectionFromInputs();
+            this.cinematicBgmRenderWaveform();
+            this.cinematicBgmUpdateEffectiveRate();
+        });
+        this.cinematicBgmEndInput.addEventListener('change', () => {
+            this.cinematicBgmSyncSelectionFromInputs();
+            this.cinematicBgmRenderWaveform();
+            this.cinematicBgmUpdateEffectiveRate();
+        });
+        this.cinematicBgmManualRateInput.addEventListener('change', () => {
+            this.cinematicBgmSyncSelectionFromInputs();
+            this.cinematicBgmUpdateEffectiveRate();
+        });
+        this.cinematicBgmTargetDurationInput.addEventListener('change', () => {
+            this.cinematicBgmSyncSelectionFromInputs();
+            this.cinematicBgmUpdateEffectiveRate();
+        });
+        this.cinematicBgmClipPlayBtn.addEventListener('click', () => {
+            const audio = this.cinematicBgmPreviewAudio;
+            if (!audio || !this.cinematicBgmSelection) return;
+            if (!audio.paused && this.cinematicBgmClipPreviewPlaying) {
+                audio.pause();
+                this.cinematicBgmClipPreviewPlaying = false;
+                this.cinematicBgmClipPlayBtn.textContent = 'Play Clip';
+                this.cinematicBgmPlayerBtn.textContent = 'Play';
+                return;
+            }
+            this.cinematicBgmSyncSelectionFromInputs();
+            const rate = clampMusicRate(Number(this.cinematicBgmRateInput.value) || 1);
+            audio.playbackRate = rate;
+            audio.currentTime = this.cinematicBgmSelection.audioStartSeconds;
+            this.cinematicBgmClipPreviewPlaying = true;
+            this.cinematicBgmClipPlayBtn.textContent = 'Stop Clip';
+            this.cinematicBgmPlayerBtn.textContent = 'Pause';
+            audio.onended = () => {
+                this.cinematicBgmClipPreviewPlaying = false;
+                this.cinematicBgmClipPlayBtn.textContent = 'Play Clip';
+                this.cinematicBgmPlayerBtn.textContent = 'Play';
+            };
+            audio.ontimeupdate = () => {
+                if (!this.cinematicBgmSelection || !this.cinematicBgmClipPreviewPlaying) return;
+                if (audio.currentTime >= this.cinematicBgmSelection.audioEndSeconds) {
+                    audio.pause();
+                    this.cinematicBgmClipPreviewPlaying = false;
+                    this.cinematicBgmClipPlayBtn.textContent = 'Play Clip';
+                    this.cinematicBgmPlayerBtn.textContent = 'Play';
+                }
+            };
+            void audio.play().catch((error) => this.setCinematicStatus(`Clip preview failed: ${String(error)}`));
+            if (!this.cinematicBgmPreviewRaf) this.cinematicBgmPreviewRaf = window.requestAnimationFrame(this.cinematicBgmPreviewTick);
+        });
+        this.cinematicBgmRecommendBtn.addEventListener('click', () => {
+            this.cinematicBgmSyncSelectionFromInputs();
+            this.cinematicBgmRecommendClip();
+        });
+        (this.root.querySelector('[data-act="cinematic-bgm-apply"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.cinematicBgmSyncSelectionFromInputs();
+            const current = this.cinematicBgmSelection;
+            if (!current || !String(current.audioPath || '').trim()) {
+                this.setCinematicStatus('Please select an audio track first');
+                return;
+            }
+            if (current.audioEndSeconds <= current.audioStartSeconds) {
+                this.setCinematicStatus('Audio clip end must be greater than start');
+                return;
+            }
+            current.audioPlaybackRate = cinematicBgmEffectiveRate(current);
+            this.cinematicBgmApplyConfig(current);
+            this.refreshCinematicUi();
+            this.closeCinematicBgmModal();
+            this.setCinematicStatus('BGM applied to timeline');
+        });
+        const waveToSec = (clientX: number) => {
+            const rect = this.cinematicBgmWaveCanvas.getBoundingClientRect();
+            const ratio = clamp((clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+            return ratio * Math.max(0.001, this.cinematicBgmAudioDurationSec || 0.001);
+        };
+        this.cinematicBgmWaveCanvas.addEventListener('pointerdown', (event) => {
+            if (!this.cinematicBgmSelection || this.cinematicBgmAudioDurationSec <= 0) return;
+            const sec = waveToSec(event.clientX);
+            const start = this.cinematicBgmSelection.audioStartSeconds;
+            const end = this.cinematicBgmSelection.audioEndSeconds;
+            const handleSec = Math.max(0.06, this.cinematicBgmAudioDurationSec / this.cinematicBgmWaveCanvas.width * 6);
+            let mode: 'range' | 'start' | 'end' = 'range';
+            if (Math.abs(sec - start) <= handleSec) mode = 'start';
+            else if (Math.abs(sec - end) <= handleSec) mode = 'end';
+            this.cinematicBgmWaveDrag = { active: true, pointerId: event.pointerId, mode, anchorSec: sec };
+            this.cinematicBgmWaveCanvas.setPointerCapture(event.pointerId);
+            if (mode === 'range') {
+                this.cinematicBgmSelection.audioStartSeconds = sec;
+                this.cinematicBgmSelection.audioEndSeconds = sec;
+                this.cinematicBgmStartInput.value = sec.toFixed(3);
+                this.cinematicBgmEndInput.value = sec.toFixed(3);
+                this.cinematicBgmRenderWaveform();
+            }
+        });
+        this.cinematicBgmWaveCanvas.addEventListener('pointermove', (event) => {
+            if (!this.cinematicBgmWaveDrag.active || event.pointerId !== this.cinematicBgmWaveDrag.pointerId || !this.cinematicBgmSelection) return;
+            const sec = waveToSec(event.clientX);
+            if (this.cinematicBgmWaveDrag.mode === 'start') {
+                this.cinematicBgmSelection.audioStartSeconds = clamp(sec, 0, this.cinematicBgmSelection.audioEndSeconds - 0.01);
+            } else if (this.cinematicBgmWaveDrag.mode === 'end') {
+                this.cinematicBgmSelection.audioEndSeconds = clamp(sec, this.cinematicBgmSelection.audioStartSeconds + 0.01, this.cinematicBgmAudioDurationSec);
+            } else {
+                this.cinematicBgmSelection.audioStartSeconds = Math.min(this.cinematicBgmWaveDrag.anchorSec, sec);
+                this.cinematicBgmSelection.audioEndSeconds = Math.max(this.cinematicBgmWaveDrag.anchorSec, sec);
+            }
+            this.cinematicBgmStartInput.value = this.cinematicBgmSelection.audioStartSeconds.toFixed(3);
+            this.cinematicBgmEndInput.value = this.cinematicBgmSelection.audioEndSeconds.toFixed(3);
+            this.cinematicBgmRenderWaveform();
+            this.cinematicBgmUpdateEffectiveRate();
+        });
+        const endWaveDrag = (event: PointerEvent) => {
+            if (!this.cinematicBgmWaveDrag.active || event.pointerId !== this.cinematicBgmWaveDrag.pointerId) return;
+            this.cinematicBgmWaveDrag = { active: false, pointerId: -1, mode: 'range', anchorSec: 0 };
+            if (this.cinematicBgmWaveCanvas.hasPointerCapture(event.pointerId)) this.cinematicBgmWaveCanvas.releasePointerCapture(event.pointerId);
+        };
+        this.cinematicBgmWaveCanvas.addEventListener('pointerup', endWaveDrag);
+        this.cinematicBgmWaveCanvas.addEventListener('pointercancel', endWaveDrag);
+        const bindPromptModal = (modal: HTMLDivElement, kind: 'simple' | 'complex') => {
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) this.closeCinematicPromptModal(kind);
+            });
+        };
+        bindPromptModal(this.cinematicSimplePromptModal, 'simple');
+        bindPromptModal(this.cinematicComplexPromptModal, 'complex');
+        (this.root.querySelector('[data-act="cinematic-simple-prompt-close"]') as HTMLButtonElement).addEventListener('click', () => this.closeCinematicPromptModal('simple'));
+        (this.root.querySelector('[data-act="cinematic-complex-prompt-close"]') as HTMLButtonElement).addEventListener('click', () => this.closeCinematicPromptModal('complex'));
+        (this.root.querySelector('[data-act="cinematic-simple-prompt-cancel"]') as HTMLButtonElement).addEventListener('click', () => this.closeCinematicPromptModal('simple'));
+        (this.root.querySelector('[data-act="cinematic-complex-prompt-cancel"]') as HTMLButtonElement).addEventListener('click', () => this.closeCinematicPromptModal('complex'));
+        (this.root.querySelector('[data-act="cinematic-simple-prompt-update"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.syncCinematicStateFromInputs();
+            this.closeCinematicPromptModal('simple');
+        });
+        (this.root.querySelector('[data-act="cinematic-complex-prompt-update"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.syncCinematicStateFromInputs();
+            this.closeCinematicPromptModal('complex');
+        });
+        (this.root.querySelector('[data-act="cinematic-simple-prompt-save-new"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.syncCinematicStateFromInputs();
+            void this.saveCinematicVersion(true).then(() => this.closeCinematicPromptModal('simple')).catch((error) => this.setCinematicStatus(`Save version failed: ${String(error)}`));
+        });
+        (this.root.querySelector('[data-act="cinematic-complex-prompt-save-new"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.syncCinematicStateFromInputs();
+            void this.saveCinematicVersion(true).then(() => this.closeCinematicPromptModal('complex')).catch((error) => this.setCinematicStatus(`Save version failed: ${String(error)}`));
+        });
+        const bindCinematicCanvas = (canvas: HTMLCanvasElement, mode: 'top' | 'front') => {
+            const centerHitRadius = 14;
+            const handleHitRadius = 14;
+            canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+            canvas.addEventListener('pointerdown', (event) => {
+                if (!this.cinematicWorkspaceOpen()) return;
+                const p = mapPointer(canvas, event);
+                if (event.button === 2) {
+                    this.drag = { active: true, pointerId: event.pointerId, mode: mode === 'top' ? 'top-pan' : 'front-pan', startX: p.x, startY: p.y };
+                    canvas.setPointerCapture(event.pointerId);
+                    return;
+                }
+                if (event.button !== 0) return;
+                const keyframe = this.selectedCinematicKeyframe();
+                if (!keyframe) return;
+                if (mode === 'top') {
+                    const c = this.projectTopForCanvas(canvas, keyframe.x, keyframe.z);
+                    const yawR = degToRad(keyframe.yaw);
+                    const hx = c.x + Math.sin(yawR) * 18;
+                    const hy = c.y + Math.cos(yawR) * 18;
+                    if (Math.hypot(hx - p.x, hy - p.y) < handleHitRadius) {
+                        this.drag = { active: true, pointerId: event.pointerId, mode: 'top-yaw', startX: p.x, startY: p.y };
+                        canvas.setPointerCapture(event.pointerId);
+                        return;
+                    }
+                    if (Math.hypot(c.x - p.x, c.y - p.y) >= centerHitRadius) return;
+                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
+                    canvas.setPointerCapture(event.pointerId);
+                } else {
+                    const c = this.projectFrontForCanvas(canvas, keyframe.x, keyframe.y + this.eyeHeightM);
+                    const pitchR = degToRad(keyframe.pitch);
+                    const hx = c.x + Math.cos(pitchR) * 18;
+                    const hy = c.y - Math.sin(pitchR) * 18;
+                    if (Math.hypot(hx - p.x, hy - p.y) < handleHitRadius) {
+                        this.drag = { active: true, pointerId: event.pointerId, mode: 'front-pitch', startX: p.x, startY: p.y };
+                        canvas.setPointerCapture(event.pointerId);
+                        return;
+                    }
+                    if (Math.hypot(c.x - p.x, c.y - p.y) >= centerHitRadius) return;
+                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
+                    canvas.setPointerCapture(event.pointerId);
+                }
+            });
+            canvas.addEventListener('pointermove', (event) => {
+                if (!this.drag.active || event.pointerId !== this.drag.pointerId) return;
+                const p = mapPointer(canvas, event);
+                if (this.drag.mode === 'top-pan') {
+                    this.topView.offsetX += p.x - this.drag.startX;
+                    this.topView.offsetY += p.y - this.drag.startY;
+                    this.drag.startX = p.x; this.drag.startY = p.y;
+                } else if (this.drag.mode === 'front-pan') {
+                    this.frontView.offsetX += p.x - this.drag.startX;
+                    this.frontView.offsetY += p.y - this.drag.startY;
+                    this.drag.startX = p.x; this.drag.startY = p.y;
+                } else {
+                    const keyframe = this.selectedCinematicKeyframe();
+                    if (!keyframe) return;
+                    if (this.drag.mode === 'top-yaw') {
+                        const c = this.projectTopForCanvas(canvas, keyframe.x, keyframe.z);
+                        keyframe.yaw = Math.atan2(p.x - c.x, p.y - c.y) * 180 / Math.PI;
+                    } else if (this.drag.mode === 'front-pitch') {
+                        const c = this.projectFrontForCanvas(canvas, keyframe.x, keyframe.y + this.eyeHeightM);
+                        keyframe.pitch = Math.atan2(-(p.y - c.y), p.x - c.x) * 180 / Math.PI;
+                    } else if (this.drag.mode === 'front-move' && mode === 'top') {
+                        const world = this.unprojectTopForCanvas(canvas, p.x, p.y);
+                        keyframe.x = world.x;
+                        keyframe.z = world.z;
+                    } else if (this.drag.mode === 'front-move' && mode === 'front') {
+                        const world = this.unprojectFrontForCanvas(canvas, p.x, p.y);
+                        keyframe.x = world.x;
+                        keyframe.y = world.y - this.eyeHeightM;
+                    }
+                }
+                this.renderCinematicMap();
+                this.renderCinematicKeyframeList();
+            });
+            const end = (event: PointerEvent) => {
+                if (!this.drag.active || event.pointerId !== this.drag.pointerId) return;
+                this.drag.active = false;
+                if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
+                this.renderCinematicMap();
+            };
+            canvas.addEventListener('pointerup', end);
+            canvas.addEventListener('pointercancel', end);
+            canvas.addEventListener('wheel', (event) => {
+                event.preventDefault();
+                const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+                if (mode === 'top') this.topView.zoom = clamp(this.topView.zoom * factor, 0.5, 5);
+                else this.frontView.zoom = clamp(this.frontView.zoom * factor, 0.5, 5);
+                this.renderCinematicMap();
+            }, { passive: false });
+        };
+        bindCinematicCanvas(this.cinematicTopCanvas, 'top');
+        bindCinematicCanvas(this.cinematicFrontCanvas, 'front');
+        this.cinematicKeyframeModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicKeyframeModal) this.cinematicKeyframeModal.classList.add('hidden');
+        });
+        this.cinematicShotModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicShotModal) this.cinematicShotModal.classList.add('hidden');
+        });
+        const cinematicDragHandle = this.root.querySelector('[data-role="cinematic-workspace-drag-handle"]') as HTMLDivElement;
+        cinematicDragHandle.addEventListener('pointerdown', (event) => {
+            if (event.button !== 0 || this.cinematicWorkspaceFullscreen) return;
+            const target = event.target as HTMLElement;
+            if (target.closest('button,input,select,textarea,label')) return;
+            if (!target.closest('.otl-cinematic-header')) return; // Limit drag handle to header
+            const rect = this.cinematicWorkspacePanel.getBoundingClientRect();
+            this.cinematicWorkspaceDrag = {
+                active: true,
+                dragging: false,
+                pointerId: event.pointerId,
+                startX: event.clientX,
+                startY: event.clientY,
+                left: rect.left,
+                top: rect.top
+            };
+            cinematicDragHandle.setPointerCapture(event.pointerId);
+        });
+        cinematicDragHandle.addEventListener('pointermove', (event) => {
+            if (!this.cinematicWorkspaceDrag.active || event.pointerId !== this.cinematicWorkspaceDrag.pointerId) return;
+            const dx = event.clientX - this.cinematicWorkspaceDrag.startX;
+            const dy = event.clientY - this.cinematicWorkspaceDrag.startY;
+            if (!this.cinematicWorkspaceDrag.dragging) {
+                if (Math.hypot(dx, dy) < 5) return;
+                this.cinematicWorkspaceDrag.dragging = true;
+                this.cinematicWorkspaceFloatPos = {
+                    left: this.cinematicWorkspaceDrag.left,
+                    top: this.cinematicWorkspaceDrag.top,
+                    initialized: true
+                };
+                this.pinCinematicWorkspacePanel();
+            }
+            const nextPos = this.clampCinematicWorkspacePosition(this.cinematicWorkspaceDrag.left + dx, this.cinematicWorkspaceDrag.top + dy);
+            const nextLeft = nextPos.left;
+            const nextTop = nextPos.top;
+            this.cinematicWorkspaceFloatPos = { left: nextLeft, top: nextTop, initialized: true };
+            this.cinematicWorkspacePanel.style.left = `${nextLeft}px`;
+            this.cinematicWorkspacePanel.style.top = `${nextTop}px`;
+        });
+        const endCinematicDrag = (event: PointerEvent) => {
+            if (!this.cinematicWorkspaceDrag.active || event.pointerId !== this.cinematicWorkspaceDrag.pointerId) return;
+            this.cinematicWorkspaceDrag.active = false;
+            this.cinematicWorkspaceDrag.dragging = false;
+            if (cinematicDragHandle.hasPointerCapture(event.pointerId)) cinematicDragHandle.releasePointerCapture(event.pointerId);
+        };
+        cinematicDragHandle.addEventListener('pointerup', endCinematicDrag);
+        cinematicDragHandle.addEventListener('pointercancel', endCinematicDrag);
         document.addEventListener('pointerdown', (event) => {
             if (this.llmPopover.classList.contains('hidden')) return;
             const target = event.target as HTMLElement;
@@ -4039,6 +12414,10 @@ class TourLoaderPanel implements TourLoaderController {
             }
             if (act === 'delete-image' && poiId) {
                 void this.clearPoiScreenshot(poiId);
+                return;
+            }
+            if (act === 'edit-hotspots' && poiId) {
+                void this.hotspotController.openEditorForPoi(poiId);
                 return;
             }
             if (act === 'delete-poi-inline' && poiId) {
@@ -4119,13 +12498,31 @@ class TourLoaderPanel implements TourLoaderController {
         this.topCanvas.addEventListener('pointerdown', (event) => {
             if (!this.requireModel()) return;
             const p = mapPointer(this.topCanvas, event);
+            const cinematicEditing = this.cinematicWorkspaceOpen() && !!this.selectedCinematicKeyframe();
             if (event.button === 2) {
                 this.drag = { active: true, pointerId: event.pointerId, mode: 'top-pan', startX: p.x, startY: p.y };
                 this.topCanvas.setPointerCapture(event.pointerId);
                 return;
             }
             if (event.button !== 0) return;
-            const selected = this.selectedPoi();
+            const selected = cinematicEditing ? null : this.selectedPoi();
+            const selectedKeyframe = cinematicEditing ? this.selectedCinematicKeyframe() : null;
+            if (selectedKeyframe) {
+                const c = this.projectTop(selectedKeyframe.x, selectedKeyframe.z);
+                const yawR = degToRad(selectedKeyframe.yaw);
+                const hx = c.x + Math.sin(yawR) * 26;
+                const hy = c.y + Math.cos(yawR) * 26;
+                if (Math.hypot(hx - p.x, hy - p.y) < 10) {
+                    this.drag = { active: true, pointerId: event.pointerId, mode: 'top-yaw', startX: p.x, startY: p.y };
+                    this.topCanvas.setPointerCapture(event.pointerId);
+                    return;
+                }
+                if (Math.hypot(c.x - p.x, c.y - p.y) < 10) {
+                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
+                    this.topCanvas.setPointerCapture(event.pointerId);
+                    return;
+                }
+            }
             if (selected) {
                 const c = this.projectTop(selected.targetX, selected.targetZ);
                 const yawR = degToRad(selected.targetYaw);
@@ -4139,6 +12536,22 @@ class TourLoaderPanel implements TourLoaderController {
             }
             let nearest: TourPoi | null = null;
             let nd = Number.POSITIVE_INFINITY;
+            if (cinematicEditing && this.cinematicPlan) {
+                let nearestKf: CinematicKeyframe | null = null;
+                this.cinematicPlan.shots.forEach((shot) => {
+                    shot.keyframes.forEach((kf) => {
+                        const c = this.projectTop(kf.x, kf.z);
+                        const d = Math.hypot(c.x - p.x, c.y - p.y);
+                        if (d < nd) { nd = d; nearestKf = kf; }
+                    });
+                });
+                if (nearestKf && nd <= 10) {
+                    this.selectedCinematicShotId = nearestKf.shotId;
+                    this.selectedCinematicKeyframeId = nearestKf.keyframeId;
+                    this.refreshCinematicUi();
+                }
+                return;
+            }
             this.pois.forEach((poi) => {
                 const c = this.projectTop(poi.targetX, poi.targetZ);
                 const d = Math.hypot(c.x - p.x, c.y - p.y);
@@ -4147,6 +12560,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (nearest && nd <= 10) {
                 this.selectedPoiId = nearest.poiId;
                 this.refreshPoiControls();
+                this.hotspotController.activatePoi(this.selectedPoiId);
                 return;
             }
             const world = this.unprojectTop(p.x, p.y);
@@ -4154,6 +12568,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.pois.push(poi);
             this.selectedPoiId = poi.poiId;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
             this.debounceSave('poi-add-topview');
         });
 
@@ -4169,11 +12584,27 @@ class TourLoaderPanel implements TourLoaderController {
                 this.topView.offsetY += dy;
                 this.drawViews();
             } else if (this.drag.mode === 'top-yaw') {
+                const keyframe = this.cinematicWorkspaceOpen() ? this.selectedCinematicKeyframe() : null;
+                if (keyframe) {
+                    const c = this.projectTop(keyframe.x, keyframe.z);
+                    keyframe.yaw = Math.atan2(p.x - c.x, p.y - c.y) * 180 / Math.PI;
+                    this.drawViews();
+                    this.renderCinematicKeyframeList();
+                    return;
+                }
                 const poi = this.selectedPoi();
                 if (!poi) return;
                 const c = this.projectTop(poi.targetX, poi.targetZ);
                 poi.targetYaw = Math.atan2(p.x - c.x, p.y - c.y) * 180 / Math.PI;
                 this.drawViews();
+            } else if (this.drag.mode === 'front-move') {
+                const keyframe = this.cinematicWorkspaceOpen() ? this.selectedCinematicKeyframe() : null;
+                if (!keyframe) return;
+                const world = this.unprojectTop(p.x, p.y);
+                keyframe.x = world.x;
+                keyframe.z = world.z;
+                this.drawViews();
+                this.renderCinematicKeyframeList();
             }
         });
 
@@ -4188,6 +12619,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.frontCanvas.addEventListener('pointerdown', (event) => {
             if (!this.requireModel()) return;
             const p = mapPointer(this.frontCanvas, event);
+            const cinematicEditing = this.cinematicWorkspaceOpen() && !!this.selectedCinematicKeyframe();
             if (event.button === 2) {
                 this.drag = { active: true, pointerId: event.pointerId, mode: 'front-pan', startX: p.x, startY: p.y };
                 this.frontCanvas.setPointerCapture(event.pointerId);
@@ -4195,7 +12627,24 @@ class TourLoaderPanel implements TourLoaderController {
             }
             if (event.button !== 0) return;
 
-            const selected = this.selectedPoi();
+            const selected = cinematicEditing ? null : this.selectedPoi();
+            const selectedKeyframe = cinematicEditing ? this.selectedCinematicKeyframe() : null;
+            if (selectedKeyframe) {
+                const c = this.projectFront(selectedKeyframe.x, selectedKeyframe.y + this.eyeHeightM);
+                const pitchR = degToRad(selectedKeyframe.pitch);
+                const hx = c.x + Math.cos(pitchR) * 24;
+                const hy = c.y - Math.sin(pitchR) * 24;
+                if (Math.hypot(hx - p.x, hy - p.y) < 10) {
+                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-pitch', startX: p.x, startY: p.y };
+                    this.frontCanvas.setPointerCapture(event.pointerId);
+                    return;
+                }
+                if (Math.hypot(c.x - p.x, c.y - p.y) < 10) {
+                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
+                    this.frontCanvas.setPointerCapture(event.pointerId);
+                    return;
+                }
+            }
             if (selected) {
                 const c = this.projectFront(selected.targetX, this.poiEyeY(selected));
                 const pitchR = degToRad(selected.targetPitch);
@@ -4215,6 +12664,22 @@ class TourLoaderPanel implements TourLoaderController {
 
             let nearest: TourPoi | null = null;
             let nd = Number.POSITIVE_INFINITY;
+            if (cinematicEditing && this.cinematicPlan) {
+                let nearestKf: CinematicKeyframe | null = null;
+                this.cinematicPlan.shots.forEach((shot) => {
+                    shot.keyframes.forEach((kf) => {
+                        const c = this.projectFront(kf.x, kf.y + this.eyeHeightM);
+                        const d = Math.hypot(c.x - p.x, c.y - p.y);
+                        if (d < nd) { nd = d; nearestKf = kf; }
+                    });
+                });
+                if (nearestKf && nd <= 10) {
+                    this.selectedCinematicShotId = nearestKf.shotId;
+                    this.selectedCinematicKeyframeId = nearestKf.keyframeId;
+                    this.refreshCinematicUi();
+                }
+                return;
+            }
             this.pois.forEach((poi) => {
                 const c = this.projectFront(poi.targetX, this.poiEyeY(poi));
                 const d = Math.hypot(c.x - p.x, c.y - p.y);
@@ -4223,6 +12688,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (nearest && nd <= 10) {
                 this.selectedPoiId = nearest.poiId;
                 this.refreshPoiControls();
+                this.hotspotController.activatePoi(this.selectedPoiId);
                 this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
                 this.frontCanvas.setPointerCapture(event.pointerId);
             }
@@ -4240,12 +12706,29 @@ class TourLoaderPanel implements TourLoaderController {
                 this.frontView.offsetY += dy;
                 this.drawViews();
             } else if (this.drag.mode === 'front-pitch') {
+                const keyframe = this.cinematicWorkspaceOpen() ? this.selectedCinematicKeyframe() : null;
+                if (keyframe) {
+                    const c = this.projectFront(keyframe.x, keyframe.y + this.eyeHeightM);
+                    keyframe.pitch = Math.atan2(-(p.y - c.y), p.x - c.x) * 180 / Math.PI;
+                    this.drawViews();
+                    this.renderCinematicKeyframeList();
+                    return;
+                }
                 const poi = this.selectedPoi();
                 if (!poi) return;
                 const c = this.projectFront(poi.targetX, this.poiEyeY(poi));
                 poi.targetPitch = Math.atan2(-(p.y - c.y), p.x - c.x) * 180 / Math.PI;
                 this.drawViews();
             } else if (this.drag.mode === 'front-move') {
+                const keyframe = this.cinematicWorkspaceOpen() ? this.selectedCinematicKeyframe() : null;
+                if (keyframe) {
+                    const world = this.unprojectFront(p.x, p.y);
+                    keyframe.x = world.x;
+                    keyframe.y = world.y - this.eyeHeightM;
+                    this.drawViews();
+                    this.renderCinematicKeyframeList();
+                    return;
+                }
                 const poi = this.selectedPoi();
                 if (!poi) return;
                 const world = this.unprojectFront(p.x, p.y);

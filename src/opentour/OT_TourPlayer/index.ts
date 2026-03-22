@@ -1,4 +1,5 @@
 import { buildStep3RuntimeFromDbCalibration } from '../OT_ModelLoader/algorithms/otml_step3_runtime_from_db_images';
+import { createHtmlAudio, pauseHtmlAudio, playHtmlAudio, stopHtmlAudio, waitForHtmlAudioMetadata } from '../../shared/audio/html-audio';
 
 type CameraPose = {
     eye: { x: number; y: number; z: number };
@@ -16,6 +17,7 @@ type QueueDispatchTask = {
     poi_name?: string | null;
     coordinates: { x: number; y: number; z: number };
     look?: { yaw: number | null; pitch: number | null } | null;
+    target_fov?: number | null;
     content: { text: string; audio_url: string | null };
     execution_mode: QueueBehavior;
     move_speed_mps?: number | null;
@@ -108,6 +110,17 @@ type RecordingRuntime = {
     paused: boolean;
 };
 
+type RecordingAudioMixRuntime = {
+    context: AudioContext;
+    destination: MediaStreamAudioDestinationNode;
+    masterGain: GainNode;
+    musicGain: GainNode;
+    duckGain: GainNode;
+    ttsGain: GainNode;
+    compressor: DynamicsCompressorNode;
+    sources: WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>;
+};
+
 type StoredRecordingEntry = {
     id: string;
     name: string;
@@ -133,22 +146,8 @@ type TtsConfig = {
     provider: 'aliyun';
     model: string;
     voice: string;
-    apiKey: string;
     format: string;
     updatedAt: string | null;
-};
-
-type TtsModelOption = {
-    value: string;
-    label: string;
-    description: string;
-};
-
-type TtsVoiceOption = {
-    value: string;
-    label: string;
-    subtitle: string;
-    group: string;
 };
 
 type TourPlayerPanelOptions = {
@@ -172,52 +171,15 @@ const STYLE_ID = 'ot-tour-player-style';
 const PANEL_ID = 'ot-tour-player-panel';
 const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
 const DEFAULT_TTS_VOICE = 'longyuan_v3';
-
-const TTS_MODEL_OPTIONS: TtsModelOption[] = [
-    {
-        value: 'cosyvoice-v3-plus',
-        label: '高质量语音',
-        description: '音质更好，适合正式讲解与旁白'
-    },
-    {
-        value: 'cosyvoice-v3-flash',
-        label: '低延迟语音',
-        description: '响应更快，适合实时播报'
-    }
-];
-
-const TTS_VOICE_OPTIONS_BY_MODEL: Record<string, TtsVoiceOption[]> = {
-    'cosyvoice-v3-plus': [
-        { value: 'longyuan_v3', label: '龙媛', subtitle: '温暖治愈女', group: '旁白 / 有声书' },
-        { value: 'longyue_v3', label: '龙悦', subtitle: '温暖磁性女', group: '旁白 / 有声书' },
-        { value: 'longsanshu_v3', label: '龙三叔', subtitle: '沉稳质感男', group: '旁白 / 有声书' },
-        { value: 'longshuo_v3', label: '龙硕', subtitle: '博才干练男', group: '新闻播报' },
-        { value: 'loongbella_v3', label: 'Bella3.0', subtitle: '精准干练女', group: '新闻播报' },
-        { value: 'longxiaochun_v3', label: '龙小淳', subtitle: '知性积极女', group: '语音助手' },
-        { value: 'longxiaoxia_v3', label: '龙小夏', subtitle: '沉稳权威女', group: '语音助手' },
-        { value: 'longanwen_v3', label: '龙安温', subtitle: '优雅知性女', group: '语音助手' },
-        { value: 'longanli_v3', label: '龙安莉', subtitle: '利落从容女', group: '语音助手' },
-        { value: 'longanlang_v3', label: '龙安朗', subtitle: '清爽利落男', group: '语音助手' },
-        { value: 'longyingling_v3', label: '龙应聆', subtitle: '温和共情女', group: '客服' },
-        { value: 'longanzhi_v3', label: '龙安智', subtitle: '睿智轻熟男', group: '社交陪伴' }
-    ],
-    'cosyvoice-v3-flash': [
-        { value: 'longyuan_v3', label: '龙媛', subtitle: '温暖治愈女', group: '旁白 / 有声书' },
-        { value: 'longyue_v3', label: '龙悦', subtitle: '温暖磁性女', group: '旁白 / 有声书' },
-        { value: 'longsanshu_v3', label: '龙三叔', subtitle: '沉稳质感男', group: '旁白 / 有声书' },
-        { value: 'longshuo_v3', label: '龙硕', subtitle: '博才干练男', group: '新闻播报' },
-        { value: 'loongbella_v3', label: 'Bella3.0', subtitle: '精准干练女', group: '新闻播报' },
-        { value: 'longxiaochun_v3', label: '龙小淳', subtitle: '知性积极女', group: '语音助手' },
-        { value: 'longxiaoxia_v3', label: '龙小夏', subtitle: '沉稳权威女', group: '语音助手' },
-        { value: 'longanwen_v3', label: '龙安温', subtitle: '优雅知性女', group: '语音助手' },
-        { value: 'longanli_v3', label: '龙安莉', subtitle: '利落从容女', group: '语音助手' },
-        { value: 'longanlang_v3', label: '龙安朗', subtitle: '清爽利落男', group: '语音助手' },
-        { value: 'longyingling_v3', label: '龙应聆', subtitle: '温和共情女', group: '客服' },
-        { value: 'longanzhi_v3', label: '龙安智', subtitle: '睿智轻熟男', group: '社交陪伴' }
-    ]
-};
+const DEFAULT_CAMERA_FOV = 62;
+const MIN_CAMERA_FOV = 20;
+const MAX_CAMERA_FOV = 120;
 
 const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+const clampFov = (v: number | null | undefined, fallback = DEFAULT_CAMERA_FOV) => {
+    const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+    return clamp(n, MIN_CAMERA_FOV, MAX_CAMERA_FOV);
+};
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
 const csvEscape = (value: string | number) => {
@@ -931,7 +893,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
     private readonly clearBtn: HTMLButtonElement;
     private readonly uploadBtn: HTMLButtonElement;
     private readonly downloadBtn: HTMLButtonElement;
-    private readonly ttsBtn: HTMLButtonElement;
     private readonly csvInput: HTMLInputElement;
     private readonly danmakuInput: HTMLInputElement;
     private readonly danmakuSendBtn: HTMLButtonElement;
@@ -974,12 +935,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
     private readonly recordingResultsEl: HTMLDivElement;
     private readonly recordingResultsEmptyEl: HTMLDivElement;
     private readonly recordingSyncToModelDbBtn: HTMLButtonElement;
-    private readonly ttsModalEl: HTMLDivElement;
-    private readonly ttsModelInput: HTMLSelectElement;
-    private readonly ttsVoiceInput: HTMLSelectElement;
-    private readonly ttsApiKeyInput: HTMLInputElement;
-    private readonly ttsInfoEl: HTMLDivElement;
-
     private modelFilename: string | null = null;
     private sessionId = '';
     private snapshot: QueueSnapshot | null = null;
@@ -1038,6 +993,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
     private readonly recoveringRecordingIds = new Set<string>();
     private ttsAudioEl: HTMLAudioElement | null = null;
     private ttsPlaybackDone: (() => void) | null = null;
+    private recordingAudioMix: RecordingAudioMixRuntime | null = null;
     private recordingCompositorCanvas: HTMLCanvasElement | null = null;
     private recordingCompositorCtx: CanvasRenderingContext2D | null = null;
     private recordingCompositorRaf = 0;
@@ -1046,7 +1002,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
         provider: 'aliyun',
         model: DEFAULT_TTS_MODEL,
         voice: DEFAULT_TTS_VOICE,
-        apiKey: '',
         format: 'mp3',
         updatedAt: null
     };
@@ -1068,9 +1023,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
                     </button>
                     <button class="otp-icon-btn" data-act="clear" title="Clear All Records">
                         <svg class="otp-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16" /><path d="M9 7V5h6v2" /><path d="M7 7l1 12h8l1-12" /><path d="M10 11v5" /><path d="M14 11v5" /></svg>
-                    </button>
-                    <button class="otp-icon-btn" data-act="tts-settings" title="Alibaba TTS Settings">
-                        <svg class="otp-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16" /><path d="M7 7v10" /><path d="M12 7v10" /><path d="M17 7v10" /><path d="M9 17l3 3 3-3" /></svg>
                     </button>
                 </div>
                 <div class="otp-header-right">
@@ -1158,7 +1110,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.clearBtn = this.root.querySelector('[data-act="clear"]') as HTMLButtonElement;
         this.uploadBtn = this.root.querySelector('[data-act="upload"]') as HTMLButtonElement;
         this.downloadBtn = this.root.querySelector('[data-act="download"]') as HTMLButtonElement;
-        this.ttsBtn = this.root.querySelector('[data-act="tts-settings"]') as HTMLButtonElement;
         this.csvInput = this.root.querySelector('[data-role="csv-input"]') as HTMLInputElement;
         this.danmakuInput = this.root.querySelector('[data-role="danmaku"]') as HTMLInputElement;
         this.danmakuSendBtn = this.root.querySelector('[data-act="send-chat"]') as HTMLButtonElement;
@@ -1306,42 +1257,10 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.recordingResultsEmptyEl = this.recordingModalEl.querySelector('[data-record="results-empty"]') as HTMLDivElement;
         this.recordingSyncToModelDbBtn = this.recordingModalEl.querySelector('[data-record="sync-model-db"]') as HTMLButtonElement;
 
-        this.ttsModalEl = document.createElement('div');
-        this.ttsModalEl.className = 'otp-modal hidden';
-        this.ttsModalEl.innerHTML = `
-            <div class="otp-modal-card" style="max-width:560px;">
-                <div class="otp-modal-head">
-                    <div>
-                        <div class="otp-modal-title">Alibaba TTS</div>
-                    </div>
-                    <button class="otp-icon-btn" data-tts-modal="close" title="Close TTS Settings">
-                        <svg class="otp-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12" /><path d="M18 6L6 18" /></svg>
-                    </button>
-                </div>
-                <div class="otp-modal-grid" style="grid-template-columns:1fr;">
-                    <section class="otp-modal-section">
-                        <div class="otp-modal-row"><label>语音模型</label><select data-tts="model">${TTS_MODEL_OPTIONS.map((option) => `<option value="${option.value}">${option.label} - ${option.description}</option>`).join('')}</select></div>
-                        <div class="otp-modal-row"><label>声音</label><select data-tts="voice"></select></div>
-                        <div class="otp-modal-row"><label>DashScope API Key</label><input class="otp-input" type="password" data-tts="api-key" placeholder="sk-..." /></div>
-                        <div class="otp-modal-note" data-tts="info">Loading...</div>
-                    </section>
-                </div>
-                <div class="otp-modal-footer">
-                    <button class="otp-btn" type="button" data-tts-modal="cancel">Cancel</button>
-                    <button class="otp-btn" type="button" data-tts-modal="save">Save</button>
-                </div>
-            </div>
-        `;
-        this.ttsModelInput = this.ttsModalEl.querySelector('[data-tts="model"]') as HTMLSelectElement;
-        this.ttsVoiceInput = this.ttsModalEl.querySelector('[data-tts="voice"]') as HTMLSelectElement;
-        this.ttsApiKeyInput = this.ttsModalEl.querySelector('[data-tts="api-key"]') as HTMLInputElement;
-        this.ttsInfoEl = this.ttsModalEl.querySelector('[data-tts="info"]') as HTMLDivElement;
-
         document.body.appendChild(this.root);
         document.body.appendChild(this.audioInputEl);
         document.body.appendChild(this.folderInputEl);
         document.body.appendChild(this.recordingModalEl);
-        document.body.appendChild(this.ttsModalEl);
         this.bindEvents();
         this.syncRecordingForm();
         this.renderRecordingPlaylist();
@@ -1352,9 +1271,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.renderTranscript();
         this.onModelChanged(this.options.getModelFilename());
         void this.loadRecordingResults();
-        void this.loadTtsConfig().catch(() => {
-            this.syncTtsConfigForm();
-        });
+        void this.loadTtsConfig().catch(() => {});
 
         if (this.options.onModelLoaded) {
             this.options.onModelLoaded((filename) => this.onModelChanged(filename));
@@ -1879,46 +1796,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
         return lines.join('\n');
     }
 
-    private applyTtsConfigInfo() {
-        const modelMeta = TTS_MODEL_OPTIONS.find((option) => option.value === this.ttsConfig.model) || TTS_MODEL_OPTIONS[0];
-        const voiceMeta = (TTS_VOICE_OPTIONS_BY_MODEL[this.ttsConfig.model] || []).find((option) => option.value === this.ttsConfig.voice) || null;
-        const masked = this.ttsConfig.apiKey
-            ? `${this.ttsConfig.apiKey.slice(0, 3)}***${this.ttsConfig.apiKey.slice(-3)}`
-            : '(empty)';
-        this.ttsInfoEl.innerHTML = `
-            <div><strong>Provider:</strong> Alibaba DashScope</div>
-            <div><strong>Model:</strong> ${modelMeta.label} (${this.ttsConfig.model}) - ${modelMeta.description}</div>
-            <div><strong>Voice:</strong> ${voiceMeta ? `${voiceMeta.label} (${voiceMeta.value}) - ${voiceMeta.subtitle}` : this.ttsConfig.voice}</div>
-            <div><strong>API Key:</strong> ${masked}</div>
-            <div><strong>Updated:</strong> ${this.ttsConfig.updatedAt || '-'}</div>
-        `;
-    }
-
-    private renderTtsVoiceOptions(modelValue: string, preferredVoice?: string) {
-        const options = TTS_VOICE_OPTIONS_BY_MODEL[modelValue] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
-        const groups = new Map<string, TtsVoiceOption[]>();
-        options.forEach((option) => {
-            const current = groups.get(option.group) || [];
-            current.push(option);
-            groups.set(option.group, current);
-        });
-        this.ttsVoiceInput.innerHTML = Array.from(groups.entries()).map(([group, values]) => {
-            const items = values.map((option) => `<option value="${option.value}">${option.label} - ${option.subtitle} (${option.value})</option>`).join('');
-            return `<optgroup label="${group}">${items}</optgroup>`;
-        }).join('');
-        const fallbackVoice = options.find((option) => option.value === DEFAULT_TTS_VOICE)?.value || options[0]?.value || DEFAULT_TTS_VOICE;
-        const nextVoice = options.find((option) => option.value === preferredVoice)?.value || fallbackVoice;
-        this.ttsVoiceInput.value = nextVoice;
-    }
-
-    private syncTtsConfigForm() {
-        this.ttsModelInput.value = this.ttsConfig.model || DEFAULT_TTS_MODEL;
-        this.renderTtsVoiceOptions(this.ttsModelInput.value, this.ttsConfig.voice || DEFAULT_TTS_VOICE);
-        this.ttsApiKeyInput.value = this.ttsConfig.apiKey || '';
-        this.ttsConfig.voice = this.ttsVoiceInput.value || DEFAULT_TTS_VOICE;
-        this.applyTtsConfigInfo();
-    }
-
     private async loadTtsConfig() {
         const response = await fetch(`${this.apiBase()}/tts-config`);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1927,66 +1804,15 @@ class TourPlayerPanel implements TourPlayerPanelController {
             provider: 'aliyun',
             model: String(payload?.tts?.model || DEFAULT_TTS_MODEL),
             voice: String(payload?.tts?.voice || DEFAULT_TTS_VOICE),
-            apiKey: String(payload?.tts?.apiKey || ''),
             format: String(payload?.tts?.format || 'mp3'),
             updatedAt: payload?.tts?.updatedAt ? String(payload.tts.updatedAt) : null
         };
-        this.syncTtsConfigForm();
         this.logDebug('tts.config.load.ok', {
             model: this.ttsConfig.model,
             voice: this.ttsConfig.voice,
-            apiKeyMasked: this.ttsConfig.apiKey ? `${this.ttsConfig.apiKey.slice(0, 3)}***${this.ttsConfig.apiKey.slice(-3)}` : '(empty)',
             updatedAt: this.ttsConfig.updatedAt,
-            storage: payload?.storage || null
+            source: payload?.tts?.source || 'cinematic-lite'
         });
-    }
-
-    private async saveTtsConfig() {
-        const response = await fetch(`${this.apiBase()}/tts-config`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                tts: {
-                    model: this.ttsModelInput.value.trim() || DEFAULT_TTS_MODEL,
-                    voice: this.ttsVoiceInput.value.trim() || DEFAULT_TTS_VOICE,
-                    apiKey: this.ttsApiKeyInput.value.trim(),
-                    format: 'mp3'
-                }
-            })
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const payload = await response.json();
-        this.ttsConfig = {
-            provider: 'aliyun',
-            model: String(payload?.tts?.model || DEFAULT_TTS_MODEL),
-            voice: String(payload?.tts?.voice || DEFAULT_TTS_VOICE),
-            apiKey: String(payload?.tts?.apiKey || ''),
-            format: String(payload?.tts?.format || 'mp3'),
-            updatedAt: payload?.tts?.updatedAt ? String(payload.tts.updatedAt) : null
-        };
-        this.syncTtsConfigForm();
-        this.logDebug('tts.config.save.ok', {
-            model: this.ttsConfig.model,
-            voice: this.ttsConfig.voice,
-            apiKeyMasked: this.ttsConfig.apiKey ? `${this.ttsConfig.apiKey.slice(0, 3)}***${this.ttsConfig.apiKey.slice(-3)}` : '(empty)',
-            updatedAt: this.ttsConfig.updatedAt,
-            storage: payload?.storage || null
-        });
-        this.setStatus('Alibaba TTS settings saved.');
-    }
-
-    private async openTtsModal() {
-        try {
-            await this.loadTtsConfig();
-        } catch (error) {
-            this.logDebug('tts.config.load.error', { error: error instanceof Error ? error.message : String(error) });
-            this.setStatus(`Load TTS config failed: ${String(error)}`);
-        }
-        this.ttsModalEl.classList.remove('hidden');
-    }
-
-    private closeTtsModal() {
-        this.ttsModalEl.classList.add('hidden');
     }
 
     private async waitWhilePausedOrStopped() {
@@ -2335,27 +2161,112 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.ttsAudioEl.volume = Math.max(0, Math.min(1, this.recordingSettings.masterVolume * this.recordingSettings.ttsVolume));
     }
 
+    private async ensureRecordingAudioMix() {
+        if (this.recordingAudioMix) {
+            if (this.recordingAudioMix.context.state === 'suspended') {
+                await this.recordingAudioMix.context.resume().catch(() => {
+                    // ignore resume failures and let playback fail naturally
+                });
+            }
+            return this.recordingAudioMix;
+        }
+        const context = new AudioContext({ sampleRate: 48000 });
+        const destination = context.createMediaStreamDestination();
+        const masterGain = context.createGain();
+        const musicGain = context.createGain();
+        const duckGain = context.createGain();
+        const ttsGain = context.createGain();
+        const compressor = context.createDynamicsCompressor();
+        const musicLowShelf = context.createBiquadFilter();
+        const musicHighShelf = context.createBiquadFilter();
+        musicLowShelf.type = 'lowshelf';
+        musicLowShelf.frequency.value = 180;
+        musicLowShelf.gain.value = 1.8;
+        musicHighShelf.type = 'highshelf';
+        musicHighShelf.frequency.value = 3200;
+        musicHighShelf.gain.value = 1.4;
+        compressor.threshold.value = -20;
+        compressor.knee.value = 18;
+        compressor.ratio.value = 2.8;
+        compressor.attack.value = 0.003;
+        compressor.release.value = 0.2;
+        duckGain.gain.value = 1;
+        musicGain.gain.value = 1;
+        ttsGain.gain.value = 1;
+        masterGain.gain.value = 1;
+
+        musicGain.connect(musicLowShelf);
+        musicLowShelf.connect(musicHighShelf);
+        musicHighShelf.connect(duckGain);
+        duckGain.connect(masterGain);
+        ttsGain.connect(masterGain);
+        masterGain.connect(compressor);
+        compressor.connect(destination);
+        compressor.connect(context.destination);
+
+        this.recordingAudioMix = {
+            context,
+            destination,
+            masterGain,
+            musicGain,
+            duckGain,
+            ttsGain,
+            compressor,
+            sources: new WeakMap()
+        };
+        await context.resume().catch(() => {
+            // ignore resume failures and let playback fail naturally
+        });
+        return this.recordingAudioMix;
+    }
+
+    private connectRecordingAudioElement(audio: HTMLAudioElement, channel: 'music' | 'tts') {
+        const mix = this.recordingAudioMix;
+        if (!mix) return;
+        if (mix.sources.has(audio)) return;
+        const source = mix.context.createMediaElementSource(audio);
+        mix.sources.set(audio, source);
+        source.connect(channel === 'music' ? mix.musicGain : mix.ttsGain);
+    }
+
+    private updateRecordingAudioDucking(active: boolean) {
+        const mix = this.recordingAudioMix;
+        if (!mix) return;
+        const now = mix.context.currentTime;
+        const target = active ? 0.58 : 1;
+        mix.duckGain.gain.cancelScheduledValues(now);
+        mix.duckGain.gain.setTargetAtTime(target, now, active ? 0.02 : 0.12);
+    }
+
+    private stopRecordingAudioMix() {
+        const mix = this.recordingAudioMix;
+        this.recordingAudioMix = null;
+        if (!mix) return;
+        void mix.context.close().catch(() => {
+            // ignore close failures during teardown
+        });
+    }
+
     private stopTtsPlayback() {
         const done = this.ttsPlaybackDone;
         this.ttsPlaybackDone = null;
         if (this.ttsAudioEl) {
-            this.ttsAudioEl.pause();
-            this.ttsAudioEl.currentTime = 0;
-            this.ttsAudioEl.src = '';
-            this.ttsAudioEl.load();
+            stopHtmlAudio(this.ttsAudioEl, { resetSrc: true });
             this.ttsAudioEl = null;
         }
         done?.();
     }
 
     private pauseTtsPlayback() {
-        this.ttsAudioEl?.pause();
+        pauseHtmlAudio(this.ttsAudioEl);
     }
 
     private resumeTtsPlayback() {
         if (!this.ttsAudioEl) return;
-        void this.ttsAudioEl.play().catch(() => {
-            // ignore autoplay resume failure
+        void playHtmlAudio(this.ttsAudioEl).catch((error) => {
+            this.logDebug('tts.audio.play.resume_rejected', {
+                error: error instanceof Error ? error.message : String(error)
+            });
         });
     }
 
@@ -2370,12 +2281,14 @@ class TourPlayerPanel implements TourPlayerPanelController {
             ttsDebug: task.tts_debug || null
         });
         this.stopTtsPlayback();
-        const audio = new Audio();
+        const audio = createHtmlAudio({
+            src: audioUrl,
+            preload: 'auto',
+            crossOrigin: 'anonymous'
+        });
         this.ttsAudioEl = audio;
-        audio.preload = 'auto';
-        audio.crossOrigin = 'anonymous';
-        audio.src = audioUrl;
         this.applyTtsVolume();
+        this.connectRecordingAudioElement(audio, 'tts');
         this.logDebug('tts.audio.play.start', {
             taskId: task.task_id,
             model: this.ttsConfig.model,
@@ -2384,17 +2297,17 @@ class TourPlayerPanel implements TourPlayerPanelController {
             ttsDebug: task.tts_debug || null
         });
 
+        await waitForHtmlAudioMetadata(audio);
+
         await new Promise<void>((resolve) => {
             let settled = false;
             const finish = () => {
                 if (settled) return;
                 settled = true;
+                this.updateRecordingAudioDucking(false);
                 if (this.ttsPlaybackDone === finish) this.ttsPlaybackDone = null;
                 if (this.ttsAudioEl === audio) this.ttsAudioEl = null;
-                audio.pause();
-                audio.currentTime = 0;
-                audio.src = '';
-                audio.load();
+                stopHtmlAudio(audio, { resetSrc: true });
                 this.logDebug('tts.audio.play.end', {
                     taskId: task.task_id,
                     model: this.ttsConfig.model,
@@ -2415,7 +2328,8 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 });
                 finish();
             };
-            void audio.play().then(() => {
+            void playHtmlAudio(audio).then(() => {
+                this.updateRecordingAudioDucking(true);
                 this.logDebug('tts.audio.play.started', {
                     taskId: task.task_id,
                     volume: audio.volume,
@@ -2492,6 +2406,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.musicAudioEl.preload = 'auto';
         this.musicAudioEl.crossOrigin = 'anonymous';
         this.applyMusicVolume();
+        this.connectRecordingAudioElement(this.musicAudioEl, 'music');
         this.musicAudioEl.addEventListener('ended', () => {
             if (this.recordingPlaylist.length < 1) return;
             if (this.musicIndex >= this.recordingPlaylist.length - 1) {
@@ -2832,14 +2747,21 @@ class TourPlayerPanel implements TourPlayerPanelController {
             })).sort((a, b) => b.createdAt - a.createdAt);
             this.renderRecordingResults();
             this.logDebug('record.gallery.loaded', { count: this.recordingResults.length });
-            void this.recoverProcessingRecordingEntries();
+            void this.recoverPendingRecordingEntries();
         } catch (error) {
             this.logDebug('record.gallery.load.error', { error: error instanceof Error ? error.message : String(error) });
         }
     }
 
-    private async recoverProcessingRecordingEntries() {
-        const pending = this.recordingResults.filter((item) => item.status === 'processing' && !this.recoveringRecordingIds.has(item.id));
+    private shouldRetryRecordingTranscode(entry: StoredRecordingEntry) {
+        const extension = String(entry.extension || '').toLowerCase();
+        const mimeType = String(entry.mimeType || '').toLowerCase();
+        const isWebmSource = extension === 'webm' || mimeType.includes('webm');
+        return isWebmSource && (entry.status === 'processing' || entry.status === 'mp4_failed');
+    }
+
+    private async recoverPendingRecordingEntries() {
+        const pending = this.recordingResults.filter((item) => this.shouldRetryRecordingTranscode(item) && !this.recoveringRecordingIds.has(item.id));
         for (const entry of pending) {
             this.recoveringRecordingIds.add(entry.id);
             try {
@@ -2847,12 +2769,20 @@ class TourPlayerPanel implements TourPlayerPanelController {
                     id: entry.id,
                     name: entry.name,
                     bytes: entry.size,
-                    mimeType: entry.mimeType
+                    mimeType: entry.mimeType,
+                    status: entry.status
                 });
-                await this.updateRecordingResult({
+                const retryEntry: StoredRecordingEntry = {
                     ...entry,
-                    note: this.buildProcessingNote(entry)
-                });
+                    status: 'processing',
+                    transcodePhase: entry.status === 'mp4_failed' ? 'retrying' : (entry.transcodePhase || 'queued'),
+                    note: this.buildProcessingNote({
+                        ...entry,
+                        status: 'processing',
+                        transcodePhase: entry.status === 'mp4_failed' ? 'retrying' : (entry.transcodePhase || 'queued')
+                    })
+                };
+                await this.updateRecordingResult(retryEntry);
                 const recoveredSettings: RecordingSettings = {
                     ...this.recordingSettings,
                     frameRate: 30,
@@ -3347,6 +3277,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
         runtime.stream.getTracks().forEach((track) => track.stop());
         runtime.displayStream?.getTracks().forEach((track) => track.stop());
         this.stopRecordingCompositor();
+        this.stopRecordingAudioMix();
         this.activeRecording = null;
         this.danmakuInput.disabled = !this.modelFilename ? true : false;
         this.danmakuSendBtn.disabled = !this.modelFilename ? true : false;
@@ -3430,17 +3361,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.recordingSettings = this.collectRecordingSettings(variant);
         this.syncRecordingForm();
 
-        let displayStream: MediaStream | null = null;
         try {
-            if ((this.recordingSettings.includeTts || this.recordingSettings.includeMusic) && navigator.mediaDevices?.getDisplayMedia) {
-                this.setRecordingModalStatus('Waiting for current-tab audio permission...');
-                displayStream = await navigator.mediaDevices.getDisplayMedia({
-                    video: true,
-                    audio: true,
-                    preferCurrentTab: true,
-                    selfBrowserSurface: 'include'
-                } as any);
-            }
             this.startRecordingCompositor(canvas as HTMLCanvasElement);
             const recordingCanvas = this.recordingCompositorCanvas || (canvas as HTMLCanvasElement);
             const canvasStream = recordingCanvas.captureStream(this.recordingSettings.frameRate);
@@ -3449,13 +3370,18 @@ class TourPlayerPanel implements TourPlayerPanelController {
             if (!videoTrack) throw new Error('No canvas video track available');
             outputStream.addTrack(videoTrack);
 
-            const audioTrack = displayStream?.getAudioTracks?.()[0] || null;
-            if ((this.recordingSettings.includeTts || this.recordingSettings.includeMusic) && !audioTrack) {
-                throw new Error('Current-tab audio was not shared. Enable tab audio in the browser share dialog.');
+            let audioTrack: MediaStreamTrack | null = null;
+            if (this.recordingSettings.includeTts || this.recordingSettings.includeMusic) {
+                const mix = await this.ensureRecordingAudioMix();
+                audioTrack = mix.destination.stream.getAudioTracks()[0] || null;
+                if (!audioTrack) {
+                    throw new Error('Failed to create recording audio mix track.');
+                }
             }
             if (audioTrack) outputStream.addTrack(audioTrack);
             this.logDebug('record.audio.capture.ready', {
-                hasTabAudioTrack: Boolean(audioTrack),
+                hasTabAudioTrack: false,
+                hasMixedAudioTrack: Boolean(audioTrack),
                 audioTrackLabel: audioTrack?.label || null,
                 audioTrackSettings: audioTrack?.getSettings?.() || null,
                 includeTts: this.recordingSettings.includeTts,
@@ -3494,7 +3420,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 settings: this.recordingSettings,
                 recorder,
                 stream: outputStream,
-                displayStream,
+                displayStream: null,
                 chunks,
                 startedAt: performance.now(),
                 mimeType,
@@ -3538,8 +3464,8 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 this.playBtn.click();
             }
         } catch (error) {
-            displayStream?.getTracks().forEach((track) => track.stop());
             this.stopRecordingCompositor();
+            this.stopRecordingAudioMix();
             this.activeRecording = null;
             this.stopRecordingTimer();
             this.refreshRecordingButtons();
@@ -3637,10 +3563,12 @@ class TourPlayerPanel implements TourPlayerPanelController {
         const live = this.options.getLiveCameraPose?.();
         const to = this.cameraPoseFromTask(task);
         if (!live) {
-            await this.options.setLiveCameraPose(to, 62);
+            await this.options.setLiveCameraPose(to, clampFov(task.target_fov, DEFAULT_CAMERA_FOV));
             return;
         }
         const from = live.pose;
+        const fromFov = clampFov(live.fovDeg, DEFAULT_CAMERA_FOV);
+        const toFov = clampFov(task.target_fov, fromFov);
         const distance = Math.hypot(to.eye.x - from.eye.x, to.eye.y - from.eye.y, to.eye.z - from.eye.z);
         const speed = Math.max(0.2, Number(task.move_speed_mps ?? 0.8));
         const duration = Math.max(260, (distance / speed) * 1000);
@@ -3655,7 +3583,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
             await this.options.setLiveCameraPose({
                 eye: { x: lerp(from.eye.x, to.eye.x), y: lerp(from.eye.y, to.eye.y), z: lerp(from.eye.z, to.eye.z) },
                 forward: { x: lerp(from.forward.x, to.forward.x), y: lerp(from.forward.y, to.forward.y), z: lerp(from.forward.z, to.forward.z) }
-            }, live.fovDeg);
+            }, lerp(fromFov, toFov));
             if (t >= 1) break;
             await sleep(16);
         }
@@ -3786,23 +3714,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
 
     private bindEvents() {
         (this.root.querySelector('[data-act="hide"]') as HTMLButtonElement).addEventListener('click', () => this.close());
-        this.ttsBtn.addEventListener('click', () => {
-            void this.openTtsModal();
-        });
-        this.ttsModelInput.addEventListener('change', () => {
-            this.renderTtsVoiceOptions(this.ttsModelInput.value, this.ttsVoiceInput.value || DEFAULT_TTS_VOICE);
-        });
-        this.ttsModalEl.querySelector('[data-tts-modal="close"]')?.addEventListener('click', () => this.closeTtsModal());
-        this.ttsModalEl.querySelector('[data-tts-modal="cancel"]')?.addEventListener('click', () => this.closeTtsModal());
-        this.ttsModalEl.querySelector('[data-tts-modal="save"]')?.addEventListener('click', () => {
-            void this.saveTtsConfig().then(() => this.closeTtsModal()).catch((error) => {
-                this.logDebug('tts.config.save.error', { error: error instanceof Error ? error.message : String(error) });
-                this.setStatus(`Save TTS config failed: ${String(error)}`);
-            });
-        });
-        this.ttsModalEl.addEventListener('click', (event) => {
-            if (event.target === this.ttsModalEl) this.closeTtsModal();
-        });
 
         this.recordButtons[0].addEventListener('click', () => {
             if (this.activeRecording) {

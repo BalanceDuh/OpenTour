@@ -8,30 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
 import Database from 'better-sqlite3';
-import WebSocket from 'ws';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { getTtsConfig, normalizeTtsSelection } from '../../../openmesh/backend/db-config.mjs';
+import { synthesizeDashscopeSpeechWithFallback } from '../../../shared/tts/dashscope.mjs';
 
 const VALID_ACTIONS = new Set(['MOVE', 'LOOK', 'SPEAK', 'PAUSE', 'EMPHASIZE', 'END']);
 const VALID_BEHAVIORS = new Set(['BLOCKING', 'INTERRUPTIBLE']);
 const VALID_STATUSES = new Set(['COMPLETED', 'SKIPPED', 'FAILED']);
 const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
-const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
-const DEFAULT_TTS_VOICE = 'longyuan_v3';
-const DEFAULT_TTS_FORMAT = 'mp3';
-const DASHSCOPE_WS_URL = process.env.DASHSCOPE_TTS_WS_URL || 'wss://dashscope.aliyuncs.com/api-ws/v1/inference';
-const TTS_CONNECT_TIMEOUT_MS = 30000;
-const TTS_VOICE_OPTIONS_BY_MODEL = {
-    'cosyvoice-v3-plus': [
-        'longyuan_v3', 'longyue_v3', 'longsanshu_v3', 'longshuo_v3', 'loongbella_v3', 'longxiaochun_v3',
-        'longxiaoxia_v3', 'longanwen_v3', 'longanli_v3', 'longanlang_v3', 'longyingling_v3', 'longanzhi_v3'
-    ],
-    'cosyvoice-v3-flash': [
-        'longyuan_v3', 'longyue_v3', 'longsanshu_v3', 'longshuo_v3', 'loongbella_v3', 'longxiaochun_v3',
-        'longxiaoxia_v3', 'longanwen_v3', 'longanli_v3', 'longanlang_v3', 'longyingling_v3', 'longanzhi_v3'
-    ]
-};
-const TTS_MODEL_FALLBACKS = {
-    'cosyvoice-v3-plus': ['cosyvoice-v3-flash']
-};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -53,63 +37,9 @@ const pickReadableDbPath = () => {
 const tourLoaderDbPath = process.env.OT_TOUR_LOADER_DB_PATH || pickReadableDbPath();
 let tourLoaderDb = null;
 let getLlmConfigByModelFilenameStmt = null;
-let getGlobalTtsConfigStmt = null;
-let upsertGlobalTtsConfigStmt = null;
 try {
     mkdirSync(dirname(tourLoaderDbPath), { recursive: true });
     tourLoaderDb = new Database(tourLoaderDbPath);
-    tourLoaderDb.exec(`
-        CREATE TABLE IF NOT EXISTS global_tts_configs (
-            config_key TEXT PRIMARY KEY,
-            provider TEXT NOT NULL,
-            tts_model TEXT NOT NULL,
-            tts_voice TEXT NOT NULL,
-            api_key TEXT NOT NULL,
-            audio_format TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    `);
-    getGlobalTtsConfigStmt = tourLoaderDb.prepare(`
-        SELECT config_key, provider, tts_model, tts_voice, api_key, audio_format, updated_at
-        FROM global_tts_configs
-        WHERE config_key = 'aliyun'
-    `);
-    upsertGlobalTtsConfigStmt = tourLoaderDb.prepare(`
-        INSERT INTO global_tts_configs (
-            config_key,
-            provider,
-            tts_model,
-            tts_voice,
-            api_key,
-            audio_format,
-            updated_at
-        ) VALUES (
-            'aliyun',
-            'aliyun',
-            @tts_model,
-            @tts_voice,
-            @api_key,
-            @audio_format,
-            @updated_at
-        )
-        ON CONFLICT(config_key) DO UPDATE SET
-            provider = excluded.provider,
-            tts_model = excluded.tts_model,
-            tts_voice = excluded.tts_voice,
-            api_key = excluded.api_key,
-            audio_format = excluded.audio_format,
-            updated_at = excluded.updated_at
-    `);
-    const seededTtsRow = getGlobalTtsConfigStmt.get();
-    if (!seededTtsRow) {
-        upsertGlobalTtsConfigStmt.run({
-            tts_model: DEFAULT_TTS_MODEL,
-            tts_voice: DEFAULT_TTS_VOICE,
-            api_key: '',
-            audio_format: DEFAULT_TTS_FORMAT,
-            updated_at: new Date().toISOString()
-        });
-    }
     try {
         getLlmConfigByModelFilenameStmt = tourLoaderDb.prepare(`
             SELECT model_filename, llm_model_name, llm_api_key, updated_at
@@ -140,40 +70,11 @@ const inferCsvTtsLang = (requested, text) => {
     return normalized || 'en-US';
 };
 
-const getGlobalTtsConfig = () => {
-    const row = getGlobalTtsConfigStmt?.get?.() || null;
-    return {
-        provider: 'aliyun',
-        model: String(row?.tts_model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
-        voice: String(row?.tts_voice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE,
-        apiKey: String(row?.api_key || '').trim(),
-        format: String(row?.audio_format || DEFAULT_TTS_FORMAT).trim() || DEFAULT_TTS_FORMAT,
-        updatedAt: row?.updated_at ? String(row.updated_at) : null
-    };
-};
-
-const getTtsStorageMeta = () => ({
-    dbPath: tourLoaderDbPath,
-    writable: Boolean(upsertGlobalTtsConfigStmt && getGlobalTtsConfigStmt)
-});
-
 const normalizeTaskVoice = (model, voice) => {
-    const options = TTS_VOICE_OPTIONS_BY_MODEL[String(model || '').trim()] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
     const normalized = String(voice || '').trim();
-    return options.includes(normalized) ? normalized : '';
-};
-
-const saveGlobalTtsConfig = ({ model, voice, apiKey, format }) => {
-    if (!upsertGlobalTtsConfigStmt) throw new Error('TTS config storage unavailable');
-    const now = new Date().toISOString();
-    upsertGlobalTtsConfigStmt.run({
-        tts_model: String(model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
-        tts_voice: String(voice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE,
-        api_key: String(apiKey || '').trim(),
-        audio_format: String(format || DEFAULT_TTS_FORMAT).trim() || DEFAULT_TTS_FORMAT,
-        updated_at: now
-    });
-    return getGlobalTtsConfig();
+    if (!normalized) return '';
+    const selected = normalizeTtsSelection({ model, voice: normalized });
+    return selected.voice === normalized ? normalized : '';
 };
 
 const maskSecret = (value) => {
@@ -183,224 +84,13 @@ const maskSecret = (value) => {
     return `${text.slice(0, 3)}***${text.slice(-3)}`;
 };
 
-const wsDataToBuffer = async (data) => {
-    if (!data) return null;
-    if (Buffer.isBuffer(data)) return data;
-    if (data instanceof ArrayBuffer) return Buffer.from(data);
-    if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-    if (typeof Blob !== 'undefined' && data instanceof Blob) {
-        return Buffer.from(await data.arrayBuffer());
-    }
-    if (typeof data === 'string') return null;
-    return null;
-};
-
-const synthesizeDashscopeSpeech = async ({ apiKey, model, voice, format, text }) => {
-    const trimmed = String(text || '').trim();
-    if (!trimmed) {
-        return { audioUrl: null, debug: { status: 'skipped', reason: 'empty-text' } };
-    }
-    return new Promise((resolve, reject) => {
-        const taskId = randomUUID();
-        const chunks = [];
-        let settled = false;
-        let continued = false;
-        const timeoutId = setTimeout(() => {
-            fail(new Error('Alibaba TTS timeout'));
-        }, TTS_CONNECT_TIMEOUT_MS);
-
-        const cleanup = () => {
-            clearTimeout(timeoutId);
-            try {
-                ws.close();
-            } catch {
-                // ignore close failure
-            }
-        };
-
-        const fail = (error) => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            reject(error instanceof Error ? error : new Error(String(error)));
-        };
-
-        const succeed = () => {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            const audioBuffer = Buffer.concat(chunks);
-            if (audioBuffer.length < 1) {
-                reject(new Error('Alibaba TTS returned empty audio'));
-                return;
-            }
-            const mimeType = String(format || DEFAULT_TTS_FORMAT).toLowerCase() === 'wav' ? 'audio/wav' : 'audio/mpeg';
-            resolve({
-                audioUrl: `data:${mimeType};base64,${audioBuffer.toString('base64')}`,
-                debug: {
-                    status: 'ok',
-                    provider: 'aliyun',
-                    endpoint: DASHSCOPE_WS_URL,
-                    model,
-                    voice,
-                    format,
-                    taskId,
-                    bytes: audioBuffer.length,
-                    textLength: trimmed.length
-                }
-            });
-        };
-
-        const ws = new WebSocket(DASHSCOPE_WS_URL, {
-            headers: {
-                Authorization: `Bearer ${apiKey}`
-            }
-        });
-        ws.binaryType = 'arraybuffer';
-
-        ws.on('open', () => {
-            ws.send(JSON.stringify({
-                header: {
-                    action: 'run-task',
-                    task_id: taskId,
-                    streaming: 'duplex'
-                },
-                payload: {
-                    task_group: 'audio',
-                    task: 'tts',
-                    function: 'SpeechSynthesizer',
-                    model,
-                    parameters: {
-                        text_type: 'PlainText',
-                        voice,
-                        format
-                    },
-                    input: {}
-                }
-            }));
-        });
-
-        ws.on('message', (data, isBinary) => {
-            void (async () => {
-                const maybeBuffer = isBinary ? await wsDataToBuffer(data) : null;
-                if (maybeBuffer) {
-                    chunks.push(maybeBuffer);
-                    return;
-                }
-
-                const raw = Buffer.isBuffer(data) ? data.toString('utf8') : String(data || '');
-                if (!raw) return;
-
-                let payload = null;
-                try {
-                    payload = JSON.parse(raw);
-                } catch {
-                    return;
-                }
-
-                const eventName = String(
-                    payload?.header?.event
-                    || payload?.header?.name
-                    || payload?.header?.status
-                    || payload?.event
-                    || payload?.type
-                    || ''
-                ).toLowerCase();
-                const errorMessage = payload?.header?.error_message || payload?.payload?.error?.message || payload?.message || '';
-
-                if (eventName.includes('failed') || errorMessage) {
-                    fail(new Error(String(errorMessage || 'Alibaba TTS failed')));
-                    return;
-                }
-
-                if (!continued && eventName.includes('started')) {
-                    continued = true;
-                    ws.send(JSON.stringify({
-                        header: {
-                            action: 'continue-task',
-                            task_id: taskId,
-                            streaming: 'duplex'
-                        },
-                        payload: {
-                            input: {
-                                text: trimmed
-                            }
-                        }
-                    }));
-                    ws.send(JSON.stringify({
-                        header: {
-                            action: 'finish-task',
-                            task_id: taskId,
-                            streaming: 'duplex'
-                        },
-                        payload: {
-                            input: {}
-                        }
-                    }));
-                    return;
-                }
-
-                if (eventName.includes('finished')) {
-                    succeed();
-                }
-            })().catch((error) => fail(error));
-        });
-
-        ws.on('error', (error) => {
-            fail(new Error(`Alibaba TTS websocket error: ${String(error?.message || 'unknown')}`));
-        });
-
-        ws.on('close', (code) => {
-            if (settled) return;
-            if (chunks.length > 0) {
-                succeed();
-                return;
-            }
-            fail(new Error(`Alibaba TTS websocket closed (${code})`));
-        });
-    });
-};
-
-const synthesizeDashscopeSpeechWithFallback = async ({ apiKey, model, voice, format, text }) => {
-    const candidates = [model, ...(TTS_MODEL_FALLBACKS[model] || [])].filter(Boolean);
-    let lastError = null;
-    for (let i = 0; i < candidates.length; i += 1) {
-        const candidateModel = candidates[i];
-        try {
-            const result = await synthesizeDashscopeSpeech({
-                apiKey,
-                model: candidateModel,
-                voice,
-                format,
-                text
-            });
-            return {
-                audioUrl: result.audioUrl,
-                debug: {
-                    ...result.debug,
-                    requestedModel: model,
-                    effectiveModel: candidateModel,
-                    fallbackUsed: candidateModel !== model,
-                    fallbackCandidates: candidates.slice(1)
-                }
-            };
-        } catch (error) {
-            lastError = error instanceof Error ? error : new Error(String(error));
-            const message = String(lastError.message || '');
-            const canFallback = i < candidates.length - 1 && /418|InvalidParameter/i.test(message);
-            if (!canFallback) throw lastError;
-        }
-    }
-    throw lastError || new Error('Alibaba TTS failed');
-};
-
 const ensureTaskAudioUrl = async (task) => {
     if (!task?.content?.text) {
         return { audioUrl: null, debug: { status: 'skipped', reason: 'no-text', provider: 'aliyun' } };
     }
+    const tts = getTtsConfig();
+    const effectiveVoice = normalizeTaskVoice(tts.model, task.ttsVoice) || tts.voice;
     if (task.content.audioUrl) {
-        const tts = getGlobalTtsConfig();
-        const effectiveVoice = normalizeTaskVoice(tts.model, task.ttsVoice) || tts.voice;
         return {
             audioUrl: task.content.audioUrl,
             debug: {
@@ -414,8 +104,6 @@ const ensureTaskAudioUrl = async (task) => {
             }
         };
     }
-    const tts = getGlobalTtsConfig();
-    const effectiveVoice = normalizeTaskVoice(tts.model, task.ttsVoice) || tts.voice;
     if (!tts.apiKey) {
         return {
             audioUrl: null,
@@ -463,6 +151,7 @@ const serializeTask = async (task) => {
         look: task.look,
         content: { text: task.content.text, audio_url: task.content.audioUrl },
         execution_mode: task.behavior,
+        target_fov: task.targetFov ?? null,
         move_speed_mps: task.moveSpeedMps,
         dwell_ms: task.dwellMs,
         tts_lang: task.ttsLang,
@@ -756,7 +445,8 @@ const readBodyBuffer = (req) => new Promise((resolve, reject) => {
     req.on('error', reject);
 });
 
-const ffmpegPath = () => process.env.FFMPEG_PATH || 'ffmpeg';
+const bundledFfmpegPath = typeof ffmpegInstaller?.path === 'string' ? ffmpegInstaller.path : '';
+const ffmpegPath = () => process.env.FFMPEG_PATH || bundledFfmpegPath || 'ffmpeg';
 const transcodeJobs = new Map();
 const MP4_COMPRESSION_PRESETS = {
     original: { mode: 'crf', preset: 'veryfast', crf: 20, audioBitrate: '256k' },
@@ -1094,12 +784,13 @@ const parseCsvTasks = (csvText) => {
         const targetZ = toNum(get(parts, 'target_z'), 0);
         const yaw = toNullableNum(get(parts, 'target_yaw'));
         const pitch = toNullableNum(get(parts, 'target_pitch'));
+        const targetFov = toNullableNum(get(parts, 'target_fov'));
         const speed = toNum(get(parts, 'move_speed_mps'), 0.8);
         const dwell = Math.max(0, Math.floor(toNum(get(parts, 'dwell_ms'), 900)));
         const text = get(parts, 'content') || '';
         const audioUrl = get(parts, 'audio_url') || null;
         const tts = inferCsvTtsLang(get(parts, 'tts_lang'), text);
-        const ttsVoice = normalizeTaskVoice(getGlobalTtsConfig().model, get(parts, 'tts_voice')) || null;
+        const ttsVoice = normalizeTaskVoice(getTtsConfig().model, get(parts, 'tts_voice')) || null;
         const seq = toNum(get(parts, 'seq'), row + 1);
 
         return {
@@ -1114,9 +805,11 @@ const parseCsvTasks = (csvText) => {
                 poiName,
                 target: { x: targetX, y: targetY, z: targetZ },
                 look: { yaw, pitch },
+                targetFov,
                 content: { text, audioUrl },
                 moveSpeedMps: speed,
                 dwellMs: dwell,
+                targetFov,
                 ttsLang: tts,
                 ttsVoice,
                 interruptFlag: false,
@@ -1248,7 +941,7 @@ const server = createServer(async (req, res) => {
         const url = new URL(req.url, 'http://localhost');
 
         if (url.pathname === '/api/ot-tour-player/health' && req.method === 'GET') {
-            json(res, 200, { ok: true, service: 'ot-tour-player', version: '1.0.0', ttsStorage: getTtsStorageMeta() });
+            json(res, 200, { ok: true, service: 'ot-tour-player', version: '1.0.0' });
             return;
         }
 
@@ -1441,25 +1134,18 @@ const server = createServer(async (req, res) => {
         }
 
         if (url.pathname === '/api/ot-tour-player/tts-config' && req.method === 'GET') {
-            const tts = getGlobalTtsConfig();
+            const tts = getTtsConfig();
             json(res, 200, {
                 ok: true,
-                tts,
-                storage: getTtsStorageMeta()
+                tts: {
+                    provider: tts.provider,
+                    model: tts.model,
+                    voice: tts.voice,
+                    format: tts.format,
+                    updatedAt: tts.updatedAt,
+                    source: 'cinematic-lite'
+                }
             });
-            return;
-        }
-
-        if (url.pathname === '/api/ot-tour-player/tts-config' && req.method === 'PUT') {
-            const raw = await readBody(req);
-            const body = JSON.parse(raw || '{}');
-            const saved = saveGlobalTtsConfig({
-                model: body?.tts?.model,
-                voice: body?.tts?.voice,
-                apiKey: body?.tts?.apiKey,
-                format: body?.tts?.format || DEFAULT_TTS_FORMAT
-            });
-            json(res, 200, { ok: true, tts: saved, storage: getTtsStorageMeta() });
             return;
         }
 

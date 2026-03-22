@@ -1,0 +1,456 @@
+:root {
+    color-scheme: dark;
+    --openmesh-bg-0: #000000;
+    --openmesh-bg-1: #000000;
+    --openmesh-bg-2: rgba(14, 21, 31, 0.88);
+    --openmesh-bg-3: rgba(24, 34, 48, 0.94);
+    --openmesh-line: rgba(132, 155, 181, 0.34);
+    --openmesh-line-strong: rgba(176, 197, 221, 0.45);
+    --openmesh-text: #edf4fb;
+    --openmesh-text-soft: #a7b8cb;
+    --openmesh-accent: #d3aa57;
+    --openmesh-accent-soft: rgba(211, 170, 87, 0.18);
+    --openmesh-danger: #ef8a74;
+    --openmesh-console-h: 208px;
+    --openmesh-shadow: 0 26px 60px rgba(0, 0, 0, 0.4);
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    width: 100%;
+    height: 100%;
+    min-height: 100dvh;
+    margin: 0;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 50%, #15181c 0%, #08090b 100%);
+    color: var(--openmesh-text);
+    font-family: "Segoe UI", "Noto Sans SC", "Noto Sans", sans-serif;
+}
+
+button,
+input,
+select {
+    font: inherit;
+}
+
+#openmesh-app {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 100dvh;
+}
+
+#openmesh-canvas-shell,
+#openmesh-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+#openmesh-canvas-shell {
+    position: relative;
+}
+
+#openmesh-canvas {
+    image-rendering: auto;
+}
+
+#openmesh-overlay {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.openmesh-panel {
+    pointer-events: auto;
+    background: linear-gradient(180deg, rgba(26, 36, 50, 0.94), rgba(12, 18, 28, 0.9));
+    border: 1px solid var(--openmesh-line);
+    border-radius: 16px;
+    backdrop-filter: blur(12px);
+    box-shadow: var(--openmesh-shadow);
+    cursor: grab;
+}
+
+.openmesh-panel.dragging {
+    cursor: grabbing;
+}
+
+#openmesh-status,
+.openmesh-stat-value,
+.openmesh-stat-label,
+#openmesh-console-log,
+#openmesh-view-hint,
+#openmesh-loader-note {
+    margin: 0;
+    line-height: 1.45;
+}
+
+#openmesh-loader-note,
+#openmesh-view-hint,
+.openmesh-stat-label {
+    color: var(--openmesh-text-soft);
+}
+
+#openmesh-status {
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #fbf2da;
+}
+
+#openmesh-loader {
+    position: absolute;
+    top: 18px;
+    right: 18px;
+    min-width: 340px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+#openmesh-loader.hidden {
+    display: none;
+}
+
+#openmesh-loader.visible {
+    display: flex;
+}
+
+.openmesh-section-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #f1f6fb;
+}
+
+.openmesh-actions,
+.openmesh-toggle-grid {
+    display: grid;
+    gap: 10px;
+}
+
+.openmesh-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.openmesh-toggle-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.openmesh-button,
+.openmesh-toggle {
+    border: 1px solid var(--openmesh-line-strong);
+    border-radius: 12px;
+    background: rgba(29, 41, 56, 0.92);
+    color: var(--openmesh-text);
+    min-height: 44px;
+    padding: 0 14px;
+    cursor: pointer;
+    transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+}
+
+.openmesh-button:hover,
+.openmesh-toggle:hover {
+    transform: translateY(-1px);
+    border-color: rgba(214, 183, 118, 0.62);
+}
+
+.openmesh-button.primary {
+    background: linear-gradient(180deg, rgba(92, 67, 26, 0.96), rgba(59, 42, 17, 0.96));
+    border-color: rgba(211, 170, 87, 0.62);
+}
+
+.openmesh-toggle.active {
+    background: linear-gradient(180deg, rgba(73, 56, 24, 0.96), rgba(54, 41, 17, 0.92));
+    border-color: rgba(211, 170, 87, 0.72);
+    color: #fff1cf;
+}
+
+#openmesh-stats {
+    position: absolute;
+    top: 176px;
+    right: 18px;
+    width: 238px;
+    padding: 14px 16px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.openmesh-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.openmesh-stat-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: #fff6e1;
+}
+
+.openmesh-stat-label {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+#openmesh-gizmo-panel {
+    position: absolute;
+    top: 360px;
+    right: 18px;
+    width: 238px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+#openmesh-rotation-readout {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.openmesh-rotation-chip {
+    padding: 10px 8px;
+    border-radius: 10px;
+    background: rgba(14, 21, 32, 0.84);
+    border: 1px solid rgba(112, 132, 157, 0.28);
+    text-align: center;
+}
+
+.openmesh-rotation-chip .axis {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: var(--openmesh-text-soft);
+    letter-spacing: 0.16em;
+}
+
+.openmesh-rotation-chip .value {
+    font-size: 14px;
+    font-weight: 700;
+    color: #fef7e4;
+}
+
+#openmesh-view-cube-shell {
+    position: absolute;
+    top: 18px;
+    right: 390px;
+    width: 132px;
+    height: 132px;
+    padding: 10px;
+    pointer-events: auto;
+}
+
+#openmesh-view-cube {
+    width: 100%;
+    height: 100%;
+}
+
+#openmesh-view-cube text {
+    fill: #ffffff;
+}
+
+#openmesh-console {
+    position: fixed;
+    left: 18px;
+    right: 18px;
+    bottom: env(safe-area-inset-bottom);
+    height: 60px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    pointer-events: auto;
+    z-index: 30;
+}
+
+#openmesh-console.expanded {
+    height: var(--openmesh-console-h);
+}
+
+#openmesh-console-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    gap: 14px;
+    min-height: 60px;
+    padding: 10px 16px;
+    border-bottom: 1px solid transparent;
+}
+
+#openmesh-console.expanded #openmesh-console-head {
+    border-bottom-color: rgba(122, 145, 170, 0.22);
+}
+
+#openmesh-console-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+#openmesh-console-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+#openmesh-console-actions {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 8px;
+    overflow-x: auto;
+}
+
+.openmesh-console-button {
+    min-width: 74px;
+    height: 30px;
+    border-radius: 9px;
+    border: 1px solid rgba(114, 136, 161, 0.3);
+    background: rgba(29, 40, 54, 0.92);
+    color: var(--openmesh-text);
+    cursor: pointer;
+}
+
+.openmesh-console-button.active {
+    border-color: rgba(211, 170, 87, 0.62);
+    background: linear-gradient(180deg, rgba(92, 67, 26, 0.96), rgba(59, 42, 17, 0.96));
+}
+
+#openmesh-console-log {
+    flex: 1;
+    overflow: auto;
+    padding: 12px 16px 16px;
+    font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+}
+
+#openmesh-console.collapsed #openmesh-console-log {
+    display: none;
+}
+
+.openmesh-log-line {
+    display: grid;
+    grid-template-columns: 66px 54px 1fr;
+    gap: 12px;
+    padding: 4px 0;
+}
+
+.openmesh-log-line .time,
+.openmesh-log-line .level {
+    color: var(--openmesh-text-soft);
+}
+
+.openmesh-log-line.warn .level,
+.openmesh-log-line.warn .message {
+    color: #f7d18a;
+}
+
+.openmesh-log-line.error .level,
+.openmesh-log-line.error .message {
+    color: var(--openmesh-danger);
+}
+
+#openmesh-spinner {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(6, 10, 16, 0.54);
+    pointer-events: auto;
+}
+
+#openmesh-spinner.visible {
+    display: flex;
+}
+
+#openmesh-spinner::before,
+#openmesh-spinner::after {
+    content: '';
+    position: absolute;
+    border: 3px solid rgba(255, 236, 192, 0.85);
+    border-left: none;
+    border-radius: 0 34px 34px 0;
+    transform-origin: 0 50%;
+    animation: openmesh-spin 1s linear infinite;
+}
+
+#openmesh-spinner::before {
+    width: 18px;
+    height: 36px;
+}
+
+#openmesh-spinner::after {
+    width: 10px;
+    height: 18px;
+    animation-direction: reverse;
+}
+
+#openmesh-spinner-label {
+    margin-top: 54px;
+    font-size: 13px;
+    color: #f8e8bf;
+}
+
+@keyframes openmesh-spin {
+    from {
+        transform: rotate(0deg);
+    }
+
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (max-width: 1040px) {
+    #openmesh-loader {
+        max-width: min(100%, 420px);
+    }
+}
+
+@media (max-width: 720px) {
+    #openmesh-view-cube-shell {
+        display: none;
+    }
+
+    #openmesh-loader {
+        min-width: 0;
+        width: 100%;
+        left: 12px;
+        right: 12px;
+        top: 12px;
+    }
+
+    .openmesh-actions,
+    .openmesh-toggle-grid,
+    #openmesh-stats,
+    #openmesh-rotation-readout {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    #openmesh-console {
+        left: 12px;
+        right: 12px;
+        bottom: 12px;
+    }
+
+    .openmesh-log-line {
+        grid-template-columns: 1fr;
+        gap: 2px;
+        padding-bottom: 8px;
+    }
+}

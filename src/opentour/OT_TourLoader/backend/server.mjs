@@ -1,11 +1,12 @@
 import { createServer } from 'node:http';
-import { mkdirSync } from 'node:fs';
-import { dirname, join, normalize } from 'node:path';
+import { createReadStream, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Agent as UndiciAgent, ProxyAgent as UndiciProxyAgent } from 'undici';
 
 import Database from 'better-sqlite3';
+import WebSocket from 'ws';
 
 const DEFAULT_PROMPT_TEMPLATE = '你是世界级的，正在描述你的视角给观众讲解，不要旁白和画外音。content 只允许使用：中文、英文、数字、空格，以及中文标点 `，。；：！？（）`禁止使用任何英文 CSV 控制字符，尤其是 `,` 和 `"`，绝对不要让 content 出现真实换行，不包含：\\r \\n \\t ，整体文字少于100字。';
 const DEFAULT_CSV_PROMPT_TEMPLATE = `You are a CSV tour route planner.
@@ -37,6 +38,9 @@ Output format:
 const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
 const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
 const DEFAULT_TTS_VOICE = 'longyuan_v3';
+const DEFAULT_TTS_FORMAT = 'mp3';
+const DASHSCOPE_TTS_WS_URL = process.env.DASHSCOPE_TTS_WS_URL || 'wss://dashscope.aliyuncs.com/api-ws/v1/inference';
+const TTS_CONNECT_TIMEOUT_MS = 30000;
 const DEFAULT_CSV_TARGET_DURATION_SEC = 30;
 const DEFAULT_POI_FOV = 60;
 const MIN_POI_FOV = 20;
@@ -59,6 +63,9 @@ const TTS_VOICE_OPTIONS_BY_MODEL = {
         'longyuan_v3', 'longyue_v3', 'longsanshu_v3', 'longshuo_v3', 'loongbella_v3', 'longxiaochun_v3',
         'longxiaoxia_v3', 'longanwen_v3', 'longanli_v3', 'longanlang_v3', 'longyingling_v3', 'longanzhi_v3'
     ]
+};
+const TTS_MODEL_FALLBACKS = {
+    'cosyvoice-v3-plus': ['cosyvoice-v3-flash']
 };
 const GLOBAL_LLM_CONFIG_KEY = '__GLOBAL__';
 const LLM_CONNECT_TIMEOUT_MS = 30000;
@@ -89,7 +96,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = normalize(join(__dirname, '../../../../..'));
 const dataDir = join(repoRoot, 'data');
+const cinematicMediaDir = join(dataDir, 'cinematic-media');
 mkdirSync(dataDir, { recursive: true });
+mkdirSync(cinematicMediaDir, { recursive: true });
 const db = new Database(join(dataDir, 'ot-tour-loader.db'));
 
 db.exec(`
@@ -124,6 +133,38 @@ CREATE TABLE IF NOT EXISTS model_pois (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (model_filename, poi_id)
 );
+
+CREATE TABLE IF NOT EXISTS model_poi_hotspots (
+    model_filename TEXT NOT NULL,
+    poi_id TEXT NOT NULL,
+    hotspot_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    trigger_mode TEXT NOT NULL,
+    delay_ms INTEGER NOT NULL DEFAULT 0,
+    payload_type TEXT NOT NULL,
+    display_mode TEXT NOT NULL,
+    region_x REAL NOT NULL,
+    region_y REAL NOT NULL,
+    region_width REAL NOT NULL,
+    region_height REAL NOT NULL,
+    media_src TEXT,
+    caption TEXT,
+    tts_text TEXT,
+    confirm_message TEXT,
+    confirm_confirm_text TEXT,
+    confirm_cancel_text TEXT,
+    anchor_world_x REAL,
+    anchor_world_y REAL,
+    anchor_world_z REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (model_filename, poi_id, hotspot_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_poi_hotspots_model_poi_sort
+ON model_poi_hotspots (model_filename, poi_id, sort_order);
 
 CREATE TABLE IF NOT EXISTS model_llm_configs (
     model_filename TEXT PRIMARY KEY,
@@ -166,6 +207,40 @@ CREATE TABLE IF NOT EXISTS model_csv_versions (
 
 CREATE INDEX IF NOT EXISTS idx_model_csv_versions_model_updated
 ON model_csv_versions (model_filename, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS model_cinematic_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_filename TEXT NOT NULL,
+    version_no INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    simple_prompt TEXT,
+    planner_prompt TEXT,
+    scene_description TEXT,
+    story_background TEXT,
+    style_text TEXT,
+    target_duration_sec REAL,
+    selected_poi_ids_json TEXT,
+    plan_json TEXT,
+    csv_text TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    confirmed_at TEXT,
+    UNIQUE(model_filename, version_no)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_cinematic_versions_model_updated
+ON model_cinematic_versions (model_filename, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS global_tts_configs (
+    config_key TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    tts_model TEXT NOT NULL,
+    tts_voice TEXT NOT NULL,
+    api_key TEXT NOT NULL,
+    audio_format TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 `);
 
 try {
@@ -297,6 +372,62 @@ FROM model_pois
 WHERE model_filename = ?
 ORDER BY sort_order ASC, poi_id ASC
 `);
+const getHotspotsStmt = db.prepare(`
+SELECT
+    model_filename, poi_id, hotspot_id, title, sort_order, enabled,
+    trigger_mode, delay_ms, payload_type, display_mode,
+    region_x, region_y, region_width, region_height,
+    media_src, caption, tts_text,
+    confirm_message, confirm_confirm_text, confirm_cancel_text,
+    anchor_world_x, anchor_world_y, anchor_world_z,
+    created_at, updated_at
+FROM model_poi_hotspots
+WHERE model_filename = ?
+ORDER BY poi_id ASC, sort_order ASC, hotspot_id ASC
+`);
+const clearModelHotspotsStmt = db.prepare('DELETE FROM model_poi_hotspots WHERE model_filename = ?');
+const clearPoiHotspotsStmt = db.prepare('DELETE FROM model_poi_hotspots WHERE model_filename = ? AND poi_id = ?');
+const upsertHotspotStmt = db.prepare(`
+INSERT INTO model_poi_hotspots (
+    model_filename, poi_id, hotspot_id, title, sort_order, enabled,
+    trigger_mode, delay_ms, payload_type, display_mode,
+    region_x, region_y, region_width, region_height,
+    media_src, caption, tts_text,
+    confirm_message, confirm_confirm_text, confirm_cancel_text,
+    anchor_world_x, anchor_world_y, anchor_world_z,
+    created_at, updated_at
+) VALUES (
+    @model_filename, @poi_id, @hotspot_id, @title, @sort_order, @enabled,
+    @trigger_mode, @delay_ms, @payload_type, @display_mode,
+    @region_x, @region_y, @region_width, @region_height,
+    @media_src, @caption, @tts_text,
+    @confirm_message, @confirm_confirm_text, @confirm_cancel_text,
+    @anchor_world_x, @anchor_world_y, @anchor_world_z,
+    @created_at, @updated_at
+)
+ON CONFLICT(model_filename, poi_id, hotspot_id) DO UPDATE SET
+    title = excluded.title,
+    sort_order = excluded.sort_order,
+    enabled = excluded.enabled,
+    trigger_mode = excluded.trigger_mode,
+    delay_ms = excluded.delay_ms,
+    payload_type = excluded.payload_type,
+    display_mode = excluded.display_mode,
+    region_x = excluded.region_x,
+    region_y = excluded.region_y,
+    region_width = excluded.region_width,
+    region_height = excluded.region_height,
+    media_src = excluded.media_src,
+    caption = excluded.caption,
+    tts_text = excluded.tts_text,
+    confirm_message = excluded.confirm_message,
+    confirm_confirm_text = excluded.confirm_confirm_text,
+    confirm_cancel_text = excluded.confirm_cancel_text,
+    anchor_world_x = excluded.anchor_world_x,
+    anchor_world_y = excluded.anchor_world_y,
+    anchor_world_z = excluded.anchor_world_z,
+    updated_at = excluded.updated_at
+`);
 const deletePoiStmt = db.prepare('DELETE FROM model_pois WHERE model_filename = ? AND poi_id = ?');
 const clearModelPoisStmt = db.prepare('DELETE FROM model_pois WHERE model_filename = ?');
 const getPoiByIdStmt = db.prepare('SELECT * FROM model_pois WHERE model_filename = ? AND poi_id = ?');
@@ -392,6 +523,47 @@ ON CONFLICT(model_filename) DO UPDATE SET
     updated_at = excluded.updated_at
 `);
 const deleteNonGlobalLlmConfigsStmt = db.prepare('DELETE FROM model_llm_configs WHERE model_filename <> ?');
+const getGlobalTtsConfigStmt = db.prepare(`
+SELECT config_key, provider, tts_model, tts_voice, api_key, audio_format, updated_at
+FROM global_tts_configs
+WHERE config_key = 'aliyun'
+`);
+const upsertGlobalTtsConfigStmt = db.prepare(`
+INSERT INTO global_tts_configs (
+    config_key,
+    provider,
+    tts_model,
+    tts_voice,
+    api_key,
+    audio_format,
+    updated_at
+) VALUES (
+    'aliyun',
+    'aliyun',
+    @tts_model,
+    @tts_voice,
+    @api_key,
+    @audio_format,
+    @updated_at
+)
+ON CONFLICT(config_key) DO UPDATE SET
+    provider = excluded.provider,
+    tts_model = excluded.tts_model,
+    tts_voice = excluded.tts_voice,
+    api_key = excluded.api_key,
+    audio_format = excluded.audio_format,
+    updated_at = excluded.updated_at
+`);
+
+if (!getGlobalTtsConfigStmt.get()) {
+    upsertGlobalTtsConfigStmt.run({
+        tts_model: DEFAULT_TTS_MODEL,
+        tts_voice: DEFAULT_TTS_VOICE,
+        api_key: '',
+        audio_format: DEFAULT_TTS_FORMAT,
+        updated_at: new Date().toISOString()
+    });
+}
 
 const upsertPromptConfigStmt = db.prepare(`
 INSERT INTO model_prompt_configs (
@@ -502,6 +674,104 @@ WHERE id = @id AND model_filename = @model_filename
 `);
 const deleteCsvVersionStmt = db.prepare('DELETE FROM model_csv_versions WHERE id = ? AND model_filename = ?');
 
+const getCinematicVersionMaxNoStmt = db.prepare(`
+SELECT COALESCE(MAX(version_no), 0) + 1 AS next_version_no
+FROM model_cinematic_versions
+WHERE model_filename = ?
+`);
+const insertCinematicVersionStmt = db.prepare(`
+INSERT INTO model_cinematic_versions (
+    model_filename,
+    version_no,
+    status,
+    source,
+    simple_prompt,
+    planner_prompt,
+    scene_description,
+    story_background,
+    style_text,
+    target_duration_sec,
+    selected_poi_ids_json,
+    plan_json,
+    csv_text,
+    created_at,
+    updated_at,
+    confirmed_at
+) VALUES (
+    @model_filename,
+    @version_no,
+    @status,
+    @source,
+    @simple_prompt,
+    @planner_prompt,
+    @scene_description,
+    @story_background,
+    @style_text,
+    @target_duration_sec,
+    @selected_poi_ids_json,
+    @plan_json,
+    @csv_text,
+    @created_at,
+    @updated_at,
+    @confirmed_at
+)
+`);
+const getCinematicVersionListStmt = db.prepare(`
+SELECT
+    id,
+    model_filename,
+    version_no,
+    status,
+    source,
+    created_at,
+    updated_at,
+    confirmed_at,
+    LENGTH(plan_json) AS plan_chars
+FROM model_cinematic_versions
+WHERE model_filename = ?
+ORDER BY version_no DESC, id DESC
+`);
+const getCinematicVersionByIdStmt = db.prepare(`
+SELECT
+    id,
+    model_filename,
+    version_no,
+    status,
+    source,
+    simple_prompt,
+    planner_prompt,
+    scene_description,
+    story_background,
+    style_text,
+    target_duration_sec,
+    selected_poi_ids_json,
+    plan_json,
+    csv_text,
+    created_at,
+    updated_at,
+    confirmed_at
+FROM model_cinematic_versions
+WHERE id = ? AND model_filename = ?
+`);
+const updateCinematicVersionStmt = db.prepare(`
+UPDATE model_cinematic_versions
+SET status = @status,
+    source = @source,
+    simple_prompt = @simple_prompt,
+    planner_prompt = @planner_prompt,
+    scene_description = @scene_description,
+    story_background = @story_background,
+    style_text = @style_text,
+    target_duration_sec = @target_duration_sec,
+    selected_poi_ids_json = @selected_poi_ids_json,
+    plan_json = @plan_json,
+    csv_text = @csv_text,
+    updated_at = @updated_at,
+    confirmed_at = @confirmed_at
+WHERE id = @id AND model_filename = @model_filename
+`);
+const deleteCinematicVersionStmt = db.prepare('DELETE FROM model_cinematic_versions WHERE id = ? AND model_filename = ?');
+
 const migrateLlmConfigStorage = () => {
     const now = new Date().toISOString();
     const legacyRows = db.prepare(`
@@ -607,6 +877,8 @@ const toNum = (value, fallback) => {
     return Number.isFinite(n) ? n : fallback;
 };
 
+const clamp01 = (value) => Math.max(0, Math.min(1, Number(value) || 0));
+
 const toFov = (value, fallback = DEFAULT_POI_FOV) => {
     const n = toNum(value, fallback);
     return Math.max(MIN_POI_FOV, Math.min(MAX_POI_FOV, n));
@@ -663,6 +935,82 @@ const encodeDataUrl = (blob, mime) => {
     return `data:${type};base64,${b.toString('base64')}`;
 };
 
+const guessMimeFromPath = (filePath) => {
+    const ext = String(extname(filePath || '') || '').toLowerCase();
+    switch (ext) {
+        case '.jpg':
+        case '.jpeg': return 'image/jpeg';
+        case '.png': return 'image/png';
+        case '.webp': return 'image/webp';
+        case '.mp4': return 'video/mp4';
+        case '.mov': return 'video/quicktime';
+        case '.mp3': return 'audio/mpeg';
+        case '.wav': return 'audio/wav';
+        case '.m4a': return 'audio/mp4';
+        case '.aac': return 'audio/aac';
+        case '.ogg': return 'audio/ogg';
+        case '.flac': return 'audio/flac';
+        default: return 'application/octet-stream';
+    }
+};
+
+const sanitizeStoredMediaName = (value) => String(value || '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    || 'media.bin';
+
+const storeCinematicMedia = ({ fileName, dataBase64 }) => {
+    const originalName = sanitizeStoredMediaName(fileName || 'media.bin');
+    const ext = String(extname(originalName || '') || '').toLowerCase() || '.bin';
+    const buffer = Buffer.from(String(dataBase64 || ''), 'base64');
+    const hash = createHash('sha1').update(buffer).digest('hex');
+    const storedName = `${hash}${ext}`;
+    const absolutePath = join(cinematicMediaDir, storedName);
+    writeFileSync(absolutePath, buffer);
+    return {
+        storedName,
+        fileName: originalName,
+        absolutePath
+    };
+};
+
+const streamLocalFile = (req, res, rawPath) => {
+    const requested = String(rawPath || '').trim();
+    if (!requested) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'path required');
+    const absolute = requested.startsWith('/') ? resolve(requested) : resolve(repoRoot, requested);
+    let stats;
+    try {
+        stats = statSync(absolute);
+    } catch {
+        return fail(res, 404, 'OT_TL_NOT_FOUND', 'asset file not found');
+    }
+    if (!stats.isFile()) return fail(res, 404, 'OT_TL_NOT_FOUND', 'asset file not found');
+    const mime = guessMimeFromPath(absolute);
+    const range = String(req.headers.range || '').trim();
+    if (range && mime.startsWith('video/')) {
+        const match = /bytes=(\d*)-(\d*)/.exec(range);
+        const start = match && match[1] ? Math.max(0, Number(match[1])) : 0;
+        const end = match && match[2] ? Math.min(stats.size - 1, Number(match[2])) : stats.size - 1;
+        if (start > end || start >= stats.size) return fail(res, 416, 'OT_TL_RANGE_INVALID', 'invalid range');
+        res.writeHead(206, {
+            'Content-Type': mime,
+            'Content-Length': end - start + 1,
+            'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+            'Accept-Ranges': 'bytes',
+            'Access-Control-Allow-Origin': '*'
+        });
+        createReadStream(absolute, { start, end }).pipe(res);
+        return;
+    }
+    res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Length': stats.size,
+        'Accept-Ranges': 'bytes',
+        'Access-Control-Allow-Origin': '*'
+    });
+    createReadStream(absolute).pipe(res);
+};
+
 const mapRow = (row) => ({
     poiId: row.poi_id,
     poiName: row.poi_name,
@@ -685,6 +1033,38 @@ const mapRow = (row) => ({
     updatedAt: row.updated_at
 });
 
+const mapHotspotRow = (row) => ({
+    hotspotId: String(row.hotspot_id || ''),
+    title: String(row.title || ''),
+    enabled: Boolean(Number(row.enabled || 0)),
+    sortOrder: Number(row.sort_order || 0),
+    triggerMode: String(row.trigger_mode || 'click'),
+    delayMs: Math.max(0, Math.floor(Number(row.delay_ms || 0))),
+    payloadType: String(row.payload_type || 'image'),
+    displayMode: String(row.display_mode || 'floating-dom'),
+    region: {
+        x: Number(row.region_x || 0),
+        y: Number(row.region_y || 0),
+        width: Number(row.region_width || 0),
+        height: Number(row.region_height || 0)
+    },
+    mediaSrc: String(row.media_src || ''),
+    caption: String(row.caption || ''),
+    ttsText: String(row.tts_text || ''),
+    confirmMessage: String(row.confirm_message || ''),
+    confirmConfirmText: String(row.confirm_confirm_text || ''),
+    confirmCancelText: String(row.confirm_cancel_text || ''),
+    anchorWorld: Number.isFinite(Number(row.anchor_world_x))
+        ? {
+            x: Number(row.anchor_world_x),
+            y: Number(row.anchor_world_y),
+            z: Number(row.anchor_world_z)
+        }
+        : null,
+    createdAt: String(row.created_at || ''),
+    updatedAt: String(row.updated_at || '')
+});
+
 const mapCsvVersionRow = (row, withText = false) => {
     const base = {
         id: Number(row.id || 0),
@@ -704,6 +1084,42 @@ const mapCsvVersionRow = (row, withText = false) => {
         csvText: String(row.csv_text || ''),
         csvPromptTemplate: row.csv_prompt_template ? String(row.csv_prompt_template) : null,
         movePromptTemplate: row.move_prompt_template ? String(row.move_prompt_template) : null
+    };
+};
+
+const mapCinematicVersionRow = (row, withText = false) => {
+    const base = {
+        id: Number(row.id || 0),
+        modelFilename: String(row.model_filename || ''),
+        versionNo: Number(row.version_no || 0),
+        status: String(row.status || 'draft'),
+        source: String(row.source || 'manual'),
+        createdAt: String(row.created_at || ''),
+        updatedAt: String(row.updated_at || ''),
+        confirmedAt: row.confirmed_at ? String(row.confirmed_at) : null,
+        planChars: Number(row.plan_chars || String(row.plan_json || '').length || 0)
+    };
+    if (!withText) return base;
+    let selectedPoiIds = [];
+    let plan = null;
+    try {
+        const parsedIds = JSON.parse(String(row.selected_poi_ids_json || '[]'));
+        selectedPoiIds = Array.isArray(parsedIds) ? parsedIds.map((item) => String(item || '')) : [];
+    } catch {}
+    try {
+        plan = row.plan_json ? JSON.parse(String(row.plan_json)) : null;
+    } catch {}
+    return {
+        ...base,
+        simplePrompt: String(row.simple_prompt || ''),
+        plannerPrompt: String(row.planner_prompt || ''),
+        sceneDescription: String(row.scene_description || ''),
+        storyBackground: String(row.story_background || ''),
+        styleText: String(row.style_text || ''),
+        targetDurationSec: Number(row.target_duration_sec || 0) || null,
+        selectedPoiIds,
+        plan,
+        csvText: String(row.csv_text || '')
     };
 };
 
@@ -737,10 +1153,51 @@ const createCsvVersion = ({
     return row ? mapCsvVersionRow(row, true) : null;
 };
 
+const createCinematicVersion = ({
+    modelFilename,
+    status = 'draft',
+    source = 'manual',
+    simplePrompt = '',
+    plannerPrompt = '',
+    sceneDescription = '',
+    storyBackground = '',
+    styleText = '',
+    targetDurationSec = null,
+    selectedPoiIds = [],
+    plan = null,
+    csvText = '',
+    confirmedAt = null
+}) => {
+    const now = new Date().toISOString();
+    const nextNoRow = getCinematicVersionMaxNoStmt.get(modelFilename);
+    const versionNo = Math.max(1, Number(nextNoRow?.next_version_no || 1));
+    const result = insertCinematicVersionStmt.run({
+        model_filename: modelFilename,
+        version_no: versionNo,
+        status,
+        source,
+        simple_prompt: String(simplePrompt || ''),
+        planner_prompt: String(plannerPrompt || ''),
+        scene_description: String(sceneDescription || ''),
+        story_background: String(storyBackground || ''),
+        style_text: String(styleText || ''),
+        target_duration_sec: targetDurationSec === null || targetDurationSec === undefined ? null : Number(targetDurationSec),
+        selected_poi_ids_json: JSON.stringify(Array.isArray(selectedPoiIds) ? selectedPoiIds : []),
+        plan_json: plan ? JSON.stringify(plan) : '',
+        csv_text: String(csvText || ''),
+        created_at: now,
+        updated_at: now,
+        confirmed_at: confirmedAt ? String(confirmedAt) : null
+    });
+    const row = getCinematicVersionByIdStmt.get(Number(result.lastInsertRowid), modelFilename);
+    return row ? mapCinematicVersionRow(row, true) : null;
+};
+
 const saveState = db.transaction((modelFilename, profile, pois) => {
     const now = new Date().toISOString();
     upsertProfileStmt.run({ model_filename: modelFilename, eye_height_m: toNum(profile?.eyeHeightM, 1.65), updated_at: now });
     clearModelPoisStmt.run(modelFilename);
+    clearModelHotspotsStmt.run(modelFilename);
     pois.forEach((poi, idx) => {
         const poiId = String(poi.poiId || `poi_${Date.now().toString(36)}_${idx}`).trim();
         const shot = String(poi.screenshotDataUrl || '').trim();
@@ -770,6 +1227,37 @@ const saveState = db.transaction((modelFilename, profile, pois) => {
             content_updated_at: poi.contentUpdatedAt ? String(poi.contentUpdatedAt) : null,
             prompt_updated_at: poi.promptUpdatedAt ? String(poi.promptUpdatedAt) : null,
             updated_at: now
+        });
+        const hotspots = Array.isArray(poi.hotspots) ? poi.hotspots : [];
+        hotspots.forEach((hotspot, hotspotIdx) => {
+            const anchor = hotspot?.anchorWorld || null;
+            upsertHotspotStmt.run({
+                model_filename: modelFilename,
+                poi_id: poiId,
+                hotspot_id: String(hotspot?.hotspotId || `hotspot_${Date.now().toString(36)}_${hotspotIdx}`),
+                title: String(hotspot?.title || `Hotspot ${hotspotIdx + 1}`),
+                sort_order: Number.isFinite(Number(hotspot?.sortOrder)) ? Number(hotspot.sortOrder) : hotspotIdx,
+                enabled: hotspot?.enabled === false ? 0 : 1,
+                trigger_mode: String(hotspot?.triggerMode || 'click'),
+                delay_ms: Math.max(0, Math.floor(toNum(hotspot?.delayMs, 0))),
+                payload_type: String(hotspot?.payloadType || 'image'),
+                display_mode: String(hotspot?.displayMode || 'floating-dom'),
+                region_x: clamp01(toNum(hotspot?.region?.x, 0)),
+                region_y: clamp01(toNum(hotspot?.region?.y, 0)),
+                region_width: clamp01(Math.max(0.02, toNum(hotspot?.region?.width, 0.12))),
+                region_height: clamp01(Math.max(0.02, toNum(hotspot?.region?.height, 0.12))),
+                media_src: hotspot?.mediaSrc ? String(hotspot.mediaSrc) : null,
+                caption: hotspot?.caption ? String(hotspot.caption) : null,
+                tts_text: hotspot?.ttsText ? String(hotspot.ttsText) : null,
+                confirm_message: hotspot?.confirmMessage ? String(hotspot.confirmMessage) : null,
+                confirm_confirm_text: hotspot?.confirmConfirmText ? String(hotspot.confirmConfirmText) : null,
+                confirm_cancel_text: hotspot?.confirmCancelText ? String(hotspot.confirmCancelText) : null,
+                anchor_world_x: anchor && Number.isFinite(Number(anchor.x)) ? Number(anchor.x) : null,
+                anchor_world_y: anchor && Number.isFinite(Number(anchor.y)) ? Number(anchor.y) : null,
+                anchor_world_z: anchor && Number.isFinite(Number(anchor.z)) ? Number(anchor.z) : null,
+                created_at: hotspot?.createdAt ? String(hotspot.createdAt) : now,
+                updated_at: hotspot?.updatedAt ? String(hotspot.updatedAt) : now
+            });
         });
     });
     return now;
@@ -816,6 +1304,8 @@ const endpointForModel = (model) => {
     }
     return 'https://api.openai.com/v1/chat/completions';
 };
+
+const clampRange = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const geminiMaxOutputTokens = (model) => {
     const m = String(model || '').toLowerCase();
@@ -884,6 +1374,183 @@ const normalizeVoiceConfig = (rawConfig) => {
         voicePool,
         resolvedPool: enabled ? voicePool : [fixedVoice]
     };
+};
+
+const getGlobalTtsConfig = () => {
+    const row = getGlobalTtsConfigStmt.get() || null;
+    return {
+        provider: 'aliyun',
+        model: String(row?.tts_model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
+        voice: String(row?.tts_voice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE,
+        apiKey: String(row?.api_key || '').trim(),
+        format: String(row?.audio_format || DEFAULT_TTS_FORMAT).trim() || DEFAULT_TTS_FORMAT,
+        updatedAt: row?.updated_at ? String(row.updated_at) : null
+    };
+};
+
+const wsDataToBuffer = async (data) => {
+    if (!data) return null;
+    if (Buffer.isBuffer(data)) return data;
+    if (data instanceof ArrayBuffer) return Buffer.from(data);
+    if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    if (typeof Blob !== 'undefined' && data instanceof Blob) return Buffer.from(await data.arrayBuffer());
+    if (typeof data === 'string') return null;
+    return null;
+};
+
+const synthesizeDashscopeSpeech = async ({ apiKey, model, voice, format, text }) => {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return { audioUrl: null, debug: { status: 'skipped', reason: 'empty-text' } };
+    return new Promise((resolve, reject) => {
+        const taskId = randomUUID();
+        const chunks = [];
+        let settled = false;
+        let continued = false;
+        const timeoutId = setTimeout(() => {
+            fail(new Error('Alibaba TTS timeout'));
+        }, TTS_CONNECT_TIMEOUT_MS);
+        const cleanup = () => {
+            clearTimeout(timeoutId);
+            try {
+                ws.close();
+            } catch {}
+        };
+        const fail = (error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error instanceof Error ? error : new Error(String(error)));
+        };
+        const succeed = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            const audioBuffer = Buffer.concat(chunks);
+            if (audioBuffer.length < 1) {
+                reject(new Error('Alibaba TTS returned empty audio'));
+                return;
+            }
+            const mimeType = String(format || DEFAULT_TTS_FORMAT).toLowerCase() === 'wav' ? 'audio/wav' : 'audio/mpeg';
+            resolve({
+                audioUrl: `data:${mimeType};base64,${audioBuffer.toString('base64')}`,
+                debug: {
+                    status: 'ok',
+                    provider: 'aliyun',
+                    endpoint: DASHSCOPE_TTS_WS_URL,
+                    model,
+                    voice,
+                    format,
+                    taskId,
+                    bytes: audioBuffer.length,
+                    textLength: trimmed.length
+                }
+            });
+        };
+        const ws = new WebSocket(DASHSCOPE_TTS_WS_URL, {
+            headers: {
+                Authorization: `Bearer ${apiKey}`
+            },
+            handshakeTimeout: TTS_CONNECT_TIMEOUT_MS
+        });
+        ws.binaryType = 'arraybuffer';
+        ws.on('open', () => {
+            ws.send(JSON.stringify({
+                header: {
+                    action: 'run-task',
+                    task_id: taskId,
+                    streaming: 'duplex'
+                },
+                payload: {
+                    task_group: 'audio',
+                    task: 'tts',
+                    function: 'SpeechSynthesizer',
+                    model,
+                    parameters: {
+                        text_type: 'PlainText',
+                        voice,
+                        format: String(format || DEFAULT_TTS_FORMAT).trim() || DEFAULT_TTS_FORMAT
+                    },
+                    input: {}
+                }
+            }));
+        });
+        ws.on('message', (data, isBinary) => {
+            void (async () => {
+                const maybeBuffer = isBinary ? await wsDataToBuffer(data) : null;
+                if (maybeBuffer) {
+                    chunks.push(maybeBuffer);
+                    return;
+                }
+                const raw = Buffer.isBuffer(data) ? data.toString('utf8') : String(data || '');
+                if (!raw) return;
+                let payload = null;
+                try {
+                    payload = JSON.parse(raw);
+                } catch {
+                    return;
+                }
+                const eventName = String(payload?.header?.event || payload?.header?.name || payload?.header?.status || payload?.event || payload?.type || '').toLowerCase();
+                const errorMessage = payload?.header?.error_message || payload?.payload?.error?.message || payload?.message || '';
+                if (eventName.includes('failed') || errorMessage) {
+                    fail(new Error(String(errorMessage || 'Alibaba TTS failed')));
+                    return;
+                }
+                if (!continued && eventName.includes('started')) {
+                    continued = true;
+                    ws.send(JSON.stringify({
+                        header: {
+                            action: 'continue-task',
+                            task_id: taskId,
+                            streaming: 'duplex'
+                        },
+                        payload: {
+                            input: { text: trimmed }
+                        }
+                    }));
+                    ws.send(JSON.stringify({
+                        header: {
+                            action: 'finish-task',
+                            task_id: taskId,
+                            streaming: 'duplex'
+                        },
+                        payload: {
+                            input: {}
+                        }
+                    }));
+                    return;
+                }
+                if (eventName.includes('finished')) {
+                    succeed();
+                }
+            })().catch((error) => fail(error));
+        });
+        ws.on('error', (error) => fail(new Error(`Alibaba TTS websocket error: ${String(error?.message || 'unknown')}`)));
+        ws.on('close', (code) => {
+            if (settled) return;
+            if (chunks.length > 0) {
+                succeed();
+                return;
+            }
+            fail(new Error(`Alibaba TTS websocket closed (${code})`));
+        });
+    });
+};
+
+const synthesizeDashscopeSpeechWithFallback = async ({ apiKey, model, voice, format, text }) => {
+    const candidates = [String(model || '').trim() || DEFAULT_TTS_MODEL, ...(TTS_MODEL_FALLBACKS[String(model || '').trim()] || [])]
+        .filter(Boolean)
+        .filter((item, index, arr) => arr.indexOf(item) === index);
+    let lastError = null;
+    for (let i = 0; i < candidates.length; i += 1) {
+        const candidate = candidates[i];
+        try {
+            const result = await synthesizeDashscopeSpeech({ apiKey, model: candidate, voice, format, text });
+            return { ...result, debug: { ...(result.debug || {}), triedModels: candidates.slice(0, i + 1) } };
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError || new Error('Alibaba TTS failed');
 };
 
 const createVoicePicker = (voiceConfig) => {
@@ -1167,27 +1834,46 @@ const describeErrorCause = (error) => {
 
 const sanitizePromptRequestBody = (body, imageMeta = null) => {
     const cloned = JSON.parse(JSON.stringify(body || {}));
+    const replaceImageEntry = (entry, meta) => {
+        if (entry?.inline_data) {
+            return {
+                inline_data: {
+                    mime_type: entry.inline_data.mime_type || meta?.mime || 'image/png',
+                    data: '<omitted-base64>'
+                }
+            };
+        }
+        if (entry?.image_url?.url && String(entry.image_url.url).startsWith('data:')) {
+            return {
+                ...entry,
+                image_url: {
+                    url: '<omitted-data-url>',
+                    mime_type: meta?.mime || null,
+                    bytes: meta?.bytes || 0,
+                    sha256: meta?.sha256 || null
+                }
+            };
+        }
+        return entry;
+    };
     const parts = cloned?.contents?.[0]?.parts;
     if (Array.isArray(parts)) {
         for (let i = 0; i < parts.length; i += 1) {
-            const p = parts[i];
-            if (p?.inline_data) {
-                parts[i] = {
-                    inline_data: {
-                        mime_type: p.inline_data.mime_type || imageMeta?.mime || 'image/png',
-                        data: '<omitted-base64>'
-                    }
-                };
-            }
-            if (p?.image_url?.url && String(p.image_url.url).startsWith('data:')) {
-                parts[i] = {
-                    image_url: {
-                        url: '<omitted-data-url>',
-                        mime_type: imageMeta?.mime || null,
-                        bytes: imageMeta?.bytes || 0,
-                        sha256: imageMeta?.sha256 || null
-                    }
-                };
+            const meta = Array.isArray(imageMeta) ? imageMeta[i - 1] || imageMeta[i] || null : imageMeta;
+            parts[i] = replaceImageEntry(parts[i], meta);
+        }
+    }
+    const messages = cloned?.messages;
+    if (Array.isArray(messages)) {
+        let imageIdx = 0;
+        for (const message of messages) {
+            if (!Array.isArray(message?.content)) continue;
+            for (let i = 0; i < message.content.length; i += 1) {
+                const entry = message.content[i];
+                const meta = Array.isArray(imageMeta) ? imageMeta[imageIdx] || null : imageMeta;
+                const next = replaceImageEntry(entry, meta);
+                message.content[i] = next;
+                if (entry?.image_url?.url || entry?.inline_data) imageIdx += 1;
             }
         }
     }
@@ -1258,7 +1944,9 @@ const callOpenAI = async ({
     appendLanguageInstruction = true,
     systemInstruction = 'You are a professional tour narration assistant.',
     providerName = 'openai',
-    endpoint = 'https://api.openai.com/v1/chat/completions'
+    endpoint = 'https://api.openai.com/v1/chat/completions',
+    requestBodyOverride = null,
+    requestImageMetas = null
 }) => {
     const userText = appendLanguageInstruction
         ? `${prompt}\n${languageInstruction(poiName)}`
@@ -1270,23 +1958,25 @@ const callOpenAI = async ({
         messages.push({ role: 'system', content: String(systemInstruction) });
     }
     messages.push({ role: 'user', content });
-    const requestBody = {
+    const requestBody = requestBodyOverride || {
         model,
         stream: true,
         temperature: 0.7,
         max_tokens: 1400,
         messages
     };
-    const imageMeta = imageDigest(screenshotDataUrl);
+    const imageMeta = requestImageMetas || imageDigest(screenshotDataUrl);
     if (typeof onRequestPayload === 'function') {
         onRequestPayload({
             provider: providerName,
             endpoint,
             requestBody: sanitizePromptRequestBody(requestBody, imageMeta),
-            hasImage: Boolean(screenshotDataUrl),
-            imageMime: imageMeta.mime,
-            imageBytes: imageMeta.bytes,
-            imageSha256: imageMeta.sha256
+            hasImage: Array.isArray(imageMeta) ? imageMeta.length > 0 : Boolean(screenshotDataUrl),
+            imageMime: Array.isArray(imageMeta) ? null : imageMeta.mime,
+            imageBytes: Array.isArray(imageMeta) ? imageMeta.reduce((sum, item) => sum + Number(item?.bytes || 0), 0) : imageMeta.bytes,
+            imageSha256: Array.isArray(imageMeta) ? null : imageMeta.sha256,
+            imageCount: Array.isArray(imageMeta) ? imageMeta.length : (screenshotDataUrl ? 1 : 0),
+            imageMetas: Array.isArray(imageMeta) ? imageMeta : [imageMeta]
         });
     }
     let response;
@@ -1570,9 +2260,465 @@ const callRealLlm = async ({
     });
 };
 
+const callOpenAIMultimodal = async ({
+    model,
+    apiKey,
+    prompt,
+    imageDataUrls = [],
+    onChunk,
+    onRequestPayload,
+    onRawFrame,
+    systemInstruction = 'You are a professional cinematic planning assistant.',
+    providerName = 'openai',
+    endpoint = 'https://api.openai.com/v1/chat/completions'
+}) => {
+    const content = [{ type: 'text', text: String(prompt || '') }];
+    imageDataUrls.filter(Boolean).forEach((url) => {
+        content.push({ type: 'image_url', image_url: { url } });
+    });
+    const messages = [];
+    if (String(systemInstruction || '').trim()) messages.push({ role: 'system', content: String(systemInstruction) });
+    messages.push({ role: 'user', content });
+    const requestBody = {
+        model,
+        stream: true,
+        temperature: 0.4,
+        max_tokens: 3200,
+        messages
+    };
+    const imageMetas = imageDataUrls.filter(Boolean).map((url) => imageDigest(url));
+    if (typeof onRequestPayload === 'function') {
+        onRequestPayload({
+            provider: providerName,
+            endpoint,
+            requestBody: sanitizePromptRequestBody(requestBody, imageMetas),
+            imageCount: imageMetas.length,
+            imageMetas
+        });
+    }
+    return callOpenAI({
+        model,
+        apiKey,
+        prompt,
+        poiName: 'cinematic_multimodal',
+        screenshotDataUrl: '',
+        onChunk,
+        onRequestPayload: null,
+        onRawFrame,
+        appendLanguageInstruction: false,
+        systemInstruction,
+        providerName,
+        endpoint,
+        requestBodyOverride: requestBody,
+        requestImageMetas: imageMetas
+    });
+};
+
+const callGeminiMultimodal = async ({
+    model,
+    apiKey,
+    prompt,
+    imageDataUrls = [],
+    onChunk,
+    onRequestPayload,
+    onRawFrame,
+    responseMimeType,
+    systemInstruction = ''
+}) => {
+    const parts = [];
+    if (String(systemInstruction || '').trim()) parts.push({ text: String(systemInstruction) });
+    parts.push({ text: String(prompt || '') });
+    const imageMetas = [];
+    imageDataUrls.filter(Boolean).forEach((url) => {
+        const { mime, base64 } = parseDataUrl(url);
+        if (!base64) return;
+        imageMetas.push(imageDigest(url));
+        parts.push({ inline_data: { mime_type: mime || 'image/png', data: base64 } });
+    });
+    const endpointBase = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent`;
+    const requestUrl = `${endpointBase}?alt=sse&key=${encodeURIComponent(apiKey)}`;
+    const thinkingConfig = geminiThinkingConfig(model);
+    const generationConfig = {
+        temperature: 0.4,
+        maxOutputTokens: geminiMaxOutputTokens(model),
+        ...(String(responseMimeType || '').trim() ? { responseMimeType: String(responseMimeType).trim() } : {}),
+        ...(thinkingConfig ? { thinkingConfig } : {})
+    };
+    const requestBody = {
+        contents: [{ role: 'user', parts }],
+        generationConfig
+    };
+    if (typeof onRequestPayload === 'function') {
+        onRequestPayload({
+            provider: 'gemini',
+            endpoint: endpointBase,
+            requestBody: sanitizePromptRequestBody(requestBody, imageMetas),
+            imageCount: imageMetas.length,
+            imageMetas
+        });
+    }
+    let response;
+    try {
+        response = await fetch(requestUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+            dispatcher: llmFetchDispatcher,
+            body: JSON.stringify(requestBody)
+        });
+    } catch (fetchError) {
+        const error = new Error(`Gemini fetch failed: ${String(fetchError?.message || fetchError)}`);
+        error.provider = 'gemini';
+        error.endpoint = endpointBase;
+        error.status = null;
+        error.requestId = null;
+        error.errorCause = describeErrorCause(fetchError);
+        throw error;
+    }
+    const requestId = response.headers.get('x-request-id') || response.headers.get('x-guploader-uploadid') || null;
+    if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        const error = new Error(`Gemini ${response.status}: ${errText.slice(0, 240)}`);
+        error.provider = 'gemini';
+        error.endpoint = endpointBase;
+        error.status = response.status;
+        error.requestId = requestId;
+        error.rawResponse = errText;
+        throw error;
+    }
+    let text = '';
+    let chunkCount = 0;
+    let finishReason = null;
+    let usageMetadata = null;
+    await readSseStream(response, (payload) => {
+        if (typeof onRawFrame === 'function') onRawFrame(payload);
+        try {
+            const json = JSON.parse(payload);
+            const frameFinish = json?.candidates?.[0]?.finishReason || null;
+            if (frameFinish) finishReason = frameFinish;
+            if (json?.usageMetadata) usageMetadata = json.usageMetadata;
+            const frameText = String(extractGeminiText(json) || '');
+            if (!frameText) return;
+            const delta = frameText.startsWith(text) ? frameText.slice(text.length) : frameText;
+            if (!delta) return;
+            text += delta;
+            chunkCount += 1;
+            onChunk?.({ text: delta, chunkIndex: chunkCount, chunkChars: delta.length, contentCharsSoFar: text.length });
+        } catch {}
+    });
+    return { text: text.trim(), provider: 'gemini', endpoint: endpointBase, status: response.status, requestId, chunkCount, finishReason, usageMetadata };
+};
+
+const callRealLlmMultimodal = async ({
+    model,
+    apiKey,
+    prompt,
+    imageDataUrls = [],
+    onChunk,
+    onRequestPayload,
+    onRawFrame,
+    responseMimeType,
+    systemInstruction
+}) => {
+    const provider = guessProvider(model);
+    if (provider === 'gemini') {
+        return callGeminiMultimodal({ model, apiKey, prompt, imageDataUrls, onChunk, onRequestPayload, onRawFrame, responseMimeType, systemInstruction });
+    }
+    if (provider === 'qwen') {
+        return callOpenAIMultimodal({ model, apiKey, prompt, imageDataUrls, onChunk, onRequestPayload, onRawFrame, systemInstruction, providerName: 'qwen', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions' });
+    }
+    return callOpenAIMultimodal({ model, apiKey, prompt, imageDataUrls, onChunk, onRequestPayload, onRawFrame, systemInstruction, providerName: 'openai', endpoint: 'https://api.openai.com/v1/chat/completions' });
+};
+
 const csvExportJobStore = new Map();
 const csvExportSseStore = new Map();
 const csvExportEventHistoryStore = new Map();
+const cinematicJobStore = new Map();
+const cinematicSseStore = new Map();
+const cinematicEventHistoryStore = new Map();
+
+const pushCinematicEventHistory = (jobId, event, payload) => {
+    if (!cinematicEventHistoryStore.has(jobId)) cinematicEventHistoryStore.set(jobId, []);
+    const arr = cinematicEventHistoryStore.get(jobId);
+    arr.push({ event, payload });
+    if (arr.length > 400) arr.splice(0, arr.length - 400);
+};
+
+const sendCinematicSse = (jobId, event, payload, storeHistory = true) => {
+    if (storeHistory) pushCinematicEventHistory(jobId, event, payload);
+    const clients = cinematicSseStore.get(jobId);
+    if (!clients) return;
+    const body = `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`;
+    clients.forEach((res) => {
+        if (!res.writableEnded) res.write(body);
+    });
+};
+
+const DEFAULT_CINEMATIC_PROMPT_PROMPT = `你是电影级运镜提示词设计师。
+请将用户给出的简单需求，改写为专业的复杂运镜提示词。
+
+要求：
+1. 输出中文。
+2. 只输出最终复杂提示词，不要解释。
+3. 提示词应覆盖：空间关系、镜头目标、镜头语言、节奏变化、情绪氛围、连续运镜约束、结尾收束方式。
+4. 明确这是一个可编辑的连续 Cinematic Timeline 规划任务。
+5. 要求模型输出时重点关注可落地的 shot 划分与 keyframe 设计。
+6. 如果用户提到了 3D Media Object / 天幕 / 视频屏 / 空屏占位，需要在复杂提示词里明确：它位于哪里、在哪个关键帧附近出现、后续镜头如何围绕它推进、侧移、掠过或回望。
+7. 如果用户没有提到 3D Media Object，则不要额外添加该需求。`;
+
+const DEFAULT_CINEMATIC_TIMELINE_PROMPT = `你是电影级连续运镜设计师。
+请根据用户提供的专业复杂提示词、总时长、POI 图像、POI 文本描述、POI 坐标与姿态、统一运镜范围，生成一个可编辑的 Cinematic Timeline JSON。
+
+输出要求：
+1. 只输出 JSON，不要解释，不要 Markdown。
+2. 顶层结构必须包含：version, targetDurationSec, shots。
+3. shots 是数组，每个 shot 必须包含：shotId, label, intent, durationSec, speechText, speechMode, keyframes。
+4. 每个 keyframe 必须包含：keyframeId, t, x, y, z, yaw, pitch, fov, moveSpeedMps。
+5. t 范围必须在 0 到 1 之间，且每个 shot 至少 2 个 keyframe，建议 3 到 5 个。
+6. 所有 keyframe 必须落在统一 bounding box 范围内。
+7. 运镜必须连续、可预览、可编辑，不要跳切。
+8. 输出内容使用中文 label 和 speechText。
+9. speechMode 仅允许 INTERRUPTIBLE 或 BLOCKING。
+10. 如果复杂提示词明确要求 3D Media Object，则允许在 keyframe 中输出 mediaObject 字段，字段可包含：enabled, src, fileName, anchorWorld{x,y,z}, scale, yaw, pitch, roll, depthOffset, placeholder, placeholderLabel。
+11. 如果提示词提到 3D Media Object 但没有视频，也可以输出空占位 placeholder，后续由前端补充视频。
+12. 如果提示词要求镜头围绕 3D Media Object，请通过关键帧相机位置与姿态直接体现围绕它的飞行，不要省略关键帧位姿。
+13. 可以额外输出 cameraBehavior 作为未来扩展，但当前关键帧位姿必须完整。
+14. 如果复杂提示词没有提到 3D Media Object，则不要凭空生成 mediaObject。
+15. 结果要适合直接填入时间轴与参数编辑器。`;
+
+const buildCinematicBoundingBox = (pois, marginRatio = 0.1) => {
+    const valid = Array.isArray(pois) ? pois.filter(Boolean) : [];
+    if (valid.length < 1) {
+        return {
+            center: { x: 0, y: 0, z: 0 },
+            marginRatio,
+            xz: { xMin: -5, xMax: 5, zMin: -5, zMax: 5 },
+            y: { yMin: -2, yMax: 2 }
+        };
+    }
+    const center = valid.reduce((acc, poi) => ({
+        x: acc.x + Number(toNum(poi.targetX ?? poi.x, 0)),
+        y: acc.y + Number(toNum(poi.targetY ?? poi.y, 0)),
+        z: acc.z + Number(toNum(poi.targetZ ?? poi.z, 0))
+    }), { x: 0, y: 0, z: 0 });
+    center.x /= valid.length;
+    center.y /= valid.length;
+    center.z /= valid.length;
+    let xMin = Number.POSITIVE_INFINITY;
+    let xMax = Number.NEGATIVE_INFINITY;
+    let zMin = Number.POSITIVE_INFINITY;
+    let zMax = Number.NEGATIVE_INFINITY;
+    let yMin = Number.POSITIVE_INFINITY;
+    let yMax = Number.NEGATIVE_INFINITY;
+    valid.forEach((poi) => {
+        const x = Number(toNum(poi.targetX ?? poi.x, 0));
+        const y = Number(toNum(poi.targetY ?? poi.y, 0));
+        const z = Number(toNum(poi.targetZ ?? poi.z, 0));
+        xMin = Math.min(xMin, x); xMax = Math.max(xMax, x);
+        yMin = Math.min(yMin, y); yMax = Math.max(yMax, y);
+        zMin = Math.min(zMin, z); zMax = Math.max(zMax, z);
+    });
+    const xSpan = Math.max(1, xMax - xMin);
+    const zSpan = Math.max(1, zMax - zMin);
+    const ySpan = Math.max(0.6, yMax - yMin);
+    const xMargin = Math.max(0.5, xSpan * marginRatio);
+    const zMargin = Math.max(0.5, zSpan * marginRatio);
+    const yMargin = Math.max(0.2, ySpan * marginRatio);
+    return {
+        center: {
+            x: Number(center.x.toFixed(3)),
+            y: Number(center.y.toFixed(3)),
+            z: Number(center.z.toFixed(3))
+        },
+        marginRatio,
+        xz: {
+            xMin: Number((xMin - xMargin).toFixed(3)),
+            xMax: Number((xMax + xMargin).toFixed(3)),
+            zMin: Number((zMin - zMargin).toFixed(3)),
+            zMax: Number((zMax + zMargin).toFixed(3))
+        },
+        y: {
+            yMin: Number((yMin - yMargin).toFixed(3)),
+            yMax: Number((yMax + yMargin).toFixed(3))
+        }
+    };
+};
+
+const plannerPromptRequestsMediaObject = (text) => /3d\s*media|media object|media project|video screen|video wall|视频屏|视频幕|天幕|空屏|占位|3d媒体/i.test(String(text || ''));
+
+const plannerPromptRequestsOrbitLikeCamera = (text) => /围绕|环绕|orbit|围着|掠过|回望|靠近.*3d\s*media|靠近.*天幕/i.test(String(text || ''));
+
+const normalizeCameraBehavior = (input) => {
+    if (!input || typeof input !== 'object') return null;
+    const source = input;
+    const type = String(source.type || '').trim().toLowerCase();
+    if (!type) return null;
+    return {
+        type: ['orbit', 'approach', 'reveal', 'follow'].includes(type) ? type : 'orbit',
+        target: 'mediaObject',
+        radius: Number.isFinite(Number(source.radius)) ? Number(source.radius) : undefined,
+        angleDeg: Number.isFinite(Number(source.angleDeg)) ? Number(source.angleDeg) : undefined,
+        heightOffset: Number.isFinite(Number(source.heightOffset)) ? Number(source.heightOffset) : undefined
+    };
+};
+
+const normalizeMediaObjectConfig = (input, fallbackAnchor) => {
+    if (!input || typeof input !== 'object') return null;
+    const source = input;
+    const anchor = source.anchorWorld && Number.isFinite(Number(source.anchorWorld.x)) && Number.isFinite(Number(source.anchorWorld.y)) && Number.isFinite(Number(source.anchorWorld.z))
+        ? {
+            x: Number(source.anchorWorld.x),
+            y: Number(source.anchorWorld.y),
+            z: Number(source.anchorWorld.z)
+        }
+        : (fallbackAnchor || null);
+    return {
+        enabled: source.enabled !== false,
+        src: String(source.src || '').trim(),
+        fileName: String(source.fileName || '').trim(),
+        anchorWorld: anchor,
+        scale: clampRange(Number.isFinite(Number(source.scale)) ? Number(source.scale) : 1.8, 0.1, 120),
+        yaw: Number.isFinite(Number(source.yaw)) ? Number(source.yaw) : 0,
+        pitch: Number.isFinite(Number(source.pitch)) ? Number(source.pitch) : 0,
+        roll: Number.isFinite(Number(source.roll)) ? Number(source.roll) : 0,
+        depthOffset: clampRange(Number.isFinite(Number(source.depthOffset)) ? Number(source.depthOffset) : 0.06, -2, 2),
+        placeholder: source.placeholder === true || !String(source.src || '').trim(),
+        placeholderLabel: String(source.placeholderLabel || '3D Media Placeholder').trim() || '3D Media Placeholder'
+    };
+};
+
+const enrichPlanWithPromptedMediaObject = (plan, plannerPrompt, pois = []) => {
+    if (!plannerPromptRequestsMediaObject(plannerPrompt)) return plan;
+    const hasExisting = plan.shots.some((shot) => shot.keyframes.some((kf) => kf.mediaObject && kf.mediaObject.enabled));
+    if (hasExisting) return plan;
+    const targetPoi = pois[Math.min(1, Math.max(0, pois.length - 1))] || pois[0] || null;
+    const anchor = targetPoi
+        ? {
+            x: Number(toNum(targetPoi.targetX, 0)),
+            y: Number(toNum(targetPoi.targetY, 0)) + 0.35,
+            z: Number(toNum(targetPoi.targetZ, 0))
+        }
+        : null;
+    const firstShot = plan.shots[0] || null;
+    if (!firstShot || firstShot.keyframes.length < 2 || !anchor) return plan;
+    const media = normalizeMediaObjectConfig({
+        enabled: true,
+        src: '',
+        fileName: '',
+        anchorWorld: anchor,
+        scale: 2.2,
+        yaw: Number(toNum(targetPoi?.targetYaw, 0)),
+        pitch: 0,
+        roll: 0,
+        depthOffset: 0.06,
+        placeholder: true,
+        placeholderLabel: 'Generated 3D Media Placeholder'
+    }, anchor);
+    firstShot.keyframes[0].mediaObject = media;
+    if (plannerPromptRequestsOrbitLikeCamera(plannerPrompt)) {
+        const orbitSamples = [
+            { x: anchor.x - 1.8, y: anchor.y + 0.2, z: anchor.z - 2.6, yaw: -18, pitch: -8, fov: 92 },
+            { x: anchor.x, y: anchor.y + 0.35, z: anchor.z - 2.1, yaw: 0, pitch: -6, fov: 86 },
+            { x: anchor.x + 1.7, y: anchor.y + 0.15, z: anchor.z - 2.45, yaw: 18, pitch: -8, fov: 92 }
+        ];
+        firstShot.keyframes.forEach((kf, index) => {
+            const sample = orbitSamples[Math.min(index, orbitSamples.length - 1)];
+            kf.x = clampRange(sample.x, plan.bounds.top.xMin, plan.bounds.top.xMax);
+            kf.y = clampRange(sample.y, plan.bounds.front.yMin, plan.bounds.front.yMax);
+            kf.z = clampRange(sample.z, plan.bounds.top.zMin, plan.bounds.top.zMax);
+            kf.yaw = sample.yaw;
+            kf.pitch = sample.pitch;
+            kf.fov = sample.fov;
+            kf.cameraBehavior = normalizeCameraBehavior({ type: 'orbit', target: 'mediaObject', radius: 2.4, angleDeg: sample.yaw, heightOffset: sample.y - anchor.y });
+        });
+        firstShot.intent = `${firstShot.intent || 'cinematic'} / 围绕3D Media Object`;
+        firstShot.label = firstShot.label || '围绕3D媒体';
+    }
+    return plan;
+};
+
+const normalizeCinematicPlan = ({ payload, modelFilename, selectedPoiIds, sceneDescription = '', storyBackground = '', styleText = '', targetDurationSec, boundsFallback, poisById = new Map() }) => {
+    const source = payload?.plan && Array.isArray(payload.plan?.shots) ? payload.plan : payload;
+    const shotsInput = Array.isArray(source?.shots) ? source.shots : [];
+    if (shotsInput.length < 1) throw new Error('timeline json has no shots');
+    const bounds = source?.bounds && source.bounds.top && source.bounds.front ? source.bounds : {
+        top: {
+            xMin: boundsFallback.xz.xMin,
+            xMax: boundsFallback.xz.xMax,
+            zMin: boundsFallback.xz.zMin,
+            zMax: boundsFallback.xz.zMax
+        },
+        front: {
+            xMin: boundsFallback.xz.xMin,
+            xMax: boundsFallback.xz.xMax,
+            yMin: boundsFallback.y.yMin,
+            yMax: boundsFallback.y.yMax
+        }
+    };
+    const clampNum = (value, min, max, fallback) => clampRange(Number.isFinite(Number(value)) ? Number(value) : fallback, min, max);
+    const shots = shotsInput.map((shot, shotIndex) => {
+        const shotId = String(shot?.shotId || `shot_${shotIndex + 1}`);
+        const keyframesInput = Array.isArray(shot?.keyframes) ? shot.keyframes : [];
+        if (keyframesInput.length < 2) throw new Error(`shot ${shotId} needs at least 2 keyframes`);
+        const keyframes = keyframesInput.map((kf, keyframeIndex) => {
+            const poiRef = poisById.get(String(kf?.poiId || '')) || null;
+            const fallbackAnchor = poiRef ? {
+                x: Number(toNum(poiRef?.targetX, boundsFallback.center.x)),
+                y: Number(toNum(poiRef?.targetY, boundsFallback.center.y)),
+                z: Number(toNum(poiRef?.targetZ, boundsFallback.center.z))
+            } : null;
+            return {
+                keyframeId: String(kf?.keyframeId || `${shotId}_k${keyframeIndex + 1}`),
+                shotId,
+                t: clampNum(kf?.t, 0, 1, keyframesInput.length === 1 ? 0 : keyframeIndex / (keyframesInput.length - 1)),
+                x: clampNum(kf?.x, bounds.top.xMin, bounds.top.xMax, Number(toNum(poiRef?.targetX, boundsFallback.center.x))),
+                y: clampNum(kf?.y, bounds.front.yMin, bounds.front.yMax, Number(toNum(poiRef?.targetY, boundsFallback.center.y))),
+                z: clampNum(kf?.z, bounds.top.zMin, bounds.top.zMax, Number(toNum(poiRef?.targetZ, boundsFallback.center.z))),
+                yaw: Number(toNum(kf?.yaw, toNum(poiRef?.targetYaw, 0))),
+                pitch: clampNum(kf?.pitch, -89, 89, Number(toNum(poiRef?.targetPitch, 0))),
+                fov: clampNum(kf?.fov, 20, 120, Number(toNum(poiRef?.targetFov, DEFAULT_POI_FOV))),
+                moveSpeedMps: clampNum(kf?.moveSpeedMps, 0.1, 6, Number(toNum(poiRef?.moveSpeedMps, 0.8))),
+                mediaObject: normalizeMediaObjectConfig(kf?.mediaObject, fallbackAnchor),
+                cameraBehavior: normalizeCameraBehavior(kf?.cameraBehavior)
+            };
+        }).sort((a, b) => a.t - b.t);
+        if (keyframes.length > 0) {
+            keyframes[0].t = 0;
+            keyframes[keyframes.length - 1].t = 1;
+        }
+        return {
+            shotId,
+            label: String(shot?.label || `镜头 ${shotIndex + 1}`),
+            intent: String(shot?.intent || 'cinematic'),
+            durationSec: clampNum(shot?.durationSec, 0.5, Math.max(4, Number(toNum(targetDurationSec, 14))), Number(toNum(shot?.durationSec, Math.max(1, Number(toNum(targetDurationSec, 14)) / shotsInput.length)))),
+            speechText: String(shot?.speechText || ''),
+            speechMode: String(shot?.speechMode || '').toUpperCase() === 'BLOCKING' ? 'BLOCKING' : 'INTERRUPTIBLE',
+            speechMatchEnabled: Boolean(shot?.speechMatchEnabled),
+            speechAudioUrl: null,
+            speechMetrics: shot?.speechMetrics && Number(shot?.speechMetrics?.durationSec || 0) > 0 && Number(shot?.speechMetrics?.charsPerSecond || 0) > 0
+                ? {
+                    durationSec: Number(toNum(shot.speechMetrics.durationSec, 0)),
+                    charsPerSecond: Number(toNum(shot.speechMetrics.charsPerSecond, 0)),
+                    measuredChars: Number(toNum(shot.speechMetrics.measuredChars, 0)),
+                    updatedAt: String(shot.speechMetrics.updatedAt || ''),
+                    ttsModel: shot.speechMetrics.ttsModel ? String(shot.speechMetrics.ttsModel) : undefined,
+                    ttsVoice: shot.speechMetrics.ttsVoice ? String(shot.speechMetrics.ttsVoice) : undefined
+                }
+                : null,
+            keyframes
+        };
+    });
+    return {
+        version: String(source?.version || 'cine_llm_v1'),
+        modelFilename: String(modelFilename || ''),
+        selectedPoiIds: Array.isArray(source?.selectedPoiIds) && source.selectedPoiIds.length > 0 ? source.selectedPoiIds.map((id) => String(id)) : selectedPoiIds,
+        sceneDescription: String(source?.sceneDescription || sceneDescription || ''),
+        storyBackground: String(source?.storyBackground || storyBackground || ''),
+        styleText: String(source?.styleText || styleText || ''),
+        targetDurationSec: Math.max(4, Number(toNum(source?.targetDurationSec, targetDurationSec || 14))),
+        bounds,
+        shots
+    };
+};
 
 const createCsvExportJob = ({
     modelFilename,
@@ -2302,6 +3448,305 @@ const computeCsvTimingSummary = async ({
     }
 };
 
+const runCinematicJob = async (jobId) => {
+    const job = cinematicJobStore.get(jobId);
+    if (!job || job.running) return;
+    job.running = true;
+    job.status = 'running';
+    let heartbeatTimer = null;
+    sendCinematicSse(jobId, 'job.started', {
+        jobId,
+        kind: job.kind,
+        modelFilename: job.modelFilename,
+        llmModel: job.llmModel,
+        llmProvider: guessProvider(job.llmModel),
+        apiEndpoint: endpointForModel(job.llmModel),
+        ts: new Date().toISOString()
+    });
+    try {
+        if (!job.llmApiKey) throw new Error('LLM API key is empty');
+        const apiEndpoint = endpointForModel(job.llmModel);
+        const callStartedAt = Date.now();
+        heartbeatTimer = setInterval(() => {
+            sendCinematicSse(jobId, 'heartbeat', {
+                jobId,
+                kind: job.kind,
+                waitingMs: Date.now() - callStartedAt,
+                ts: new Date().toISOString()
+            }, false);
+        }, 2500);
+        let rawFrameIndex = 0;
+        const commonHooks = {
+            onRequestPayload: (reqPayload) => {
+                sendCinematicSse(jobId, 'api.request.raw', {
+                    jobId,
+                    kind: job.kind,
+                    llmModel: job.llmModel,
+                    provider: reqPayload?.provider || guessProvider(job.llmModel),
+                    apiEndpoint: reqPayload?.endpoint || apiEndpoint,
+                    requestJson: reqPayload?.requestBody || null,
+                    imageCount: Number(reqPayload?.imageCount || reqPayload?.imageMetas?.length || 0),
+                    imageMetas: Array.isArray(reqPayload?.imageMetas) ? reqPayload.imageMetas : [],
+                    ts: new Date().toISOString()
+                });
+            },
+            onRawFrame: (rawFrame) => {
+                rawFrameIndex += 1;
+                sendCinematicSse(jobId, 'api.response.raw', {
+                    jobId,
+                    kind: job.kind,
+                    frameIndex: rawFrameIndex,
+                    llmModel: job.llmModel,
+                    provider: guessProvider(job.llmModel),
+                    apiEndpoint,
+                    rawJson: String(rawFrame || ''),
+                    ts: new Date().toISOString()
+                }, false);
+            },
+            onChunk: (chunk) => {
+                const text = typeof chunk === 'string' ? chunk : String(chunk?.text || '');
+                if (!text) return;
+                sendCinematicSse(jobId, 'api.chunk', {
+                    jobId,
+                    kind: job.kind,
+                    chunk,
+                    chunkIndex: Number(chunk?.chunkIndex || 0),
+                    chunkChars: Number(chunk?.chunkChars || text.length),
+                    contentCharsSoFar: Number(chunk?.contentCharsSoFar || text.length),
+                    ts: new Date().toISOString()
+                }, false);
+            }
+        };
+
+        let llmResult = null;
+        if (job.kind === 'prompt') {
+            const prompt = `用户提供的简单需求如下，请将其改写为专业复杂提示词：\n\n${String(job.simplePrompt || '').trim()}`;
+            sendCinematicSse(jobId, 'prompt.input', {
+                jobId,
+                kind: 'prompt',
+                simplePrompt: job.simplePrompt,
+                promptChars: prompt.length,
+                ts: new Date().toISOString()
+            });
+            sendCinematicSse(jobId, 'api.call', {
+                jobId,
+                kind: 'prompt',
+                llmModel: job.llmModel,
+                apiEndpoint,
+                hasApiKey: true,
+                promptChars: prompt.length,
+                ts: new Date().toISOString()
+            });
+            llmResult = await callRealLlm({
+                model: job.llmModel,
+                apiKey: job.llmApiKey,
+                prompt,
+                poiName: 'cinematic_prompt',
+                screenshotDataUrl: '',
+                appendLanguageInstruction: false,
+                systemInstruction: DEFAULT_CINEMATIC_PROMPT_PROMPT,
+                ...commonHooks
+            });
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+            job.result = String(llmResult?.text || '').trim();
+            sendCinematicSse(jobId, 'api.response', {
+                jobId,
+                kind: 'prompt',
+                ok: true,
+                llmModel: job.llmModel,
+                provider: llmResult?.provider || guessProvider(job.llmModel),
+                apiEndpoint: llmResult?.endpoint || apiEndpoint,
+                status: llmResult?.status || 200,
+                requestId: llmResult?.requestId || null,
+                chunkCount: llmResult?.chunkCount || 0,
+                finishReason: llmResult?.finishReason || null,
+                usageMetadata: llmResult?.usageMetadata || null,
+                contentChars: job.result.length,
+                preview: String(job.result || '').slice(0, 500),
+                ts: new Date().toISOString()
+            });
+            job.status = 'done';
+            job.running = false;
+            sendCinematicSse(jobId, 'job.done', {
+                jobId,
+                kind: 'prompt',
+                plannerPrompt: job.result,
+                ts: new Date().toISOString()
+            });
+            return;
+        }
+
+        const pois = Array.isArray(job.pois) ? job.pois : [];
+        if (pois.length < 2) throw new Error('Need at least 2 POIs for cinematic timeline generation');
+        const bounds = buildCinematicBoundingBox(pois, 0.1);
+        sendCinematicSse(jobId, 'timeline.payload.summary', {
+            jobId,
+            modelFilename: job.modelFilename,
+            targetDurationSec: job.targetDurationSec,
+            poiCount: pois.length,
+            imageCount: pois.filter((poi) => String(poi.screenshotDataUrl || '').trim()).length,
+            boundingBox: bounds,
+            ts: new Date().toISOString()
+        });
+        pois.forEach((poi, index) => {
+            const imageMeta = imageDigest(String(poi.screenshotDataUrl || ''));
+            sendCinematicSse(jobId, 'timeline.payload.poi', {
+                jobId,
+                index: index + 1,
+                total: pois.length,
+                poiId: String(poi.poiId || ''),
+                poiName: String(poi.poiName || ''),
+                content: String(poi.content || ''),
+                targetX: Number(toNum(poi.targetX, 0)),
+                targetY: Number(toNum(poi.targetY, 0)),
+                targetZ: Number(toNum(poi.targetZ, 0)),
+                targetYaw: Number(toNum(poi.targetYaw, 0)),
+                targetPitch: Number(toNum(poi.targetPitch, 0)),
+                imageBytes: imageMeta.bytes,
+                imageMime: imageMeta.mime,
+                imageSha256: imageMeta.sha256,
+                ts: new Date().toISOString()
+            });
+        });
+        const promptPayload = {
+            complexPrompt: job.plannerPrompt,
+            targetDurationSec: job.targetDurationSec,
+            boundingBox: bounds,
+            pois: pois.map((poi) => ({
+                poiId: String(poi.poiId || ''),
+                poiName: String(poi.poiName || ''),
+                content: String(poi.content || ''),
+                targetX: Number(toNum(poi.targetX, 0)),
+                targetY: Number(toNum(poi.targetY, 0)),
+                targetZ: Number(toNum(poi.targetZ, 0)),
+                targetYaw: Number(toNum(poi.targetYaw, 0)),
+                targetPitch: Number(toNum(poi.targetPitch, 0)),
+                targetFov: Number(toNum(poi.targetFov, DEFAULT_POI_FOV)),
+                moveSpeedMps: Number(toNum(poi.moveSpeedMps, 0.8))
+            }))
+        };
+        const prompt = `${DEFAULT_CINEMATIC_TIMELINE_PROMPT}\n\n专业复杂提示词:\n${String(job.plannerPrompt || '').trim()}\n\nTIMELINE_INPUT_JSON:\n${JSON.stringify(promptPayload, null, 2)}`;
+        sendCinematicSse(jobId, 'timeline.prompt', {
+            jobId,
+            prompt,
+            promptChars: prompt.length,
+            ts: new Date().toISOString()
+        });
+        sendCinematicSse(jobId, 'api.call', {
+            jobId,
+            kind: 'timeline',
+            llmModel: job.llmModel,
+            apiEndpoint,
+            hasApiKey: true,
+            promptChars: prompt.length,
+            imageCount: pois.filter((poi) => String(poi.screenshotDataUrl || '').trim()).length,
+            ts: new Date().toISOString()
+        });
+        llmResult = await callRealLlmMultimodal({
+            model: job.llmModel,
+            apiKey: job.llmApiKey,
+            prompt,
+            imageDataUrls: pois.map((poi) => String(poi.screenshotDataUrl || '')).filter(Boolean),
+            responseMimeType: 'application/json',
+            systemInstruction: '',
+            ...commonHooks
+        });
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+        const rawText = String(llmResult?.text || '').trim();
+        sendCinematicSse(jobId, 'api.response', {
+            jobId,
+            kind: 'timeline',
+            ok: true,
+            llmModel: job.llmModel,
+            provider: llmResult?.provider || guessProvider(job.llmModel),
+            apiEndpoint: llmResult?.endpoint || apiEndpoint,
+            status: llmResult?.status || 200,
+            requestId: llmResult?.requestId || null,
+            chunkCount: llmResult?.chunkCount || 0,
+            finishReason: llmResult?.finishReason || null,
+            usageMetadata: llmResult?.usageMetadata || null,
+            contentChars: rawText.length,
+            preview: rawText.slice(0, 500),
+            ts: new Date().toISOString()
+        });
+        const parsed = extractJsonPayload(rawText);
+        if (!parsed) throw new Error(`Timeline JSON parse failed: ${rawText.slice(0, 240)}`);
+        const poisById = new Map(pois.map((poi) => [String(poi.poiId || ''), poi]));
+        let normalizedPlan = normalizeCinematicPlan({
+            payload: parsed,
+            modelFilename: job.modelFilename,
+            selectedPoiIds: pois.map((poi) => String(poi.poiId || '')),
+            targetDurationSec: job.targetDurationSec,
+            boundsFallback: bounds,
+            poisById
+        });
+        const mediaPrompt = plannerPromptRequestsMediaObject(job.plannerPrompt);
+        sendCinematicSse(jobId, 'timeline.media.detected', {
+            jobId,
+            requested: mediaPrompt,
+            orbitLike: plannerPromptRequestsOrbitLikeCamera(job.plannerPrompt),
+            promptPreview: String(job.plannerPrompt || '').slice(0, 240),
+            ts: new Date().toISOString()
+        });
+        normalizedPlan = enrichPlanWithPromptedMediaObject(normalizedPlan, job.plannerPrompt, pois);
+        const totalMediaKeyframes = normalizedPlan.shots.reduce((sum, shot) => sum + shot.keyframes.filter((kf) => kf.mediaObject?.enabled).length, 0);
+        sendCinematicSse(jobId, 'timeline.media.enriched', {
+            jobId,
+            totalMediaKeyframes,
+            placeholderKeyframes: normalizedPlan.shots.reduce((sum, shot) => sum + shot.keyframes.filter((kf) => kf.mediaObject?.enabled && kf.mediaObject?.placeholder).length, 0),
+            ts: new Date().toISOString()
+        });
+        job.result = normalizedPlan;
+        sendCinematicSse(jobId, 'timeline.plan.parsed', {
+            jobId,
+            shots: job.result.shots.length,
+            totalKeyframes: job.result.shots.reduce((sum, shot) => sum + shot.keyframes.length, 0),
+            ts: new Date().toISOString()
+        });
+        job.status = 'done';
+        job.running = false;
+        sendCinematicSse(jobId, 'job.done', {
+            jobId,
+            kind: 'timeline',
+            plan: job.result,
+            ts: new Date().toISOString()
+        });
+    } catch (error) {
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+        sendCinematicSse(jobId, 'api.error', {
+            jobId,
+            kind: job?.kind || 'unknown',
+            provider: error?.provider || guessProvider(job?.llmModel),
+            apiEndpoint: error?.endpoint || endpointForModel(job?.llmModel),
+            status: error?.status || null,
+            requestId: error?.requestId || null,
+            finishReason: error?.finishReason || null,
+            usageMetadata: error?.usageMetadata || null,
+            errorRaw: error?.rawResponse || null,
+            errorCause: error?.errorCause || null,
+            error: String(error?.message || error),
+            ts: new Date().toISOString()
+        });
+        const jobRef = cinematicJobStore.get(jobId);
+        if (jobRef) {
+            jobRef.status = 'error';
+            jobRef.running = false;
+            jobRef.error = String(error?.message || error);
+        }
+        sendCinematicSse(jobId, 'job.error', {
+            jobId,
+            kind: job?.kind || 'unknown',
+            error: String(error?.message || error),
+            ts: new Date().toISOString()
+        });
+    }
+};
+
 const runJob = async (jobId) => {
     const job = jobStore.get(jobId);
     if (!job || job.running) return;
@@ -2630,17 +4075,51 @@ const server = createServer(async (req, res) => {
             return;
         }
 
+        if (path === '/api/ot-tour-loader/local-file' && req.method === 'GET') {
+            return streamLocalFile(req, res, url.searchParams.get('path'));
+        }
+
+        if (path === '/api/ot-tour-loader/cinematic/media' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const fileName = String(body.fileName || '').trim();
+            const dataBase64 = String(body.dataBase64 || '').trim();
+            if (!fileName || !dataBase64) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'fileName and dataBase64 required');
+            const stored = storeCinematicMedia({ fileName, dataBase64 });
+            json(res, 200, {
+                ok: true,
+                fileName: stored.fileName,
+                mediaUrl: `http://localhost:${port}/api/ot-tour-loader/cinematic/media/${encodeURIComponent(stored.storedName)}`
+            });
+            return;
+        }
+
+        const cinematicMediaMatch = getPathMatch(path, '/api/ot-tour-loader/cinematic/media/:storedName');
+        if (cinematicMediaMatch && req.method === 'GET') {
+            const storedName = sanitizeStoredMediaName(cinematicMediaMatch.storedName || '');
+            return streamLocalFile(req, res, join(cinematicMediaDir, storedName));
+        }
+
         if (path === '/api/ot-tour-loader/state' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
             const profile = getProfileStmt.get(modelFilename);
             const rows = getPoisStmt.all(modelFilename);
+            const hotspotRows = getHotspotsStmt.all(modelFilename);
+            const hotspotMap = new Map();
+            hotspotRows.forEach((row) => {
+                const poiId = String(row.poi_id || '');
+                if (!hotspotMap.has(poiId)) hotspotMap.set(poiId, []);
+                hotspotMap.get(poiId).push(mapHotspotRow(row));
+            });
             json(res, 200, {
                 ok: true,
                 found: Boolean(profile) || rows.length > 0,
                 modelFilename,
                 profile: profile ? { eyeHeightM: profile.eye_height_m, updatedAt: profile.updated_at } : { eyeHeightM: 1.65, updatedAt: null },
-                pois: rows.map(mapRow)
+                pois: rows.map((row) => ({
+                    ...mapRow(row),
+                    hotspots: hotspotMap.get(String(row.poi_id || '')) || []
+                }))
             });
             return;
         }
@@ -2868,6 +4347,7 @@ const server = createServer(async (req, res) => {
         if (patchMatch && req.method === 'DELETE') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
+            clearPoiHotspotsStmt.run(modelFilename, patchMatch.poiId);
             deletePoiStmt.run(modelFilename, patchMatch.poiId);
             json(res, 200, { ok: true, modelFilename, poiId: patchMatch.poiId });
             return;
@@ -2943,6 +4423,47 @@ const server = createServer(async (req, res) => {
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
             const rows = getCsvVersionListStmt.all(modelFilename).map((row) => mapCsvVersionRow(row));
             json(res, 200, { ok: true, modelFilename, versions: rows });
+            return;
+        }
+
+        if (path === '/api/ot-tour-loader/csv/versions' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const modelFilename = String(body.modelFilename || '').trim();
+            const csvText = String(body.csvText || '');
+            if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
+            if (!csvText.trim()) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'csvText required');
+            const version = createCsvVersion({ modelFilename, status: 'draft', source: String(body.source || 'manual'), csvText });
+            json(res, 200, { ok: true, modelFilename, version });
+            return;
+        }
+
+        if (path === '/api/ot-tour-loader/cinematic/versions' && req.method === 'GET') {
+            const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
+            if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
+            const rows = getCinematicVersionListStmt.all(modelFilename).map((row) => mapCinematicVersionRow(row));
+            json(res, 200, { ok: true, modelFilename, versions: rows });
+            return;
+        }
+
+        if (path === '/api/ot-tour-loader/cinematic/versions' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const modelFilename = String(body.modelFilename || '').trim();
+            if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
+            const version = createCinematicVersion({
+                modelFilename,
+                status: String(body.status || 'draft') || 'draft',
+                source: String(body.source || 'manual') || 'manual',
+                simplePrompt: String(body.simplePrompt || ''),
+                plannerPrompt: String(body.plannerPrompt || ''),
+                sceneDescription: String(body.sceneDescription || ''),
+                storyBackground: String(body.storyBackground || ''),
+                styleText: String(body.styleText || ''),
+                targetDurationSec: body.targetDurationSec === null || body.targetDurationSec === undefined ? null : Number(body.targetDurationSec),
+                selectedPoiIds: Array.isArray(body.selectedPoiIds) ? body.selectedPoiIds : [],
+                plan: body.plan || null,
+                csvText: String(body.csvText || '')
+            });
+            json(res, 200, { ok: true, modelFilename, version });
             return;
         }
 
@@ -3059,6 +4580,55 @@ const server = createServer(async (req, res) => {
             const row = getCsvVersionByIdStmt.get(versionId, modelFilename);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'csv version not found');
             json(res, 200, { ok: true, modelFilename, version: mapCsvVersionRow(row, true) });
+            return;
+        }
+
+        const cinematicVersionMatch = getPathMatch(path, '/api/ot-tour-loader/cinematic/versions/:versionId');
+        if (cinematicVersionMatch && req.method === 'GET') {
+            const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
+            const versionId = Math.floor(toNum(cinematicVersionMatch.versionId, 0));
+            if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
+            const row = getCinematicVersionByIdStmt.get(versionId, modelFilename);
+            if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'cinematic version not found');
+            json(res, 200, { ok: true, modelFilename, version: mapCinematicVersionRow(row, true) });
+            return;
+        }
+
+        if (cinematicVersionMatch && req.method === 'PUT') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const modelFilename = String(body.modelFilename || '').trim();
+            const versionId = Math.floor(toNum(cinematicVersionMatch.versionId, 0));
+            if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
+            const now = new Date().toISOString();
+            updateCinematicVersionStmt.run({
+                id: versionId,
+                model_filename: modelFilename,
+                status: String(body.status || 'draft') || 'draft',
+                source: String(body.source || 'manual') || 'manual',
+                simple_prompt: String(body.simplePrompt || ''),
+                planner_prompt: String(body.plannerPrompt || ''),
+                scene_description: String(body.sceneDescription || ''),
+                story_background: String(body.storyBackground || ''),
+                style_text: String(body.styleText || ''),
+                target_duration_sec: body.targetDurationSec === null || body.targetDurationSec === undefined ? null : Number(body.targetDurationSec),
+                selected_poi_ids_json: JSON.stringify(Array.isArray(body.selectedPoiIds) ? body.selectedPoiIds : []),
+                plan_json: body.plan ? JSON.stringify(body.plan) : '',
+                csv_text: String(body.csvText || ''),
+                updated_at: now,
+                confirmed_at: body.status === 'confirmed' ? now : null
+            });
+            const row = getCinematicVersionByIdStmt.get(versionId, modelFilename);
+            if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'cinematic version not found');
+            json(res, 200, { ok: true, modelFilename, version: mapCinematicVersionRow(row, true) });
+            return;
+        }
+
+        if (cinematicVersionMatch && req.method === 'DELETE') {
+            const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
+            const versionId = Math.floor(toNum(cinematicVersionMatch.versionId, 0));
+            if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
+            deleteCinematicVersionStmt.run(versionId, modelFilename);
+            json(res, 200, { ok: true, modelFilename, versionId });
             return;
         }
 
@@ -3316,6 +4886,144 @@ const server = createServer(async (req, res) => {
             });
             void runJob(jobId);
             json(res, 200, { ok: true, jobId, status: 'running' });
+            return;
+        }
+
+        if (path === '/api/ot-tour-loader/cinematic/jobs/prompt' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const modelFilename = String(body.modelFilename || '').trim();
+            const simplePrompt = String(body.simplePrompt || '').trim();
+            if (!modelFilename || !simplePrompt) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and simplePrompt required');
+            const globalCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
+            const jobId = `cinejob_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+            cinematicJobStore.set(jobId, {
+                jobId,
+                kind: 'prompt',
+                modelFilename,
+                simplePrompt,
+                llmModel: String(body?.llm?.model || globalCfg.activeModel || DEFAULT_LLM_MODEL),
+                llmApiKey: String(body?.llm?.apiKey || globalCfg.activeApiKey || ''),
+                status: 'running',
+                running: false,
+                result: null,
+                error: null
+            });
+            void runCinematicJob(jobId);
+            json(res, 200, { ok: true, jobId, status: 'running' });
+            return;
+        }
+
+        if (path === '/api/ot-tour-loader/cinematic/speech-preview' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const modelFilename = String(body.modelFilename || '').trim();
+            const shotId = String(body.shotId || '').trim();
+            const text = String(body.text || '').trim();
+            if (!modelFilename || !shotId || !text) {
+                return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename, shotId, and text required');
+            }
+            const globalTts = getGlobalTtsConfig();
+            if (!globalTts.apiKey) {
+                return fail(res, 400, 'OT_TL_TTS_CONFIG_ERROR', 'Global TTS API key is empty');
+            }
+            const requestedVoiceConfig = normalizeVoiceConfig({
+                enabled: false,
+                mode: 'fixed',
+                model: body?.ttsConfig?.model || body?.ttsModel || globalTts.model,
+                fixedVoice: body?.ttsConfig?.voice || body?.ttsVoice || globalTts.voice,
+                voicePool: []
+            });
+            const ttsLang = inferTtsLang({ ttsLang: body.ttsLang || '', poiName: body.poiName || '', content: text });
+            const result = await synthesizeDashscopeSpeechWithFallback({
+                apiKey: globalTts.apiKey,
+                model: requestedVoiceConfig.model,
+                voice: requestedVoiceConfig.fixedVoice,
+                format: globalTts.format,
+                text
+            });
+            json(res, 200, {
+                ok: true,
+                shotId,
+                modelFilename,
+                text,
+                chars: (text.match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length,
+                estimatedDurationSec: Number(estimateSpeechDurationSec(text, ttsLang).toFixed(3)),
+                ttsLang,
+                ttsConfig: {
+                    provider: globalTts.provider,
+                    model: requestedVoiceConfig.model,
+                    voice: requestedVoiceConfig.fixedVoice,
+                    format: globalTts.format,
+                    updatedAt: globalTts.updatedAt
+                },
+                audioUrl: result.audioUrl,
+                debug: result.debug || null
+            });
+            return;
+        }
+
+        if (path === '/api/ot-tour-loader/cinematic/jobs/timeline' && req.method === 'POST') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const modelFilename = String(body.modelFilename || '').trim();
+            const plannerPrompt = String(body.plannerPrompt || '').trim();
+            const targetDurationSec = Math.max(4, Number(toNum(body.targetDurationSec, 14)));
+            const pois = Array.isArray(body.pois) ? body.pois.map((poi) => ({
+                poiId: String(poi?.poiId || ''),
+                poiName: String(poi?.poiName || ''),
+                content: String(poi?.content || ''),
+                screenshotDataUrl: String(poi?.screenshotDataUrl || ''),
+                targetX: Number(toNum(poi?.targetX, 0)),
+                targetY: Number(toNum(poi?.targetY, 0)),
+                targetZ: Number(toNum(poi?.targetZ, 0)),
+                targetYaw: Number(toNum(poi?.targetYaw, 0)),
+                targetPitch: Number(toNum(poi?.targetPitch, 0)),
+                targetFov: Number(toNum(poi?.targetFov, DEFAULT_POI_FOV)),
+                moveSpeedMps: Number(toNum(poi?.moveSpeedMps, 0.8))
+            })).filter((poi) => poi.poiId) : [];
+            if (!modelFilename || !plannerPrompt || pois.length < 2) {
+                return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename, plannerPrompt, and at least 2 pois required');
+            }
+            const globalCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
+            const jobId = `cinejob_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+            cinematicJobStore.set(jobId, {
+                jobId,
+                kind: 'timeline',
+                modelFilename,
+                plannerPrompt,
+                targetDurationSec,
+                pois,
+                llmModel: String(body?.llm?.model || globalCfg.activeModel || DEFAULT_LLM_MODEL),
+                llmApiKey: String(body?.llm?.apiKey || globalCfg.activeApiKey || ''),
+                status: 'running',
+                running: false,
+                result: null,
+                error: null
+            });
+            void runCinematicJob(jobId);
+            json(res, 200, { ok: true, jobId, status: 'running' });
+            return;
+        }
+
+        const cinematicJobStreamMatch = getPathMatch(path, '/api/ot-tour-loader/cinematic/jobs/:jobId/events');
+        if (cinematicJobStreamMatch && req.method === 'GET') {
+            const jobId = cinematicJobStreamMatch.jobId;
+            if (!cinematicJobStore.has(jobId)) return fail(res, 404, 'OT_TL_NOT_FOUND', 'cinematic job not found');
+            res.writeHead(200, {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                Connection: 'keep-alive',
+                'Access-Control-Allow-Origin': '*'
+            });
+            if (!cinematicSseStore.has(jobId)) cinematicSseStore.set(jobId, new Set());
+            cinematicSseStore.get(jobId).add(res);
+            res.write(`event: connected\ndata: ${JSON.stringify({ ok: true, jobId })}\n\n`);
+            const history = cinematicEventHistoryStore.get(jobId) || [];
+            history.forEach(({ event, payload }) => {
+                res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+            });
+            req.on('close', () => {
+                const set = cinematicSseStore.get(jobId);
+                if (set) set.delete(res);
+            });
             return;
         }
 

@@ -1,7 +1,7 @@
 import './opentour.scss';
 
 import { WebPCodec } from '@playcanvas/splat-transform';
-import { Color, Quat, Vec3, createGraphicsDevice } from 'playcanvas';
+import { Color, Entity, Quat, StandardMaterial, Texture, Vec3, createGraphicsDevice } from 'playcanvas';
 
 import { Events } from '../events';
 import { MappedReadFileSystem } from '../io';
@@ -39,6 +39,8 @@ type OTModelLoaderModule = {
 
 type OTTourLoaderPanelController = {
     toggle: () => void;
+    openCinematicWorkspace: () => Promise<void>;
+    closeCinematicWorkspace: () => void;
 };
 
 type OTTourLoaderModule = {
@@ -48,7 +50,20 @@ type OTTourLoaderModule = {
         getWorldSamplePoints?: () => Array<{ x: number; y: number; z: number; opacity: number }>;
         getLiveCameraPose?: () => { pose: { eye: { x: number; y: number; z: number }; forward: { x: number; y: number; z: number } }; fovDeg: number } | null;
         setLiveCameraPose?: (pose: { eye: { x: number; y: number; z: number }; forward: { x: number; y: number; z: number } }, fovDeg: number) => Promise<void> | void;
+        getCaptureCanvas?: () => HTMLCanvasElement | null;
+        requestCaptureRender?: () => void;
         captureScreenshotPng?: () => Promise<string>;
+        pickWorldPointAtScreen?: (x: number, y: number) => Promise<{ x: number; y: number; z: number } | null>;
+        projectWorldToScreen?: (point: { x: number; y: number; z: number }) => { x: number; y: number; visible: boolean } | null;
+        showEmbeddedMedia?: (spec: {
+            mode: 'media-plane' | 'media-object';
+            kind: 'image' | 'video';
+            src: string;
+            title?: string;
+            caption?: string;
+            anchorWorld: { x: number; y: number; z: number };
+        } | null) => void;
+        resolveAssetUrl?: (value: string) => string;
         apiBaseUrl?: string;
         onModelLoaded?: (callback: (modelFilename: string | null) => void) => (() => void);
     }) => OTTourLoaderPanelController;
@@ -206,6 +221,19 @@ const bootstrapUI = () => {
         'M10 9l5 3-5 3z'
     ]));
 
+    const cinematicButton = document.createElement('button');
+    cinematicButton.className = 'opentour-tool';
+    cinematicButton.type = 'button';
+    cinematicButton.setAttribute('aria-label', 'Open OT Cinematic');
+    cinematicButton.title = 'Complete TL setup first';
+    cinematicButton.appendChild(createToolIcon([
+        'M4 6h16v12H4z',
+        'M7 9h4v6H7z',
+        'M13 9h4v6h-4z',
+        'M10 4v2',
+        'M14 4v2'
+    ]));
+
     const tourDownloadButton = document.createElement('button');
     tourDownloadButton.className = 'opentour-tool';
     tourDownloadButton.type = 'button';
@@ -276,10 +304,17 @@ const bootstrapUI = () => {
     status.id = 'opentour-status';
     status.textContent = 'OpenTour ready';
 
-    toolbar.append(modelLoaderButton, tourLoaderButton, tourPlayerButton, tourDownloadButton, tourProducerButton, step3Button, gridToggleButton);
+    toolbar.append(modelLoaderButton, tourLoaderButton, cinematicButton, tourPlayerButton, tourDownloadButton, tourProducerButton, step3Button, gridToggleButton);
     panel.append(panelTitle, openButton, fileInput, hint, status);
     hud.append(axisMount, toolbar, panel);
     canvasContainer.append(canvas, hud, spinnerOverlay);
+    const embeddedMediaDomRoot = document.createElement('div');
+    embeddedMediaDomRoot.id = 'opentour-embedded-media-dom-root';
+    embeddedMediaDomRoot.style.position = 'absolute';
+    embeddedMediaDomRoot.style.inset = '0';
+    embeddedMediaDomRoot.style.pointerEvents = 'none';
+    embeddedMediaDomRoot.style.zIndex = '14';
+    canvasContainer.appendChild(embeddedMediaDomRoot);
     app.append(canvasContainer);
     document.body.appendChild(app);
 
@@ -293,6 +328,7 @@ const bootstrapUI = () => {
         step3Button,
         modelLoaderButton,
         tourLoaderButton,
+        cinematicButton,
         tourPlayerButton,
         tourDownloadButton,
         tourProducerButton,
@@ -308,6 +344,24 @@ const main = async () => {
     const ui = bootstrapUI();
     const events = new Events();
     let currentModelFilename: string | null = null;
+    let otTourLoaderReady = false;
+    let cinematicModelReady = false;
+
+    const refreshCinematicAvailability = async () => {
+        if (!currentModelFilename) {
+            cinematicModelReady = false;
+            syncTourLoaderButtonState();
+            return;
+        }
+        try {
+            const response = await fetch(`http://localhost:3031/api/ot-tour-loader/state?modelFilename=${encodeURIComponent(currentModelFilename)}`);
+            const data = await response.json().catch(() => ({}));
+            cinematicModelReady = Boolean(response.ok && data?.ok && Array.isArray(data?.pois) && data.pois.length > 0);
+        } catch {
+            cinematicModelReady = false;
+        }
+        syncTourLoaderButtonState();
+    };
 
     const syncTourLoaderButtonState = () => {
         const enabled = Boolean(currentModelFilename);
@@ -319,6 +373,11 @@ const main = async () => {
         ui.tourPlayerButton.title = enabled
             ? 'Open OT Tour Player'
             : 'Load a model first to enable Tour Player';
+        const cinematicEnabled = Boolean(currentModelFilename) && (cinematicModelReady || otTourLoaderReady);
+        ui.cinematicButton.disabled = !cinematicEnabled;
+        ui.cinematicButton.title = cinematicEnabled
+            ? 'Open OT Cinematic'
+            : (currentModelFilename ? 'Model needs POIs in database to enable Cinematic' : 'Load a model and finish TL setup first');
     };
     syncTourLoaderButtonState();
 
@@ -368,6 +427,362 @@ const main = async () => {
     ]);
 
     const scene = new Scene(events, sceneConfig, ui.canvas, graphicsDevice);
+    const embeddedMediaRoot = new Entity('embeddedHotspotMediaRoot');
+    scene.contentRoot.addChild(embeddedMediaRoot);
+    const embeddedMediaState: {
+        root: Entity | null;
+        videoEl: HTMLVideoElement | null;
+        texture: Texture | null;
+        update: ((dt: number) => void) | null;
+        domCarrier: HTMLDivElement | null;
+        specSignature: string | null;
+        anchorWorld: Vec3;
+        scale: number;
+        orientation: { yaw: number; pitch: number; roll: number };
+        depthOffset: number;
+        billboard: boolean;
+        selected: boolean;
+        highlight: Entity | null;
+    } = {
+        root: null,
+        videoEl: null,
+        texture: null,
+        update: null,
+        domCarrier: null,
+        specSignature: null,
+        anchorWorld: new Vec3(),
+        scale: 1,
+        orientation: { yaw: 0, pitch: 0, roll: 0 },
+        depthOffset: 0,
+        billboard: true,
+        selected: false,
+        highlight: null
+    };
+    const clearEmbeddedMedia = () => {
+        if (embeddedMediaState.update) {
+            scene.app.off('update', embeddedMediaState.update);
+            embeddedMediaState.update = null;
+        }
+        if (embeddedMediaState.videoEl) {
+            embeddedMediaState.videoEl.pause();
+            embeddedMediaState.videoEl.src = '';
+            embeddedMediaState.videoEl.load();
+            embeddedMediaState.videoEl = null;
+        }
+        if (embeddedMediaState.root) {
+            embeddedMediaState.root.destroy();
+            embeddedMediaState.root = null;
+        }
+        if (embeddedMediaState.texture) {
+            embeddedMediaState.texture.destroy();
+            embeddedMediaState.texture = null;
+        }
+        if (embeddedMediaState.domCarrier) {
+            embeddedMediaState.domCarrier.remove();
+            embeddedMediaState.domCarrier = null;
+        }
+        embeddedMediaState.specSignature = null;
+        embeddedMediaState.anchorWorld.set(0, 0, 0);
+        embeddedMediaState.scale = 1;
+        embeddedMediaState.orientation = { yaw: 0, pitch: 0, roll: 0 };
+        embeddedMediaState.depthOffset = 0;
+        embeddedMediaState.billboard = true;
+        embeddedMediaState.selected = false;
+        embeddedMediaState.highlight = null;
+        scene.forceRender = true;
+    };
+    const createMediaMaterial = () => {
+        const material = new StandardMaterial();
+        material.useLighting = false;
+        material.emissive = new Color(1, 1, 1);
+        material.diffuse = new Color(0, 0, 0);
+        material.opacity = 1;
+        material.cull = 0;
+        material.update();
+        return material;
+    };
+    const applyPlaceholderMaterial = (material: StandardMaterial) => {
+        material.emissiveMap = null;
+        material.diffuseMap = null;
+        material.emissive = new Color(0.2, 0.38, 0.78);
+        material.diffuse = new Color(0.04, 0.06, 0.1);
+        material.opacity = 0.94;
+        material.update();
+    };
+    const applyTextureSource = async (src: string, material: StandardMaterial, onReady?: (aspect: number) => void) => {
+        if (!String(src || '').trim()) {
+            applyPlaceholderMaterial(material);
+            onReady?.(16 / 9);
+            return;
+        }
+        if (/\.mp4(?:$|\?)/i.test(src)) {
+            const video = document.createElement('video');
+            video.crossOrigin = 'anonymous';
+            video.loop = true;
+            video.muted = true;
+            video.playsInline = true;
+            video.autoplay = true;
+            video.src = src;
+            await video.play().catch(() => {});
+            const texture = new Texture(scene.app.graphicsDevice, { mipmaps: false });
+            texture.setSource(video);
+            material.emissiveMap = texture;
+            material.diffuseMap = texture;
+            material.update();
+            embeddedMediaState.videoEl = video;
+            embeddedMediaState.texture = texture;
+            embeddedMediaState.update = () => {
+                if (!embeddedMediaState.videoEl || !embeddedMediaState.texture) return;
+                embeddedMediaState.texture.setSource(embeddedMediaState.videoEl);
+                scene.forceRender = true;
+            };
+            scene.app.on('update', embeddedMediaState.update);
+            onReady?.((video.videoWidth || 16) / Math.max(1, video.videoHeight || 9));
+            return;
+        }
+        const image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.src = src;
+        await new Promise<void>((resolve) => {
+            image.onload = () => resolve();
+            image.onerror = () => resolve();
+        });
+        const texture = new Texture(scene.app.graphicsDevice, { mipmaps: false });
+        texture.setSource(image);
+        material.emissiveMap = texture;
+        material.diffuseMap = texture;
+        material.update();
+        embeddedMediaState.texture = texture;
+        onReady?.((image.naturalWidth || 16) / Math.max(1, image.naturalHeight || 9));
+    };
+    const faceEntityToCamera = (entity: Entity, world: Vec3) => {
+        const cameraPos = scene.camera.mainCamera.getPosition();
+        entity.setPosition(world);
+        entity.lookAt(cameraPos);
+        entity.rotateLocal(0, 180, 0);
+    };
+    const updateEmbeddedMediaRootTransform = () => {
+        if (!embeddedMediaState.root) return;
+        if (embeddedMediaState.billboard) {
+            faceEntityToCamera(embeddedMediaState.root, embeddedMediaState.anchorWorld);
+        } else {
+            const quat = new Quat();
+            quat.setFromEulerAngles(
+                embeddedMediaState.orientation.pitch,
+                embeddedMediaState.orientation.yaw,
+                embeddedMediaState.orientation.roll
+            );
+            const offset = new Vec3(0, 0, 1);
+            quat.transformVector(offset, offset);
+            offset.mulScalar(embeddedMediaState.depthOffset || 0);
+            const position = embeddedMediaState.anchorWorld.clone().add(offset);
+            embeddedMediaState.root.setPosition(position);
+            embeddedMediaState.root.setEulerAngles(
+                embeddedMediaState.orientation.pitch,
+                embeddedMediaState.orientation.yaw,
+                embeddedMediaState.orientation.roll
+            );
+        }
+        const scale = Math.max(0.05, embeddedMediaState.scale || 1);
+        embeddedMediaState.root.setLocalScale(scale, scale, scale);
+    };
+    const mediaSizeFromAspect = (aspect: number, mode: 'media-plane' | 'media-object') => {
+        const safeAspect = Math.max(0.05, aspect || 1);
+        if (mode === 'media-object') {
+            const maxHeight = 2.45;
+            const maxWidth = 2.65;
+            if (safeAspect >= 1) {
+                const width = maxWidth;
+                return { width, height: width / safeAspect };
+            }
+            const height = maxHeight;
+            return { width: height * safeAspect, height };
+        }
+        const maxHeight = 2.05;
+        const maxWidth = 2.75;
+        if (safeAspect >= 1) {
+            const width = maxWidth;
+            return { width, height: width / safeAspect };
+        }
+        const height = maxHeight;
+        return { width: height * safeAspect, height };
+    };
+    const mountDomMediaCarrier = (spec: {
+        src: string;
+        kind: 'image' | 'video';
+        aspect: number;
+        anchorWorld: { x: number; y: number; z: number };
+    }) => {
+        const host = document.getElementById('opentour-embedded-media-dom-root');
+        if (!host) return;
+        const wrap = document.createElement('div');
+        wrap.style.position = 'absolute';
+        wrap.style.left = '0';
+        wrap.style.top = '0';
+        wrap.style.transformOrigin = 'center center';
+        wrap.style.pointerEvents = 'none';
+        wrap.style.filter = 'drop-shadow(0 20px 36px rgba(0,0,0,0.35))';
+
+        const frame = document.createElement('div');
+        frame.style.border = '10px solid rgba(18,20,26,0.96)';
+        frame.style.borderRadius = '16px';
+        frame.style.background = '#05070b';
+        frame.style.overflow = 'hidden';
+        frame.style.boxShadow = '0 0 0 1px rgba(255,255,255,0.08) inset';
+        frame.style.transform = 'perspective(1200px) rotateY(-18deg) rotateX(3deg)';
+        frame.style.transformOrigin = 'center center';
+
+        const media = document.createElement(spec.kind === 'video' ? 'video' : 'img') as HTMLVideoElement | HTMLImageElement;
+        media.style.display = 'block';
+        media.style.width = '100%';
+        media.style.height = '100%';
+        media.style.objectFit = 'contain';
+        if (spec.kind === 'video') {
+            const video = media as HTMLVideoElement;
+            video.muted = true;
+            video.loop = true;
+            video.autoplay = true;
+            video.playsInline = true;
+            video.src = spec.src;
+            void video.play().catch(() => {});
+        } else {
+            (media as HTMLImageElement).src = spec.src;
+        }
+        frame.appendChild(media);
+        wrap.appendChild(frame);
+        host.appendChild(wrap);
+        embeddedMediaState.domCarrier = wrap;
+
+        const anchor = new Vec3(spec.anchorWorld.x, spec.anchorWorld.y, spec.anchorWorld.z);
+        const update = () => {
+            if (!embeddedMediaState.domCarrier) return;
+            const projected = new Vec3();
+            scene.camera.worldToScreen(anchor, projected);
+            const container = document.getElementById('canvas-container');
+            const widthPx = spec.aspect >= 1 ? 360 : 240;
+            const heightPx = spec.aspect >= 1 ? widthPx / spec.aspect : 520;
+            const finalWidth = spec.aspect >= 1 ? widthPx : heightPx * spec.aspect;
+            const finalHeight = spec.aspect >= 1 ? heightPx : heightPx;
+            frame.style.width = `${Math.round(finalWidth)}px`;
+            frame.style.height = `${Math.round(finalHeight)}px`;
+            if (!container || projected.z < -1 || projected.z > 1 || projected.x < 0 || projected.x > 1 || projected.y < 0 || projected.y > 1) {
+                embeddedMediaState.domCarrier.style.display = 'block';
+                embeddedMediaState.domCarrier.style.transform = `translate(${Math.round((host.clientWidth - finalWidth) * 0.52)}px, ${Math.round((host.clientHeight - finalHeight) * 0.32)}px)`;
+            } else {
+                embeddedMediaState.domCarrier.style.display = 'block';
+                embeddedMediaState.domCarrier.style.transform = `translate(${Math.round(projected.x * container.clientWidth - finalWidth * 0.5)}px, ${Math.round(projected.y * container.clientHeight - finalHeight * 0.6)}px)`;
+            }
+        };
+        update();
+        const previousUpdate = embeddedMediaState.update;
+        embeddedMediaState.update = (dt: number) => {
+            previousUpdate?.(dt);
+            update();
+        };
+        if (previousUpdate) scene.app.off('update', previousUpdate);
+        scene.app.on('update', embeddedMediaState.update);
+    };
+    const showEmbeddedMedia = async (spec: {
+        mode: 'media-plane' | 'media-object';
+        kind: 'image' | 'video';
+        src: string;
+        title?: string;
+        caption?: string;
+        anchorWorld: { x: number; y: number; z: number };
+        scale?: number;
+        orientation?: { yaw: number; pitch: number; roll: number };
+        depthOffset?: number;
+        selected?: boolean;
+        placeholder?: boolean;
+        placeholderLabel?: string;
+        billboard?: boolean;
+    } | null) => {
+        if (!spec) {
+            clearEmbeddedMedia();
+            return;
+        }
+        const signature = `${spec.mode}|${spec.kind}|${spec.src}`;
+        if (embeddedMediaState.root && embeddedMediaState.specSignature === signature) {
+            embeddedMediaState.anchorWorld.set(spec.anchorWorld.x, spec.anchorWorld.y, spec.anchorWorld.z);
+            embeddedMediaState.scale = Math.max(0.05, Number(spec.scale) || 1);
+            embeddedMediaState.orientation = {
+                yaw: Number(spec.orientation?.yaw) || 0,
+                pitch: Number(spec.orientation?.pitch) || 0,
+                roll: Number(spec.orientation?.roll) || 0
+            };
+            embeddedMediaState.depthOffset = Number(spec.depthOffset) || 0;
+            embeddedMediaState.billboard = spec.billboard !== false;
+            embeddedMediaState.selected = Boolean(spec.selected);
+            if (embeddedMediaState.highlight?.render?.material) {
+                const mat = embeddedMediaState.highlight.render.material as StandardMaterial;
+                mat.emissive = embeddedMediaState.selected ? new Color(0.95, 0.78, 0.26) : new Color(0.08, 0.1, 0.16);
+                mat.opacity = embeddedMediaState.selected ? 0.16 : 0;
+                mat.update();
+            }
+            if (embeddedMediaState.highlight) embeddedMediaState.highlight.enabled = embeddedMediaState.selected;
+            updateEmbeddedMediaRootTransform();
+            scene.forceRender = true;
+            return;
+        }
+        clearEmbeddedMedia();
+        const root = new Entity(spec.mode === 'media-object' ? 'embeddedMediaObject' : 'embeddedMediaPlane');
+        embeddedMediaRoot.addChild(root);
+        embeddedMediaState.root = root;
+        embeddedMediaState.specSignature = signature;
+        embeddedMediaState.anchorWorld.set(spec.anchorWorld.x, spec.anchorWorld.y, spec.anchorWorld.z);
+        embeddedMediaState.scale = Math.max(0.05, Number(spec.scale) || 1);
+        embeddedMediaState.orientation = {
+            yaw: Number(spec.orientation?.yaw) || 0,
+            pitch: Number(spec.orientation?.pitch) || 0,
+            roll: Number(spec.orientation?.roll) || 0
+        };
+        embeddedMediaState.depthOffset = Number(spec.depthOffset) || 0;
+        embeddedMediaState.billboard = spec.billboard !== false;
+        embeddedMediaState.selected = Boolean(spec.selected);
+
+        const screenEntity = new Entity('embeddedMediaScreen');
+        screenEntity.addComponent('render', { type: 'box' });
+        root.addChild(screenEntity);
+        const material = createMediaMaterial();
+        screenEntity.render.material = material;
+        const highlight = new Entity('embeddedMediaHighlight');
+        highlight.addComponent('render', { type: 'box' });
+        root.addChild(highlight);
+        const highlightMat = new StandardMaterial();
+        highlightMat.useLighting = false;
+        highlightMat.diffuse = new Color(0, 0, 0);
+        highlightMat.emissive = embeddedMediaState.selected ? new Color(0.95, 0.78, 0.26) : new Color(0.08, 0.1, 0.16);
+        highlightMat.opacity = embeddedMediaState.selected ? 0.16 : 0;
+        highlightMat.blendType = 2;
+        highlightMat.update();
+        highlight.render.material = highlightMat;
+        highlight.enabled = embeddedMediaState.selected;
+        embeddedMediaState.highlight = highlight;
+        screenEntity.setLocalPosition(0, 0, 0);
+
+        await applyTextureSource(spec.src, material, (aspect) => {
+            const { width, height } = mediaSizeFromAspect(aspect, spec.mode);
+            screenEntity.setLocalScale(width, height, 0.01);
+            highlight.setLocalScale(width + 0.08, height + 0.08, 0.004);
+            highlight.setLocalPosition(0, 0, -0.01);
+        });
+
+        const update = () => {
+            if (!embeddedMediaState.root) return;
+            updateEmbeddedMediaRootTransform();
+        };
+        update();
+        const previousUpdate = embeddedMediaState.update;
+        embeddedMediaState.update = (dt: number) => {
+            previousUpdate?.(dt);
+            update();
+        };
+        if (previousUpdate) {
+            scene.app.off('update', previousUpdate);
+        }
+        scene.app.on('update', embeddedMediaState.update);
+        scene.forceRender = true;
+    };
     const step3DualViewPanel = mountStep3DualViewPanel(events, scene, () => currentModelFilename);
     const step3GimiPanel = mountStep3GimiDualViewPanel(events, scene, () => currentModelFilename);
     let groundGridVisible = false;
@@ -653,18 +1068,8 @@ const main = async () => {
     });
 
     let tourLoaderToggleAt = 0;
-    const toggleOTTourLoader = async (event: Event) => {
-        const now = performance.now();
-        if (now - tourLoaderToggleAt < 120) return;
-        tourLoaderToggleAt = now;
-        event.stopPropagation();
-        if (event.cancelable) event.preventDefault();
-        if (ui.tourLoaderButton.disabled) return;
-        if (!currentModelFilename) {
-            ui.status.textContent = 'Load a model before opening Tour Loader.';
-            return;
-        }
-
+    const ensureTourLoaderPanel = async () => {
+        if (otTourLoaderPanel || !currentModelFilename) return;
         if (!otTourLoaderPanel) {
             setButtonBusy(ui.tourLoaderButton, true);
             try {
@@ -691,6 +1096,10 @@ const main = async () => {
                         scene.camera.fov = Math.max(20, Math.min(120, fovDeg));
                         scene.camera.controlMode = 'fly';
                         scene.camera.setPose(eye, target, 0);
+                    },
+                    getCaptureCanvas: () => ui.canvas,
+                    requestCaptureRender: () => {
+                        scene.forceRender = true;
                     },
                     captureScreenshotPng: async () => {
                         const canvas = scene.app?.graphicsDevice?.canvas as HTMLCanvasElement | undefined;
@@ -742,6 +1151,23 @@ const main = async () => {
                             return direct;
                         }
                     },
+                    pickWorldPointAtScreen: async (x, y) => {
+                        const hit = await scene.camera.intersect(x, y);
+                        return hit ? { x: hit.position.x, y: hit.position.y, z: hit.position.z } : null;
+                    },
+                    projectWorldToScreen: (point) => {
+                        const container = document.getElementById('canvas-container');
+                        if (!container) return null;
+                        const projected = new Vec3();
+                        scene.camera.worldToScreen(new Vec3(point.x, point.y, point.z), projected);
+                        return {
+                            x: projected.x * container.clientWidth,
+                            y: projected.y * container.clientHeight,
+                            visible: projected.z >= -1 && projected.z <= 1 && projected.x >= 0 && projected.x <= 1 && projected.y >= 0 && projected.y <= 1
+                        };
+                    },
+                    showEmbeddedMedia,
+                    resolveAssetUrl: (value) => `http://localhost:3031/api/ot-tour-loader/local-file?path=${encodeURIComponent(value)}`,
                     apiBaseUrl: 'http://localhost:3031/api/ot-tour-loader',
                     onModelLoaded: (callback) => {
                         const handler = (name: string | null) => callback(name);
@@ -751,6 +1177,7 @@ const main = async () => {
                         };
                     }
                 });
+                otTourLoaderReady = true;
             } catch (error) {
                 const message = error instanceof Error ? error.message : `${error}`;
                 ui.status.textContent = `OT_TourLoader unavailable: ${message}`;
@@ -759,6 +1186,21 @@ const main = async () => {
                 syncTourLoaderButtonState();
             }
         }
+    };
+
+    const toggleOTTourLoader = async (event: Event) => {
+        const now = performance.now();
+        if (now - tourLoaderToggleAt < 120) return;
+        tourLoaderToggleAt = now;
+        event.stopPropagation();
+        if (event.cancelable) event.preventDefault();
+        if (ui.tourLoaderButton.disabled) return;
+        if (!currentModelFilename) {
+            ui.status.textContent = 'Load a model before opening Tour Loader.';
+            return;
+        }
+
+        await ensureTourLoaderPanel();
 
         otTourLoaderPanel?.toggle();
     };
@@ -768,6 +1210,31 @@ const main = async () => {
     });
     ui.tourLoaderButton.addEventListener('click', (event) => {
         void toggleOTTourLoader(event);
+    });
+
+    let cinematicToggleAt = 0;
+    const toggleOTCinematic = async (event: Event) => {
+        const now = performance.now();
+        if (now - cinematicToggleAt < 120) return;
+        cinematicToggleAt = now;
+        event.stopPropagation();
+        if (event.cancelable) event.preventDefault();
+        if (ui.cinematicButton.disabled) return;
+        if (!otTourLoaderPanel) {
+            await ensureTourLoaderPanel();
+        }
+        try {
+            await otTourLoaderPanel.openCinematicWorkspace();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : `${error}`;
+            ui.status.textContent = `OT_Cinematic unavailable: ${message}`;
+        }
+    };
+    ui.cinematicButton.addEventListener('pointerdown', (event) => {
+        void toggleOTCinematic(event);
+    });
+    ui.cinematicButton.addEventListener('click', (event) => {
+        void toggleOTCinematic(event);
     });
 
     let tourPlayerToggleAt = 0;
@@ -1155,11 +1622,13 @@ const main = async () => {
             currentModelFilename = file.name;
             events.fire('opentour.model.loaded', file.name);
             syncTourLoaderButtonState();
+            void refreshCinematicAvailability();
             ui.status.textContent = `Loaded: ${file.name}`;
         } catch (error) {
             const message = error instanceof Error ? error.message : `${error}`;
             loadedRootTransform = null;
             currentModelFilename = null;
+            cinematicModelReady = false;
             events.fire('opentour.model.loaded', null);
             syncTourLoaderButtonState();
             ui.status.textContent = `Load failed: ${message}`;

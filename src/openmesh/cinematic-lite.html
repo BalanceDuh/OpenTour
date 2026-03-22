@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Cinematic Lite</title>
+        <link rel="icon" href="data:," />
+        <style>
+            :root {
+                color-scheme: dark;
+                --bg: #14171b;
+                --panel: rgba(14, 17, 21, 0.84);
+                --card: rgba(255,255,255,0.04);
+                --line: rgba(255,255,255,0.12);
+                --text: #eef3f8;
+                --muted: #b4bec8;
+                --accent: #d3ac5d;
+                --accent-2: #8fd0d4;
+                --shadow: 0 18px 48px rgba(0,0,0,0.35);
+                --otp-bg: #1a1a20;
+                --otp-card: #23232a;
+                --otp-input: #151519;
+                --otp-border: #33333e;
+                --otp-text: #e2e2e9;
+                --otp-muted: #8b8b99;
+                --otp-main: #3b82f6;
+                --otp-main-2: #60a5fa;
+                --otp-pri: #f59e0b;
+                font-family: "Segoe UI", "Noto Sans", sans-serif;
+            }
+            * { box-sizing: border-box; }
+            html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); }
+            body { background: radial-gradient(circle at top right, rgba(211,172,93,0.16), transparent 26%), radial-gradient(circle at left, rgba(143,208,212,0.12), transparent 28%), linear-gradient(180deg, #252931 0%, #16191d 100%); }
+            #viewer-root { position: fixed; inset: 0; }
+            .cwf-shell { position: fixed; left: 16px; top: 16px; width: min(500px, calc(100vw - 32px)); max-height: calc(100vh - 150px); display: grid; grid-template-rows: auto auto 1fr; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 22px; background: var(--panel); backdrop-filter: blur(14px); box-shadow: var(--shadow); z-index: 20; font-family: "Segoe UI", "Noto Sans", sans-serif; }
+            .cwf-shell.hidden { display:none; }
+            .cwf-head { cursor: grab; user-select: none; display:flex; align-items:center; justify-content:space-between; gap:12px; }
+            .cwf-head:active { cursor: grabbing; }
+            .cwf-head h1 { margin: 0; flex: 0 0 auto; font-size: 13px; font-weight: 700; letter-spacing: 0.01em; line-height: 1; }
+            .cwf-card-sub, .cwf-step-note, .cwf-mini { color: var(--muted); font-size: 11px; line-height: 1.45; }
+            .cwf-status { padding: 10px 12px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,0.06); font-size: 12px; line-height: 1.45; color: var(--muted); }
+            .cwf-scroll { overflow:auto; padding-right:4px; display:grid; gap:10px; align-content:start; grid-auto-rows:max-content; }
+            .cwf-card { border:1px solid var(--line); border-radius:18px; background:var(--card); overflow:hidden; }
+            .cwf-card-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid rgba(255,255,255,0.06); }
+            .cwf-step-title { display:flex; align-items:center; gap:10px; }
+            .cwf-badge { width:24px; height:24px; border-radius:999px; display:grid; place-items:center; font-size:12px; font-weight:700; color:#081015; background:linear-gradient(135deg,var(--accent),var(--accent-2)); }
+            .cwf-card-title { font-size:13px; font-weight:700; letter-spacing:0.01em; }
+            .cwf-card-tools, .cw-inline-actions, .cw-play-actions, .cw-row { display:flex; flex-wrap:wrap; gap:8px; }
+            .cw-icon-wrap { position: relative; }
+            .cw-icon-tip {
+                position: absolute;
+                right: 0;
+                bottom: calc(100% + 8px);
+                padding: 4px 8px;
+                border-radius: 8px;
+                background: rgba(8, 10, 13, 0.92);
+                border: 1px solid rgba(255,255,255,0.1);
+                color: var(--muted);
+                font-size: 11px;
+                white-space: nowrap;
+                opacity: 0;
+                pointer-events: none;
+                transform: translateY(4px);
+                transition: opacity .15s ease, transform .15s ease;
+            }
+            .cw-icon-wrap:hover .cw-icon-tip { opacity: 1; transform: translateY(0); }
+            .cw-topbar { display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,0.04); }
+            .cw-headbar { flex: 1 1 auto; max-width: 250px; margin-left: auto; margin-right: auto; }
+            .cw-topbar .icon-btn { width:30px; height:30px; padding:0; display:grid; place-items:center; border-radius:8px; font-size:14px; font-weight:700; }
+            .cw-svg { width: 15px; height: 15px; display: block; flex-shrink: 0; }
+            .cw-svg.filled { stroke: none; fill: currentColor; }
+            .cw-topbar .time { min-width:50px; font-size:10px; color:var(--muted); text-align:center; }
+            .cw-topbar .speed { width:82px; padding:8px 10px; border-radius:12px; }
+            .cwf-card-body { padding:10px 12px; display:grid; gap:10px; }
+            button, select, textarea, input { font:inherit; color:var(--text); }
+            button { appearance:none; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.08); border-radius:999px; padding:10px 14px; cursor:pointer; transition:transform .15s ease, background .15s ease; font-size:12px; }
+            button:hover { transform:translateY(-1px); background:rgba(255,255,255,0.14); }
+            button.primary { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#081015; border:none; font-weight:700; }
+            button.full { width:100%; justify-content:center; }
+            button.ghost { background:transparent; }
+            button.icon { width:30px; height:30px; padding:0; display:grid; place-items:center; border-radius:8px; }
+            select, textarea, input { width:100%; border-radius:14px; border:1px solid rgba(255,255,255,0.12); background:rgba(4,6,9,0.56); padding:12px; font-size:12px; }
+            textarea { resize:vertical; min-height:140px; }
+            #cinelite-narration { min-height:220px; }
+            .cwf-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.04); font-size:10px; color:var(--muted); }
+            .cw-progress { height:8px; border-radius:999px; background:rgba(255,255,255,0.08); overflow:hidden; }
+            .cw-progress>div { width:0; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)); }
+            .cw-capture-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+            .cw-capture-card { position: relative; margin:0; border:1px solid var(--line); border-radius:14px; overflow:hidden; background:rgba(255,255,255,0.04); }
+            .cw-capture-card .cw-capture-media { position: relative; width: 100%; aspect-ratio: 1.18/1; background: rgba(255,255,255,0.03); }
+            .cw-capture-card img { display:block; width:100%; height:100%; object-fit:cover; }
+            .cw-capture-card figcaption { position:absolute; top:8px; right:8px; padding:0; display:flex; justify-content:flex-end; align-items:flex-start; min-height:0; z-index:2; }
+            .cw-card-tools-row { display:flex; gap:6px; }
+            .cw-card-tools-row button { width:30px; height:30px; padding:0; display:grid; place-items:center; border-radius:8px; font-size:12px; background: rgba(22,24,28,0.72); backdrop-filter: blur(6px); }
+            .cw-manual-grid { display:flex; gap:6px; overflow:hidden; padding-bottom:4px; flex-wrap:nowrap; width:100%; }
+            .cw-manual-grid button { flex:1 1 0; min-width:0; white-space:nowrap; font-size:10px; padding:8px 10px; }
+            .cw-outline { display:grid; gap:6px; max-height:220px; overflow:auto; }
+            .cw-outline-row { display:grid; grid-template-columns:54px 1fr; gap:10px; padding:8px 10px; border-radius:12px; background:rgba(255,255,255,0.04); font-size:12px; }
+            .cw-outline-row.active { outline:1px solid rgba(211,172,93,0.8); background:rgba(211,172,93,0.1); }
+            .crt-panel { position:fixed; right:16px; top:16px; width:min(980px,calc(100vw - 84px)); height:min(78vh,640px); border-radius:14px; border:1px solid var(--otp-border); background:var(--otp-bg); color:var(--otp-text); box-shadow:0 24px 60px rgba(0,0,0,0.55); z-index:22; display:flex; flex-direction:column; overflow:hidden; font-family:"Segoe UI","Noto Sans",sans-serif; transition:width .18s ease; }
+            .crt-head { cursor:move; }
+            .crt-head.otp-header { height:52px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 14px; border-bottom:1px solid var(--otp-border); background:rgba(0,0,0,0.22); }
+            .crt-head:active { cursor:grabbing; }
+            .otp-header-left, .otp-header-right { display:flex; align-items:center; gap:8px; }
+            .otp-brand { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; letter-spacing:0.01em; margin-right:10px; }
+            .otp-brand-short { display:none; }
+            .otp-dot { width:8px; height:8px; border-radius:50%; background:var(--otp-main); box-shadow:0 0 10px rgba(59,130,246,0.9); }
+            .otp-btn { height:30px; border:1px solid var(--otp-border); border-radius:8px; background:var(--otp-input); color:var(--otp-text); padding:0 10px; font-size:12px; font-weight:600; cursor:pointer; }
+            .otp-icon-btn { width:30px; height:30px; border:1px solid var(--otp-border); border-radius:8px; background:var(--otp-input); color:var(--otp-text); display:flex; align-items:center; justify-content:center; font-size:14px; cursor:pointer; line-height:1; }
+            .otp-icon-btn.playing { color:#8ec3ff; border-color:rgba(59,130,246,0.6); background:rgba(59,130,246,0.12); }
+            .otp-icon-btn.stop { color:#ffd3d3; border-color:rgba(239,68,68,0.55); }
+            .otp-icon-btn:disabled, .otp-btn:disabled { opacity:0.45; cursor:not-allowed; }
+            .otp-mic-btn { position:relative; overflow:visible; --voice-level:0; }
+            .otp-mic-icon-wrap { position:relative; z-index:2; display:flex; align-items:center; justify-content:center; }
+            .otp-mic-ripple { position:absolute; inset:-3px; border-radius:10px; border:1px solid rgba(96,165,250,calc(0.18 + var(--voice-level) * 0.42)); background:radial-gradient(circle, rgba(96,165,250,calc(var(--voice-level) * 0.16)) 0%, rgba(96,165,250,0) 68%); transform:scale(calc(1 + var(--voice-level) * 0.35)); opacity:calc(0.14 + var(--voice-level) * 0.5); pointer-events:none; transition:transform 90ms linear, opacity 90ms linear, border-color 90ms linear; z-index:0; }
+            .otp-mic-ripple-2 { inset:-7px; border-color:rgba(59,130,246,calc(0.12 + var(--voice-level) * 0.28)); transform:scale(calc(1 + var(--voice-level) * 0.6)); opacity:calc(0.08 + var(--voice-level) * 0.38); }
+            .otp-icon-btn:not(.playing) .otp-mic-ripple { opacity:0; }
+            .otp-icon { width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; min-width:15px; min-height:15px; display:block; }
+            .otp-icon-btn .cw-svg { width:15px; height:15px; display:block; flex-shrink:0; min-width:15px; min-height:15px; }
+            .otp-badge { font-size:10px; color:var(--otp-muted); padding:2px 6px; border-radius:999px; border:1px solid var(--otp-border); background:var(--otp-input); }
+            .otp-main { flex:1; display:grid; grid-template-columns:1.2fr 1fr 1fr; min-height:0; }
+            .crt-panel.minimal-mode { width:min(396px,calc(33.333vw - 24px)); min-width:360px; }
+            .crt-panel.minimal-mode .otp-main { grid-template-columns:minmax(0,1fr); }
+            .crt-panel.minimal-mode .otp-script-col,
+            .crt-panel.minimal-mode .otp-priority-col { display:none; }
+            .crt-panel.minimal-mode .otp-current-badge { display:none; }
+            .crt-panel.minimal-mode .otp-brand-full { display:none; }
+            .crt-panel.minimal-mode .otp-brand-short { display:inline; }
+            .otp-col { display:flex; flex-direction:column; min-width:0; min-height:0; border-right:1px solid var(--otp-border); background:#151519; }
+            .otp-col:last-child { border-right:none; }
+            .otp-title { height:40px; padding:0 12px; display:flex; align-items:center; justify-content:space-between; border-bottom:1px solid var(--otp-border); background:var(--otp-card); font-size:12px; font-weight:700; gap:8px; }
+            .otp-transcript-filter-row { display:flex; align-items:center; justify-content:space-between; width:100%; gap:10px; }
+            .otp-transcript-filter-left { display:flex; align-items:center; gap:8px; min-width:0; }
+            .otp-transcript-filter-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+            .otp-inline-icon { width:28px; height:28px; }
+            .otp-tabs { display:flex; gap:4px; padding:2px; border:1px solid var(--otp-border); border-radius:8px; background:var(--otp-input); }
+            .otp-tab { border:none; background:transparent; color:var(--otp-muted); font-size:10px; height:22px; border-radius:6px; padding:0 8px; cursor:pointer; }
+            .otp-tab.active { color:#fff; background:#2d2d37; }
+            .otp-list { flex:1; overflow-y:auto; overflow-x:hidden; padding:8px; display:flex; flex-direction:column; gap:6px; min-height:0; scrollbar-width:thin; scrollbar-color:rgba(143,208,212,0.65) rgba(255,255,255,0.05); }
+            .otp-list::-webkit-scrollbar { width:10px; height:10px; }
+            .otp-list::-webkit-scrollbar-track { background:rgba(255,255,255,0.05); border-radius:999px; }
+            .otp-list::-webkit-scrollbar-thumb { background:linear-gradient(180deg, rgba(211,172,93,0.85), rgba(143,208,212,0.8)); border-radius:999px; border:2px solid rgba(21,21,25,0.95); }
+            .otp-transcript-body { position:relative; flex:1; min-height:0; overflow:auto; }
+            .otp-item { border:1px solid var(--otp-border); border-radius:8px; background:#1e1e25; padding:8px; font-size:11px; line-height:1.45; }
+            .otp-item.running { border-color:rgba(59,130,246,0.55); background:rgba(59,130,246,0.12); }
+            .otp-item.priority { border-color:rgba(245,158,11,0.55); background:rgba(245,158,11,0.12); }
+            .otp-item-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:4px; color:var(--otp-muted); font-size:10px; text-transform:uppercase; letter-spacing:0.04em; }
+            .otp-chat-row { display:flex; width:100%; }
+            .otp-chat-row.right { justify-content:flex-end; }
+            .otp-chat-card { width:min(100%, 88%); }
+            .otp-chat-row.right .otp-chat-card { border-color:rgba(59,130,246,0.45); background:rgba(59,130,246,0.12); }
+            .otp-chat-row.left .otp-chat-card.assistant { border-color:rgba(255,255,255,0.14); }
+            .otp-chat-row.left .otp-chat-card.system { border-color:rgba(245,158,11,0.38); background:rgba(245,158,11,0.08); }
+            .otp-system-detail { margin-top:6px; }
+            .otp-system-detail summary { cursor:pointer; color:var(--otp-muted); font-size:10px; list-style:none; }
+            .otp-system-detail summary::-webkit-details-marker { display:none; }
+            .otp-system-detail pre { margin:6px 0 0; padding:8px; border-radius:8px; border:1px solid var(--otp-border); background:#151519; color:var(--otp-text); white-space:pre-wrap; word-break:break-word; font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+            .otp-debug-sections { margin-top:6px; display:grid; gap:6px; }
+            .otp-debug-block { border:1px solid rgba(255,255,255,0.08); border-radius:8px; background:#151519; overflow:hidden; }
+            .otp-debug-block summary { cursor:pointer; padding:7px 8px; color:var(--otp-muted); font-size:10px; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+            .otp-debug-block summary::-webkit-details-marker { display:none; }
+            .otp-debug-block pre { margin:0; padding:8px; border-top:1px solid rgba(255,255,255,0.08); white-space:pre-wrap; word-break:break-word; font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color:var(--otp-text); }
+            .otp-debug-grid { display:grid; gap:6px; margin-top:6px; }
+            .otp-debug-chip { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); color:var(--otp-muted); font-size:10px; }
+            .otp-empty { color:var(--otp-muted); font-size:11px; text-align:center; padding:24px 10px; opacity:0.8; }
+            .otp-transcript-chat { border-top:1px solid var(--otp-border); background:var(--otp-card); padding:8px; display:grid; grid-template-columns:1fr auto; gap:8px; }
+            .otp-input { height:32px; border:1px solid var(--otp-border); border-radius:8px; background:var(--otp-input); color:var(--otp-text); padding:0 10px; font-size:12px; width:100%; min-width:0; }
+            .otp-status { height:40px; border-top:1px solid var(--otp-border); background:var(--otp-card); padding:0 10px; display:flex; align-items:center; justify-content:space-between; gap:10px; font-size:11px; color:#b8d6ff; }
+            .otp-status-text { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .otp-status-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+            .otp-speed-select { width:64px; height:30px; border:1px solid var(--otp-border); border-radius:8px; background:var(--otp-input); color:var(--otp-text); padding:0 8px; font-size:12px; }
+            .otp-time-badge { min-width:50px; text-align:center; font-size:10px; color:var(--otp-muted); padding:7px 8px; border-radius:8px; border:1px solid var(--otp-border); background:var(--otp-input); }
+            .cw-modal-backdrop { position:fixed; inset:0; display:grid; place-items:center; background:rgba(3,5,8,0.55); backdrop-filter:blur(6px); z-index:50; }
+            .cw-modal-backdrop.hidden { display:none; }
+            .cw-modal { width:min(1000px,calc(100vw - 32px)); max-height:min(84vh,900px); display:grid; grid-template-rows:auto 1fr auto; gap:12px; padding:16px; border:1px solid var(--line); border-radius:20px; background:rgba(15,18,23,0.94); box-shadow:var(--shadow); }
+            .cw-modal.fullscreen { width:calc(100vw - 24px); height:calc(100vh - 24px); max-width:none; max-height:none; border-radius:22px; }
+            .cw-modal-body { overflow:auto; display:grid; gap:10px; }
+            .cw-modal-head,.cw-modal-foot { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+            .cw-grid-table { width:100%; border-collapse:collapse; font-size:12px; }
+            .cw-grid-table th,.cw-grid-table td { border-bottom:1px solid rgba(255,255,255,0.08); padding:6px; vertical-align:top; }
+            .cw-grid-table th { position:sticky; top:0; background:#11151a; text-align:left; }
+            .cw-grid-table input,.cw-grid-table textarea { min-width:80px; padding:8px; border-radius:10px; }
+            .cw-grid-table textarea { min-height:72px; }
+            .cw-grid-table textarea[data-field="content"] { min-width:320px; min-height:96px; cursor:pointer; }
+            .cw-csv-layout { display:grid; grid-template-columns:220px 1fr; gap:12px; min-height:420px; height:100%; }
+            .cw-version-list { border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:8px; overflow:auto; display:grid; gap:8px; align-content:start; }
+            .cw-version-item { border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.04); border-radius:12px; padding:10px; cursor:pointer; }
+            .cw-version-item.active { border-color: var(--accent-2); background: rgba(143,208,212,0.09); }
+            .cw-grid-wrap { overflow:auto; border:1px solid rgba(255,255,255,0.08); border-radius:14px; }
+            .cw-content-editor { min-height:calc(100vh - 180px); font-size:15px; line-height:1.6; }
+            .cw-debug { position:fixed; left:0; right:0; bottom:0; height:104px; display:grid; grid-template-rows:auto 1fr; border-top:1px solid var(--line); background:rgba(10,12,15,0.94); backdrop-filter:blur(12px); z-index:40; }
+            .cw-debug.collapsed { height:42px; }
+            .cw-debug-head { display:flex; align-items:center; justify-content:space-between; padding:6px 12px; gap:10px; }
+            .cw-debug-head strong { font-size:11px; color:var(--muted); font-weight:600; }
+            .cw-debug-head .cw-inline-actions button { font-size:11px; padding:8px 12px; }
+            .cw-debug-body { overflow:auto; padding:0 12px 8px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10px; }
+            .cw-debug.collapsed .cw-debug-body { display:none; }
+            .cw-debug-line { padding:3px 0; border-bottom:1px dashed rgba(255,255,255,0.06); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .cw-debug-detail { white-space:normal; overflow:visible; }
+            .cw-debug-detail summary { list-style:none; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .cw-debug-detail summary::-webkit-details-marker { display:none; }
+            .cw-debug-detail pre { margin:6px 0 0; padding:8px 10px; border-radius:10px; background:rgba(255,255,255,0.04); white-space:pre-wrap; word-break:break-word; font:inherit; color:var(--text); }
+            .cw-debug-tag { color:var(--accent-2); }
+            .cwf-progress { display:grid; gap:8px; margin-top:10px; }
+            .cwf-progress.hidden { display:none; }
+            .cwf-progress-bar { position:relative; height:8px; border-radius:999px; overflow:hidden; background:rgba(255,255,255,0.08); }
+            .cwf-progress-bar::before { content:""; position:absolute; inset:0; width:36%; border-radius:inherit; background:linear-gradient(90deg,var(--accent),var(--accent-2)); animation:cw-loader 1.15s ease-in-out infinite; }
+            .cwf-progress-text { font-size:11px; color:var(--muted); }
+            #cinelite-model-status, #cinelite-model-file { display:none !important; }
+            @keyframes cw-loader { 0% { transform:translateX(-120%); } 100% { transform:translateX(320%); } }
+            .cw-hidden { display:none !important; }
+            @media (max-width: 900px) {
+                .cwf-shell { right:12px; top:12px; left:12px; width:auto; max-height:calc(100vh - 130px); }
+                .cw-capture-grid { grid-template-columns:repeat(2,1fr); }
+            }
+        </style>
+        <script src="/vendor/marmoset.js"></script>
+    </head>
+    <body>
+        <div id="viewer-root"></div>
+        <aside class="cwf-shell">
+            <div class="cwf-head">
+                <h1>Cinematic Lite</h1>
+                <div class="cw-topbar cw-headbar">
+                    <button id="cinelite-play-toggle-btn" class="primary icon-btn" title="播放"><svg class="cw-svg filled" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg></button>
+                    <button id="cinelite-stop-btn" class="icon-btn" title="停止"><svg class="cw-svg filled" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"></rect></svg></button>
+                    <select id="cinelite-speed-select" class="speed">
+                        <option value="0.5">0.5x</option>
+                        <option value="1" selected>1x</option>
+                        <option value="1.5">1.5x</option>
+                        <option value="2">2x</option>
+                    </select>
+                    <div id="cinelite-play-time" class="time">00:00</div>
+                </div>
+                <button id="cinelite-open-settings-btn" class="icon ghost" title="模型与音色设置"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+            </div>
+            <div class="cwf-scroll">
+                <section class="cwf-card">
+                    <div class="cwf-card-head">
+                        <div class="cwf-step-title"><div class="cwf-badge">1</div><div><div class="cwf-card-title">Load</div><div id="cinelite-model-status" class="cwf-card-sub cw-hidden"></div></div></div>
+                        <div class="cwf-card-tools"><button id="cinelite-upload-model-btn" class="icon" title="上传本地模型"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg></button></div>
+                    </div>
+                    <div class="cwf-card-body">
+                        <div id="cinelite-model-file" class="cwf-pill">当前模型：未加载</div>
+                        <div id="cinelite-model-progress" class="cwf-progress hidden"><div class="cwf-progress-bar"></div><div id="cinelite-model-progress-text" class="cwf-progress-text">模型资源加载中...</div></div>
+                        <input id="cinelite-model-file-input" type="file" accept=".mview" class="cw-hidden" />
+                    </div>
+                </section>
+                <section class="cwf-card">
+                    <div class="cwf-card-head">
+                        <div class="cwf-step-title"><div class="cwf-badge">2</div><div><div class="cwf-card-title">Prompt</div><div id="cinelite-prompt-status" class="cwf-card-sub cw-hidden"></div></div></div>
+                        <div class="cwf-card-tools">
+                            <button id="cinelite-open-narration-btn" class="icon" title="编辑讲解词"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20"></path><path d="M20 2H8a2 2 0 0 0-2 2v18"></path><path d="M8 6h8"></path><path d="M8 10h8"></path><path d="M8 14h5"></path></svg></button>
+                            <button id="cinelite-open-simple-btn" class="icon" title="查看简单提示词"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+                            <button id="cinelite-run-simple-btn" class="icon" title="运行简单提示词生成复杂提示词"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>
+                            <button id="cinelite-open-complex-btn" class="icon" title="查看复杂提示词"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button>
+                        </div>
+                    </div>
+                    <div class="cwf-card-body">
+                        <div id="cinelite-tts-meta" class="cwf-step-note cw-hidden"></div>
+                    </div>
+                </section>
+                <section class="cwf-card">
+                    <div class="cwf-card-head">
+                        <div class="cwf-step-title"><div class="cwf-badge">3</div><div><div class="cwf-card-title">Views</div><div id="cinelite-capture-status" class="cwf-card-sub cw-hidden"></div></div></div>
+                        <div class="cwf-card-tools">
+                            <div class="cw-icon-wrap">
+                                <button id="cinelite-capture-auto-btn" class="icon primary" title="自动拍"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg></button>
+                                <span class="cw-icon-tip">自动拍</span>
+                            </div>
+                            <div class="cw-icon-wrap">
+                                <button id="cinelite-toggle-manual-btn" class="icon" title="手动拍"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M18 11V6a2 2 0 0 0-4 0v4a2 2 0 0 0-4 0V4a2 2 0 0 0-4 0v6a2 2 0 0 0-4 0v6a8 8 0 0 0 16 0v-5z"></path></svg></button>
+                                <span class="cw-icon-tip">手动拍</span>
+                            </div>
+                            <div class="cw-icon-wrap">
+                                <button id="cinelite-clear-model-data-btn" class="icon" title="清空当前模型数据"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4h6v2"></path></svg></button>
+                                <span class="cw-icon-tip">清空</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cwf-card-body">
+                        <div id="cinelite-manual-panel" class="cw-hidden"><div id="cinelite-manual-grid" class="cw-manual-grid"></div></div>
+                        <div id="cinelite-captures" class="cw-capture-grid"></div>
+                    </div>
+                </section>
+                <section class="cwf-card">
+                    <div class="cwf-card-head">
+                        <div class="cwf-step-title"><div class="cwf-badge">4</div><div><div class="cwf-card-title">CSV</div><div id="cinelite-csv-status" class="cwf-card-sub cw-hidden"></div></div></div>
+                        <div class="cwf-card-tools">
+                            <div class="cw-icon-wrap">
+                                <button id="cinelite-open-csv-btn" class="icon" title="生成 / 编辑 CSV"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M14 4H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"></path><path d="M14 4v5h5"></path><path d="M9 13h6"></path><path d="M9 17h4"></path></svg></button>
+                                <span class="cw-icon-tip">生成 / 编辑 CSV</span>
+                            </div>
+                            <div class="cw-icon-wrap">
+                                <button id="cinelite-download-btn" class="icon" title="下载 CSV"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M12 3v12"></path><path d="m7 10 5 5 5-5"></path><path d="M5 21h14"></path></svg></button>
+                                <span class="cw-icon-tip">下载 CSV</span>
+                            </div>
+                            <div class="cw-icon-wrap">
+                                <button id="cinelite-run-complex-btn" class="icon primary" title="生成飞行视角和 CSV"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg></button>
+                                <span class="cw-icon-tip">生成飞行视角和 CSV</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="cwf-card-body">
+                        <button id="cinelite-apply-camera-btn" class="cw-hidden">确认当前视角</button>
+                    </div>
+                </section>
+                <div>
+                    <div id="cinelite-status" class="cwf-status">等待第 1 步加载模型文件</div>
+                </div>
+            </div>
+        </aside>
+
+        <aside id="cinelite-realtime-panel" class="crt-panel">
+            <div class="crt-head otp-header">
+                <div class="otp-header-left">
+                    <div class="otp-brand"><span class="otp-dot"></span><span class="otp-brand-full">Realtime Tour Chat</span><span class="otp-brand-short">RTC</span></div>
+                    <button id="cinelite-rtc-play-toggle-btn" class="otp-icon-btn" title="Play / Pause"><svg class="cw-svg filled" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"></path></svg></button>
+                    <button id="cinelite-rtc-stop-btn" class="otp-icon-btn stop" title="Stop"><svg class="cw-svg filled" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect fill="currentColor" x="7" y="7" width="10" height="10" rx="1.5"></rect></svg></button>
+                    <select id="cinelite-rtc-speed-select" class="otp-speed-select"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="1.5">1.5x</option><option value="2">2x</option></select>
+                    <span id="cinelite-rtc-play-time" class="otp-time-badge">00:00</span>
+                </div>
+                <div class="otp-header-right">
+                    <span class="otp-badge otp-current-badge">当前播放 <span id="cinelite-current-queue-label">待机</span></span>
+                    <button id="cinelite-realtime-hide-btn" class="otp-icon-btn" title="Hide Panel"><svg class="cw-svg" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path stroke="currentColor" d="M6 6l12 12"></path><path stroke="currentColor" d="M18 6L6 18"></path></svg></button>
+                </div>
+            </div>
+            <div class="otp-main">
+                <section class="otp-col otp-transcript-col">
+                    <div class="otp-title">
+                        <div class="otp-transcript-filter-row">
+                            <div class="otp-transcript-filter-left"><div class="otp-tabs"><button class="otp-tab active" type="button" data-chat-filter="chat">Chat</button><button class="otp-tab" type="button" data-chat-filter="system">System</button><button class="otp-tab" type="button" data-chat-filter="all">All</button></div></div>
+                            <div class="otp-transcript-filter-right"><button id="cinelite-rtc-minimal-toggle-btn" class="otp-icon-btn otp-inline-icon" title="切换精简模式" aria-label="切换精简模式"><svg class="otp-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 10H6V6"></path><path d="M14 10h4V6"></path><path d="M10 14H6v4"></path><path d="M14 14h4v4"></path><path d="M10 10 6 6"></path><path d="M14 10l4-4"></path><path d="M10 14l-4 4"></path><path d="M14 14l4 4"></path></svg></button><span class="otp-badge" id="cinelite-chat-count">0</span></div>
+                        </div>
+                    </div>
+                    <div class="otp-transcript-body"><div id="cinelite-chat-log" class="otp-list"></div></div>
+                    <div class="otp-transcript-chat">
+                        <input id="cinelite-chat-input" class="otp-input" placeholder="弹幕输入，回车插队" />
+                        <button id="cinelite-send-chat-btn" class="otp-icon-btn" title="Send"><svg class="otp-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h12" /><path d="M13 8l4 4-4 4" /></svg></button>
+                    </div>
+                </section>
+                <section class="otp-col otp-script-col"><div class="otp-title">Main Queue <span class="otp-badge" id="cinelite-main-queue-count">0</span></div><div id="cinelite-main-queue-list" class="otp-list"></div></section>
+                <section class="otp-col otp-priority-col"><div class="otp-title">Priority Queue <span class="otp-badge" id="cinelite-priority-queue-count">0</span></div><div id="cinelite-priority-queue-list" class="otp-list"></div></section>
+            </div>
+            <div class="otp-status">
+                <span id="cinelite-realtime-status" class="otp-status-text">关闭时仅播放主 CSV</span>
+                <div class="otp-status-actions">
+                    <label class="cwf-pill"><input id="cinelite-realtime-toggle" type="checkbox" style="width:auto;"> 实时模式</label>
+                    <button id="cinelite-clear-chat-btn" class="otp-icon-btn" type="button" title="清空对话" aria-label="清空对话"><svg class="cw-svg filled" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M9 4.5h6a1 1 0 0 1 1 1V6h4v1.5h-1.25l-.8 10.56A2 2 0 0 1 15.96 20H8.04a2 2 0 0 1-1.99-1.94L5.25 7.5H4V6h4v-.5a1 1 0 0 1 1-1Zm1 1.5h4v-.5h-4V6Zm-3.24 1.5.79 10.44a.5.5 0 0 0 .49.48h7.92a.5.5 0 0 0 .49-.48l.79-10.44H6.76ZM10.5 10h1.5v5h-1.5v-5Zm3 0H15v5h-1.5v-5Z"></path></svg></button>
+                    <button id="cinelite-record-btn" class="otp-icon-btn" type="button" title="开启语音对话" aria-label="开启语音对话"><svg class="otp-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V8a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z"></path><path d="M19 11a7 7 0 0 1-12.04 4.96"></path><path d="M5 11a7 7 0 0 0 11.2 5.6"></path><path d="M12 18v3"></path><path d="M9 21h6"></path><path d="M4 4l16 16"></path></svg></button>
+                </div>
+            </div>
+        </aside>
+
+        <div id="cinelite-settings-modal" class="cw-modal-backdrop hidden"><div class="cw-modal" style="width:min(680px,calc(100vw - 32px));"><div class="cw-modal-head"><strong>CL 模型与语音设置</strong><button data-close-modal="cinelite-settings-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><div class="cwf-step-note">模型文件加载与上传请在第 1 步 Load 中操作。</div><label class="cwf-step-note">TTS 模型</label><select id="cinelite-tts-model"></select><label class="cwf-step-note">讲解声音</label><select id="cinelite-tts-voice"></select><label class="cwf-step-note">实时回答模型提供方</label><select id="cinelite-chat-provider" style="max-width:180px;"><option value="gemini">Gemini</option><option value="qwen">Qwen</option></select><label class="cwf-step-note">实时回答模型</label><select id="cinelite-chat-model"></select><label class="cwf-step-note">实时语音模块</label><select id="cinelite-asr-provider"><option value="aliyun">Aliyun Realtime ASR</option><option value="gemini_live">Gemini Live</option></select><label class="cwf-step-note">实时语音模型</label><select id="cinelite-asr-model"><option value="gummy-chat-v1">gummy-chat-v1</option><option value="gemini-2.0-flash-live-preview-04-09">gemini-2.0-flash-live-preview-04-09</option></select><label class="cwf-pill"><input id="cinelite-voice-barge-valid-word" type="checkbox" style="width:auto;" checked> 识别到有效词后再打断</label><div class="cwf-mini">选择 Gemini Live 后，输入框与麦克风都将直接走独立 Live 模块。</div><div id="cinelite-model-upload-meta" class="cwf-step-note"></div></div><div class="cw-modal-foot"><div class="cwf-mini">API key 继续从数据库读取；主 CSV 无持久化音频时会自动走实时 TTS。</div><button id="cinelite-save-settings-btn" class="primary">保存设置</button></div></div></div>
+        <div id="cinelite-simple-modal" class="cw-modal-backdrop hidden"><div class="cw-modal"><div class="cw-modal-head"><strong>简单提示词</strong><button data-close-modal="cinelite-simple-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><textarea id="cinelite-simple-editor"></textarea></div><div class="cw-modal-foot"><div></div><button id="cinelite-save-simple-btn" class="primary">保存</button></div></div></div>
+        <div id="cinelite-narration-modal" class="cw-modal-backdrop hidden"><div class="cw-modal"><div class="cw-modal-head"><strong>讲解词</strong><button data-close-modal="cinelite-narration-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><textarea id="cinelite-narration" placeholder="粘贴讲解词"></textarea></div><div class="cw-modal-foot"><div class="cwf-mini">保存后会写入数据库，并作为生成 CSV 的权威讲解词。</div><button id="cinelite-save-narration-btn" class="primary">保存</button></div></div></div>
+        <div id="cinelite-complex-modal" class="cw-modal-backdrop hidden"><div class="cw-modal"><div class="cw-modal-head"><strong>复杂提示词</strong><button data-close-modal="cinelite-complex-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><textarea id="cinelite-complex-editor"></textarea></div><div class="cw-modal-foot"><div></div><button id="cinelite-save-complex-btn" class="primary">保存</button></div></div></div>
+        <div id="cinelite-csv-modal" class="cw-modal-backdrop hidden"><div class="cw-modal fullscreen"><div class="cw-modal-head"><strong>CSV Workspace</strong><button data-close-modal="cinelite-csv-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><div class="cw-inline-actions"><button id="cinelite-csv-version-generate">生成新版本</button><button id="cinelite-csv-version-save" class="primary">保存当前版本</button><button id="cinelite-csv-version-save-new">另存为新版本</button><button id="cinelite-csv-version-delete">删除版本</button></div><div class="cw-csv-layout"><div id="cinelite-csv-version-list" class="cw-version-list"></div><div id="cinelite-csv-grid-wrap" class="cw-grid-wrap"><table id="cinelite-csv-grid" class="cw-grid-table"></table></div></div></div><div class="cw-modal-foot"><div id="cinelite-csv-modal-status" class="cwf-mini"></div><div class="cw-inline-actions"><button id="cinelite-save-csv-btn" class="primary">保存 CSV</button><button id="cinelite-download-csv-modal-btn">下载</button></div></div></div></div>
+        <div id="cinelite-csv-raw-modal" class="cw-modal-backdrop hidden"><div class="cw-modal" style="width:min(760px,calc(100vw - 32px));"><div class="cw-modal-head"><strong>CSV Raw</strong><button data-close-modal="cinelite-csv-raw-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><pre id="cinelite-csv-raw-pre" style="margin:0;white-space:pre-wrap;border:1px solid rgba(255,255,255,0.08);padding:12px;border-radius:14px;background:rgba(4,6,9,0.56);"></pre></div></div></div>
+        <div id="cinelite-content-modal" class="cw-modal-backdrop hidden"><div class="cw-modal fullscreen"><div class="cw-modal-head"><strong>编辑 Content</strong><button data-close-modal="cinelite-content-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><textarea id="cinelite-content-editor" class="cw-content-editor"></textarea></div><div class="cw-modal-foot"><div id="cinelite-content-status" class="cwf-mini"></div><button id="cinelite-content-save-btn" class="primary">应用到当前行</button></div></div></div>
+        <div id="cinelite-capture-inspect-modal" class="cw-modal-backdrop hidden"><div class="cw-modal" style="width:min(560px,calc(100vw - 32px));"><div class="cw-modal-head"><strong>截图机位参数</strong><button data-close-modal="cinelite-capture-inspect-modal" class="ghost">关闭</button></div><div class="cw-modal-body"><pre id="cinelite-capture-inspect-pre" style="margin:0;white-space:pre-wrap;border:1px solid rgba(255,255,255,0.08);padding:12px;border-radius:14px;background:rgba(4,6,9,0.56);"></pre></div><div class="cw-modal-foot"><div></div><div class="cw-inline-actions"><button id="cinelite-capture-jump-ts-btn" class="primary">TS</button><button id="cinelite-capture-jump-rtc-btn">RTC</button></div></div></div></div>
+
+        <section id="cinelite-debug-root" class="cw-debug"><div class="cw-debug-head"><strong>Global Debug Console</strong><div class="cw-inline-actions"><button id="cinelite-panel-toggle-btn">隐藏主面板</button><button id="cinelite-realtime-panel-toggle-debug-btn">隐藏实时面板</button><button id="cinelite-debug-clear-btn">清空</button><button id="cinelite-debug-copy-btn">拷贝</button><button id="cinelite-debug-toggle-btn">折叠</button></div></div><div id="cinelite-debug-log" class="cw-debug-body"></div></section>
+        <script type="module" src="__BASE_HREF__/cinematic-lite.js"></script>
+    </body>
+</html>

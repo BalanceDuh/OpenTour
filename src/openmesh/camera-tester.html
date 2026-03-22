@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Camera Tester</title>
+        <link rel="icon" href="data:," />
+        <style>
+            :root {
+                color-scheme: dark;
+                --bg: #171a1f;
+                --panel: rgba(14, 17, 21, 0.9);
+                --card: rgba(255,255,255,0.04);
+                --line: rgba(255,255,255,0.12);
+                --text: #eef3f8;
+                --muted: #b4bec8;
+                --accent: #d3ac5d;
+                --accent-2: #8fd0d4;
+                --shadow: 0 18px 48px rgba(0,0,0,0.35);
+                font-family: "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+            }
+            * { box-sizing: border-box; }
+            html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); }
+            body { background: radial-gradient(circle at top right, rgba(211,172,93,0.16), transparent 26%), radial-gradient(circle at left, rgba(143,208,212,0.12), transparent 28%), linear-gradient(180deg, #252931 0%, #16191d 100%); }
+            #viewer-root { position: fixed; inset: 0; }
+            .panel { position: fixed; left: 16px; top: 16px; width: min(540px, calc(100vw - 32px)); max-height: calc(100vh - 140px); display: grid; grid-template-rows: auto auto 1fr; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 22px; background: var(--panel); backdrop-filter: blur(14px); box-shadow: var(--shadow); z-index: 20; transition: max-height .2s ease; }
+            .head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+            .head h1 { margin:0; font-size:22px; }
+            .toolbar, .row, .inline { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+            .status { padding: 11px 13px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255,255,255,0.06); font-size: 12px; color: var(--muted); }
+            .scroll { overflow:auto; padding-right:4px; display:grid; gap:12px; align-content:start; }
+            .card { border:1px solid var(--line); border-radius:18px; background:var(--card); overflow:hidden; }
+            .card-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 14px; border-bottom:1px solid rgba(255,255,255,0.06); }
+            .card-title { font-size:15px; font-weight:700; }
+            .card-body { padding:14px; display:grid; gap:12px; }
+            button, input, textarea { font:inherit; color:var(--text); }
+            button { appearance:none; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.08); border-radius:999px; padding:10px 14px; cursor:pointer; }
+            button.primary { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#081015; border:none; font-weight:700; }
+            button.icon { width:36px; height:36px; padding:0; border-radius:12px; }
+            input, textarea, pre { width:100%; border-radius:14px; border:1px solid rgba(255,255,255,0.12); background:rgba(4,6,9,0.56); padding:12px; }
+            textarea { min-height:68px; resize:vertical; }
+            pre { margin:0; font-size:12px; line-height:1.45; overflow:auto; white-space:pre-wrap; word-break:break-word; }
+            .snapshots { display:grid; gap:8px; max-height:260px; overflow:auto; }
+            .snapshot { border:1px solid rgba(255,255,255,0.1); border-radius:14px; background:rgba(255,255,255,0.04); padding:10px; display:grid; gap:8px; }
+            .snapshot.active { border-color: rgba(211,172,93,0.72); background: rgba(211,172,93,0.08); }
+            .snapshot-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+            .snapshot-name { font-weight:700; }
+            .snapshot-meta { color:var(--muted); font-size:11px; }
+            .snapshot-code { font-size:11px; color:var(--muted); }
+            .debug { position: fixed; left: 0; right: 0; bottom: 0; height: 160px; border-top:1px solid rgba(255,255,255,0.08); background:rgba(12,14,18,0.96); z-index: 25; display:grid; grid-template-rows:auto 1fr; transition: height .2s ease; }
+            .debug.collapsed { height: 46px; }
+            .debug.collapsed .debug-log { display:none; }
+            .debug-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 14px; font-size:12px; }
+            .debug-log { overflow:auto; padding:0 14px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.5; }
+            .debug-line { padding:2px 0; border-bottom:1px solid rgba(255,255,255,0.04); }
+            .tag { color:#8fd0d4; margin-right:6px; }
+            .pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,0.1); background:rgba(255,255,255,0.04); font-size:12px; color:var(--muted); }
+        </style>
+        <script src="/vendor/marmoset.js"></script>
+    </head>
+    <body>
+        <div id="viewer-root"></div>
+        <aside class="panel">
+            <div class="head">
+                <h1>Camera Tester</h1>
+                <div class="toolbar">
+                    <button id="camera-tester-load-builtin" class="primary">加载内置模型</button>
+                    <button id="camera-tester-upload-btn">上传模型</button>
+                    <input id="camera-tester-model-input" type="file" accept=".mview" hidden />
+                </div>
+            </div>
+            <div id="camera-tester-status" class="status">等待加载模型</div>
+            <div class="scroll">
+                <section class="card">
+                    <div class="card-head">
+                        <div class="card-title">当前视角</div>
+                        <div class="inline">
+                            <span id="camera-tester-model-label" class="pill">当前模型：-</span>
+                            <button id="camera-tester-read-current" class="primary">读取当前参数</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <input id="camera-tester-name" type="text" placeholder="快照名称，例如：右前45度" />
+                        <textarea id="camera-tester-note" placeholder="可选备注：这次视角实验的目的"></textarea>
+                        <div class="row">
+                            <button id="camera-tester-capture" class="primary">存储当前视角</button>
+                            <button id="camera-tester-refresh">刷新列表</button>
+                            <button id="camera-tester-reset">清空当前模型测试数据</button>
+                        </div>
+                        <pre id="camera-tester-current-pre">{}</pre>
+                    </div>
+                </section>
+
+                <section class="card">
+                    <div class="card-head">
+                        <div class="card-title">快照列表</div>
+                        <div class="inline">
+                            <button id="camera-tester-jump-rad" class="primary">弧度跳转快照</button>
+                            <button id="camera-tester-jump-deg">角度归一化跳转</button>
+                            <button id="camera-tester-delete">删除选中</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div id="camera-tester-snapshots" class="snapshots"></div>
+                        <pre id="camera-tester-selected-pre">{}</pre>
+                    </div>
+                </section>
+            </div>
+        </aside>
+
+        <section id="camera-tester-debug-root" class="debug">
+            <div class="debug-head">
+                <div>Camera Tester Debug Console</div>
+                <div class="inline">
+                    <button id="camera-tester-debug-toggle">隐藏</button>
+                    <button id="camera-tester-debug-copy">拷贝</button>
+                    <button id="camera-tester-debug-clear">清空</button>
+                </div>
+            </div>
+            <div id="camera-tester-debug-log" class="debug-log"></div>
+        </section>
+
+        <script type="module" src="/camera-tester.js"></script>
+    </body>
+</html>

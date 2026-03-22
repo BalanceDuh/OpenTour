@@ -19,6 +19,15 @@
         "watch": "rollup -c -w",
         "build:opentour": "cross-env BUILD_TYPE=release rollup -c rollup.config.opentour.mjs",
         "watch:opentour": "cross-env BUILD_TYPE=debug rollup -c rollup.config.opentour.mjs -w",
+        "build:openmesh": "cross-env BUILD_TYPE=release rollup -c rollup.config.openmesh.mjs",
+        "build:glb-assets": "node scripts/openmesh-export/build-bronze-glb.mjs",
+        "build:showcase2:scan": "node scripts/showcase2/scan-assets.mjs",
+        "build:showcase2:resolve": "node scripts/showcase2/resolve-paths.mjs",
+        "build:showcase2:classify": "node scripts/showcase2/classify-textures.mjs",
+        "build:showcase2-assets": "node scripts/showcase2/build-showcase2-assets.mjs",
+        "watch:openmesh": "cross-env BUILD_TYPE=debug rollup -c rollup.config.openmesh.mjs -w",
+        "serve:openmesh": "node scripts/openmesh-server.mjs",
+        "develop:openmesh": "concurrently --kill-others \"npm run watch:openmesh\" \"npm run serve:openmesh\"",
         "build:ot-model-loader": "cross-env BUILD_TYPE=release rollup -c rollup.config.ot-model-loader.mjs",
         "watch:ot-model-loader": "cross-env BUILD_TYPE=debug rollup -c rollup.config.ot-model-loader.mjs -w",
         "build:ot-tour-loader": "cross-env BUILD_TYPE=release rollup -c rollup.config.ot-tour-loader.mjs",
@@ -50,6 +59,8 @@
     },
     "devDependencies": {
         "@ffmpeg-installer/ffmpeg": "^1.1.0",
+        "@gltf-transform/core": "^4.3.0",
+        "@gltf-transform/functions": "^4.3.0",
         "@playcanvas/eslint-config": "2.1.0",
         "@playcanvas/pcui": "5.5.0",
         "@playcanvas/splat-transform": "1.7.2",
@@ -87,6 +98,9 @@
         "undici": "^7.22.0"
     },
     "dependencies": {
+        "@gltf-transform/extensions": "^4.3.0",
+        "@google/genai": "^1.46.0",
+        "sharp": "^0.34.5",
         "ws": "^8.19.0"
     }
 }

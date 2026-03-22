@@ -126,10 +126,46 @@ type ServerSessionPayload = {
 
 type SessionCurrentResponse = { ok: true; session: ServerSessionPayload | null };
 
+type SourceConfigPayload = {
+    sourceMode: SourceMode;
+    serverFolderPath: string | null;
+    confirmed: boolean;
+    updatedAt: string | null;
+};
+
+type SourceConfigResponse = { ok: true; config: SourceConfigPayload };
+
+type TpTtsConfigPayload = {
+    provider: string;
+    model: string;
+    voice: string;
+    apiKey: string;
+    format: string;
+    updatedAt: string | null;
+};
+
+type TpTtsConfigResponse = { ok: true; tts: TpTtsConfigPayload };
+
 const TP_API = 'http://localhost:3032/api/ot-tour-player';
 const LIVE_API = 'http://localhost:3035/api/ot-live-stream';
 const DEFAULT_SERVER_PATH = '/Users/duheng/Development/OpenCode/OpenTour/Live';
 const MODEL_EXTENSIONS = ['.ply', '.splat', '.ksplat', '.spz', '.sog', '.lcc'];
+const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
+const DEFAULT_TTS_VOICE = 'longyuan_v3';
+const TTS_MODEL_OPTIONS = [
+    { value: 'cosyvoice-v3-plus', label: 'High Quality (cosyvoice-v3-plus)' },
+    { value: 'cosyvoice-v3-flash', label: 'Low Latency (cosyvoice-v3-flash)' }
+];
+const TTS_VOICE_OPTIONS_BY_MODEL: Record<string, string[]> = {
+    'cosyvoice-v3-plus': [
+        'longyuan_v3', 'longyue_v3', 'longsanshu_v3', 'longshuo_v3', 'loongbella_v3', 'longxiaochun_v3',
+        'longxiaoxia_v3', 'longanwen_v3', 'longanli_v3', 'longanlang_v3', 'longyingling_v3', 'longanzhi_v3'
+    ],
+    'cosyvoice-v3-flash': [
+        'longyuan_v3', 'longyue_v3', 'longsanshu_v3', 'longshuo_v3', 'loongbella_v3', 'longxiaochun_v3',
+        'longxiaoxia_v3', 'longanwen_v3', 'longanli_v3', 'longanlang_v3', 'longyingling_v3', 'longanzhi_v3'
+    ]
+};
 
 const sleep = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
 
@@ -424,6 +460,7 @@ class LiveStreamApp {
     private readonly panelToggle = el<HTMLButtonElement>('[data-act="toggle-panel"]');
     private readonly chooseFolderBtn = el<HTMLButtonElement>('[data-act="choose-folder"]');
     private readonly configBtn = el<HTMLButtonElement>('[data-act="open-config"]');
+    private readonly ttsBtn = el<HTMLButtonElement>('[data-act="open-tts-config"]');
     private readonly playPauseBtn = el<HTMLButtonElement>('[data-act="toggle-playback"]');
     private readonly stopBtn = el<HTMLButtonElement>('[data-act="stop-live"]');
     private readonly chatInput = el<HTMLInputElement>('[data-role="chat-input"]');
@@ -432,6 +469,7 @@ class LiveStreamApp {
     private readonly clearDebugBtn = el<HTMLButtonElement>('[data-act="clear-debug"]');
     private readonly sourceModal = el<HTMLDivElement>('#live-source-modal');
     private readonly configModal = el<HTMLDivElement>('#live-config-modal');
+    private readonly ttsModal = el<HTMLDivElement>('#live-tts-modal');
     private readonly sourceModeInputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[name="live-source-mode"]'));
     private readonly sourceConfirmBtn = el<HTMLButtonElement>('[data-act="confirm-source"]');
     private readonly sourceCancelBtn = el<HTMLButtonElement>('[data-act="cancel-source-btn"]');
@@ -439,6 +477,13 @@ class LiveStreamApp {
     private readonly sourcePickLocalBtn = el<HTMLButtonElement>('[data-act="pick-local-folder"]');
     private readonly configCloseBtn = el<HTMLButtonElement>('[data-act="close-config"]');
     private readonly configBackdrop = el<HTMLDivElement>('[data-act="close-config-backdrop"]');
+    private readonly ttsCloseBtn = el<HTMLButtonElement>('[data-act="close-tts"]');
+    private readonly ttsSaveBtn = el<HTMLButtonElement>('[data-act="save-tts"]');
+    private readonly ttsBackdrop = el<HTMLDivElement>('[data-act="close-tts-backdrop"]');
+    private readonly ttsModelInput = el<HTMLSelectElement>('[data-role="tts-model"]');
+    private readonly ttsVoiceInput = el<HTMLSelectElement>('[data-role="tts-voice"]');
+    private readonly ttsApiKeyInput = el<HTMLInputElement>('[data-role="tts-api-key"]');
+    private readonly ttsInfoEl = el<HTMLDivElement>('[data-role="tts-info"]');
     private readonly introDurationInput = el<HTMLInputElement>('[data-role="intro-duration"]');
     private readonly modelSpeedInput = el<HTMLSelectElement>('[data-role="model-speed"]');
     private readonly subtitleSizeInput = el<HTMLInputElement>('[data-role="subtitle-size"]');
@@ -482,10 +527,21 @@ class LiveStreamApp {
         subtitleFontSize: 26,
         subtitleColor: '#d7a733'
     };
+    private ttsConfig: TpTtsConfigPayload = {
+        provider: 'aliyun',
+        model: DEFAULT_TTS_MODEL,
+        voice: DEFAULT_TTS_VOICE,
+        apiKey: '',
+        format: 'mp3',
+        updatedAt: null
+    };
 
     async init() {
         this.pathInput.value = DEFAULT_SERVER_PATH;
         this.queueFilter = 'CHAT';
+        this.ttsModelInput.innerHTML = TTS_MODEL_OPTIONS.map((option) => `<option value="${option.value}">${option.label}</option>`).join('');
+        this.renderTtsVoiceOptions(DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE);
+        this.applyTtsConfigInfo();
         this.introDurationInput.value = '0';
         this.modelSpeedInput.value = '1';
         this.subtitleSizeInput.value = String(this.settings.subtitleFontSize);
@@ -493,6 +549,7 @@ class LiveStreamApp {
         this.sceneHost.setDebugLogger((message, detail) => this.logDebug(message, detail));
         await this.sceneHost.init();
         this.bindEvents();
+        await this.loadSourceConfig();
         if (!this.active) this.setPhase('IDLE', 'Ready for live stream.');
         this.applySubtitleStyle();
         this.updateSourceSummary();
@@ -500,6 +557,40 @@ class LiveStreamApp {
         this.updateTimer();
         this.syncPanelInset();
         this.render();
+    }
+
+    private async loadSourceConfig() {
+        try {
+            const response = await fetch(`${LIVE_API}/source-config`);
+            if (!response.ok) return;
+            const payload = await response.json() as SourceConfigResponse;
+            const config = payload?.config;
+            if (!config) return;
+
+            this.sourceMode = config.sourceMode === 'local' ? 'local' : 'server';
+            const savedPath = asText(config.serverFolderPath);
+            if (savedPath) this.pathInput.value = savedPath;
+            this.sourceConfirmed = this.sourceMode === 'server' ? Boolean(config.confirmed) : false;
+            this.syncSourceModal();
+            if (this.sourceConfirmed) {
+                this.setStatus('Loaded saved source. Click Play to start live stream.');
+            }
+        } catch (error) {
+            this.logDebug('source.config.load.error', { error: error instanceof Error ? error.message : String(error) });
+        }
+    }
+
+    private async saveSourceConfig() {
+        const response = await fetch(`${LIVE_API}/source-config`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                sourceMode: this.sourceMode,
+                serverFolderPath: this.pathInput.value.trim(),
+                confirmed: this.sourceConfirmed
+            })
+        });
+        if (!response.ok) throw new Error(await response.text());
     }
 
     private bindEvents() {
@@ -521,6 +612,7 @@ class LiveStreamApp {
             this.syncPanelInset();
         });
         this.configBtn.addEventListener('click', () => this.openConfigModal());
+        this.ttsBtn.addEventListener('click', () => void this.openTtsModal());
         this.chooseFolderBtn.addEventListener('click', () => this.openSourceModal());
         this.playPauseBtn.addEventListener('click', () => void this.togglePlayback());
         this.clearDebugBtn.addEventListener('click', () => {
@@ -533,6 +625,23 @@ class LiveStreamApp {
         this.sourceConfirmBtn.addEventListener('click', () => void this.confirmSourceSelection());
         this.configBackdrop.addEventListener('click', () => this.closeConfigModal());
         this.configCloseBtn.addEventListener('click', () => this.closeConfigModal());
+        this.ttsBackdrop.addEventListener('click', () => this.closeTtsModal());
+        this.ttsCloseBtn.addEventListener('click', () => this.closeTtsModal());
+        this.ttsSaveBtn.addEventListener('click', () => void this.saveTpTtsConfig());
+        this.ttsModelInput.addEventListener('change', () => {
+            this.renderTtsVoiceOptions(this.ttsModelInput.value, undefined);
+            this.ttsConfig.model = this.ttsModelInput.value;
+            this.ttsConfig.voice = this.ttsVoiceInput.value;
+            this.applyTtsConfigInfo();
+        });
+        this.ttsVoiceInput.addEventListener('change', () => {
+            this.ttsConfig.voice = this.ttsVoiceInput.value;
+            this.applyTtsConfigInfo();
+        });
+        this.ttsApiKeyInput.addEventListener('input', () => {
+            this.ttsConfig.apiKey = this.ttsApiKeyInput.value;
+            this.applyTtsConfigInfo();
+        });
         this.sourceModeInputs.forEach((input) => input.addEventListener('change', () => {
             this.sourceMode = input.value === 'local' ? 'local' : 'server';
             this.sourceConfirmed = false;
@@ -693,7 +802,7 @@ class LiveStreamApp {
 
     private closeSourceModal() {
         this.sourceModal.hidden = true;
-        if (this.configModal.hidden) document.body.classList.remove('live-modal-open');
+        if (this.configModal.hidden && this.ttsModal.hidden) document.body.classList.remove('live-modal-open');
     }
 
     private openConfigModal() {
@@ -703,7 +812,109 @@ class LiveStreamApp {
 
     private closeConfigModal() {
         this.configModal.hidden = true;
-        if (this.sourceModal.hidden) document.body.classList.remove('live-modal-open');
+        if (this.sourceModal.hidden && this.ttsModal.hidden) document.body.classList.remove('live-modal-open');
+    }
+
+    private openTtsModal() {
+        this.ttsModal.hidden = false;
+        document.body.classList.add('live-modal-open');
+        void this.loadTpTtsConfig();
+    }
+
+    private closeTtsModal() {
+        this.ttsModal.hidden = true;
+        if (this.sourceModal.hidden && this.configModal.hidden) document.body.classList.remove('live-modal-open');
+    }
+
+    private maskSecret(value: string) {
+        const text = asText(value);
+        if (!text) return '(empty)';
+        if (text.length <= 6) return `${text.slice(0, 1)}***`;
+        return `${text.slice(0, 3)}***${text.slice(-3)}`;
+    }
+
+    private renderTtsVoiceOptions(model: string, preferredVoice?: string) {
+        const options = TTS_VOICE_OPTIONS_BY_MODEL[model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [DEFAULT_TTS_VOICE];
+        this.ttsVoiceInput.innerHTML = options.map((value) => `<option value="${value}">${value}</option>`).join('');
+        const nextVoice = options.includes(String(preferredVoice || '').trim())
+            ? String(preferredVoice || '').trim()
+            : (options.includes(DEFAULT_TTS_VOICE) ? DEFAULT_TTS_VOICE : options[0]);
+        this.ttsVoiceInput.value = nextVoice;
+    }
+
+    private applyTtsConfigInfo() {
+        this.ttsInfoEl.innerHTML = [
+            `<div><strong>Provider:</strong> Alibaba DashScope</div>`,
+            `<div><strong>Model:</strong> ${this.ttsConfig.model}</div>`,
+            `<div><strong>Voice:</strong> ${this.ttsConfig.voice}</div>`,
+            `<div><strong>API Key:</strong> ${this.maskSecret(this.ttsConfig.apiKey)}</div>`,
+            `<div><strong>Updated:</strong> ${this.ttsConfig.updatedAt || '-'}</div>`
+        ].join('');
+    }
+
+    private syncTtsConfigForm() {
+        const model = TTS_VOICE_OPTIONS_BY_MODEL[this.ttsConfig.model] ? this.ttsConfig.model : DEFAULT_TTS_MODEL;
+        this.ttsModelInput.value = model;
+        this.renderTtsVoiceOptions(model, this.ttsConfig.voice);
+        this.ttsApiKeyInput.value = this.ttsConfig.apiKey;
+        this.ttsApiKeyInput.type = 'password';
+        this.ttsConfig.model = this.ttsModelInput.value;
+        this.ttsConfig.voice = this.ttsVoiceInput.value;
+        this.applyTtsConfigInfo();
+    }
+
+    private async loadTpTtsConfig() {
+        try {
+            const response = await fetch(`${TP_API}/tts-config`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = await response.json() as TpTtsConfigResponse;
+            this.ttsConfig = {
+                provider: String(payload?.tts?.provider || 'aliyun').trim() || 'aliyun',
+                model: String(payload?.tts?.model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
+                voice: String(payload?.tts?.voice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE,
+                apiKey: String(payload?.tts?.apiKey || '').trim(),
+                format: String(payload?.tts?.format || 'mp3').trim() || 'mp3',
+                updatedAt: payload?.tts?.updatedAt ? String(payload.tts.updatedAt) : null
+            };
+            this.syncTtsConfigForm();
+            this.setStatus(`TP TTS loaded: ${this.ttsConfig.model}/${this.ttsConfig.voice}`);
+        } catch (error) {
+            this.logDebug('tp.tts.config.load.error', { error: error instanceof Error ? error.message : String(error) });
+            this.setStatus('Load TP TTS config failed. Ensure OT Tour Player backend is running on 3032.');
+        }
+    }
+
+    private async saveTpTtsConfig() {
+        try {
+            const response = await fetch(`${TP_API}/tts-config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    tts: {
+                        model: this.ttsModelInput.value.trim() || DEFAULT_TTS_MODEL,
+                        voice: this.ttsVoiceInput.value.trim() || DEFAULT_TTS_VOICE,
+                        apiKey: this.ttsApiKeyInput.value.trim(),
+                        format: 'mp3'
+                    }
+                })
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = await response.json() as TpTtsConfigResponse;
+            this.ttsConfig = {
+                provider: String(payload?.tts?.provider || 'aliyun').trim() || 'aliyun',
+                model: String(payload?.tts?.model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
+                voice: String(payload?.tts?.voice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE,
+                apiKey: String(payload?.tts?.apiKey || '').trim(),
+                format: String(payload?.tts?.format || 'mp3').trim() || 'mp3',
+                updatedAt: payload?.tts?.updatedAt ? String(payload.tts.updatedAt) : null
+            };
+            this.syncTtsConfigForm();
+            this.setStatus(`TP TTS saved: ${this.ttsConfig.model}/${this.ttsConfig.voice}`);
+            this.closeTtsModal();
+        } catch (error) {
+            this.logDebug('tp.tts.config.save.error', { error: error instanceof Error ? error.message : String(error) });
+            this.setStatus('Save TP TTS config failed.');
+        }
     }
 
     private syncSourceModal() {
@@ -721,9 +932,18 @@ class LiveStreamApp {
             return;
         }
         this.sourceConfirmed = true;
+        let persisted = true;
+        try {
+            await this.saveSourceConfig();
+        } catch (error) {
+            persisted = false;
+            this.logDebug('source.config.save.error', { error: error instanceof Error ? error.message : String(error) });
+        }
         this.updateSourceSummary();
         this.closeSourceModal();
-        this.setStatus('Source confirmed. Click Play to start live stream.');
+        this.setStatus(persisted
+            ? 'Source confirmed. Click Play to start live stream.'
+            : 'Source confirmed, but failed to save to DB.');
     }
 
     private async fetchServerManifest() {
@@ -1562,6 +1782,7 @@ const bootstrap = () => {
                         <div class="live-source-summary compact" data-role="source-summary">Server | /Users/duheng/Development/OpenCode/OpenTour/Live</div>
                         <button type="button" class="live-icon-btn folder" data-act="choose-folder" aria-label="Choose source" title="Choose source"><span class="icon-folder"></span></button>
                         <button type="button" class="live-icon-btn config" data-act="open-config" aria-label="Playback settings" title="Playback settings"><svg class="live-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9.3a2.7 2.7 0 1 0 0 5.4 2.7 2.7 0 0 0 0-5.4z" /><path d="M19.4 15a1 1 0 0 0 .2 1.1l.1.1a1.2 1.2 0 0 1 0 1.7l-1.2 1.2a1.2 1.2 0 0 1-1.7 0l-.1-.1a1 1 0 0 0-1.1-.2 1 1 0 0 0-.6.9V21a1.2 1.2 0 0 1-1.2 1.2h-1.7A1.2 1.2 0 0 1 10 21v-.2a1 1 0 0 0-.6-.9 1 1 0 0 0-1.1.2l-.1.1a1.2 1.2 0 0 1-1.7 0l-1.2-1.2a1.2 1.2 0 0 1 0-1.7l.1-.1a1 1 0 0 0 .2-1.1 1 1 0 0 0-.9-.6H3a1.2 1.2 0 0 1-1.2-1.2v-1.7A1.2 1.2 0 0 1 3 10h.2a1 1 0 0 0 .9-.6 1 1 0 0 0-.2-1.1l-.1-.1a1.2 1.2 0 0 1 0-1.7l1.2-1.2a1.2 1.2 0 0 1 1.7 0l.1.1a1 1 0 0 0 1.1.2 1 1 0 0 0 .6-.9V3A1.2 1.2 0 0 1 10 1.8h1.7A1.2 1.2 0 0 1 13 3v.2a1 1 0 0 0 .6.9 1 1 0 0 0 1.1-.2l.1-.1a1.2 1.2 0 0 1 1.7 0l1.2 1.2a1.2 1.2 0 0 1 0 1.7l-.1.1a1 1 0 0 0-.2 1.1 1 1 0 0 0 .9.6h.2a1.2 1.2 0 0 1 1.2 1.2v1.7a1.2 1.2 0 0 1-1.2 1.2h-.2a1 1 0 0 0-.9.6z" /></svg></button>
+                        <button type="button" class="live-icon-btn tts" data-act="open-tts-config" aria-label="TP TTS settings" title="TP TTS settings"><svg class="live-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13a4 4 0 0 0 4-4V6h3v3a7 7 0 0 1-7 7z" /><path d="M16 6h4v4" /><path d="M8 18h8" /></svg></button>
                         <button type="button" class="live-icon-btn stack" data-act="toggle-panel" aria-label="Hide Panel" title="Hide Panel"><span class="icon-panel"></span></button>
                         <button type="button" class="live-icon-btn broom" data-act="clear-debug" aria-label="Clear Debug" title="Clear Debug"><span class="icon-clear"></span></button>
                         <button type="button" class="live-icon-btn eyeoff" data-act="toggle-debug" aria-label="Hide Debug" title="Hide Debug"><span class="icon-chevron"></span></button>
@@ -1597,6 +1818,20 @@ const bootstrap = () => {
                     <label class="live-config-modal-row"><span>Subtitle Size</span><input class="live-mini-input range" type="range" min="18" max="64" step="1" data-role="subtitle-size" /></label>
                     <label class="live-config-modal-row"><span>Subtitle Color</span><input class="live-color-input" type="color" data-role="subtitle-color" value="#d7a733" /></label>
                     <div class="live-modal-actions"><button type="button" class="live-btn" data-act="close-config">Done</button></div>
+                </div>
+            </div>
+            <div id="live-tts-modal" hidden>
+                <div class="live-modal-backdrop" data-act="close-tts-backdrop"></div>
+                <div class="live-modal-card">
+                    <div class="live-section-title">TP Global TTS Config</div>
+                    <label class="live-config-modal-row"><span>Model</span><select class="live-mini-input" data-role="tts-model"></select></label>
+                    <label class="live-config-modal-row"><span>Voice</span><select class="live-mini-input" data-role="tts-voice"></select></label>
+                    <label class="live-config-modal-row"><span>API Key</span><input class="live-mini-input" type="password" data-role="tts-api-key" placeholder="sk-..." /></label>
+                    <div class="live-modal-hint live-tts-info" data-role="tts-info">Loading...</div>
+                    <div class="live-modal-actions">
+                        <button type="button" class="live-btn ghost" data-act="close-tts">Close</button>
+                        <button type="button" class="live-btn" data-act="save-tts">Save</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1642,6 +1877,7 @@ const injectStyle = () => {
         .live-icon-btn { width: 28px; height: 28px; border-radius: 7px; border: 1px solid rgba(137,156,181,0.2); background: linear-gradient(180deg, rgba(22,30,43,0.96), rgba(17,24,36,0.96)); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.025); cursor: pointer; position: relative; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; color: #d6e1f0; }
         .live-icon-btn.transport { color: #59d784; border-color: rgba(89,215,132,0.32); }
         .live-icon-btn.stop { color: #ff6a5c; border-color: rgba(255,106,92,0.34); }
+        .live-icon-btn.tts { color: #5cc8ff; border-color: rgba(92,200,255,0.34); }
         .live-icon-btn span { display: block; position: relative; width: 14px; height: 14px; }
         .live-icon-btn.folder span::before { content: ''; display: block; width: 12px; height: 8px; border: 1.35px solid currentColor; border-top-left-radius: 2.5px; border-top-right-radius: 2.5px; border-bottom-left-radius: 2px; border-bottom-right-radius: 2px; position: absolute; left: 1px; top: 4px; }
         .live-icon-btn.folder span::after { content: ''; position: absolute; left: 1px; top: 1px; width: 6px; height: 3px; border: 1.35px solid currentColor; border-bottom: none; border-top-left-radius: 2px; border-top-right-radius: 2px; }
@@ -1716,7 +1952,7 @@ const injectStyle = () => {
         [data-role="debug-body"] { overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.5; color: #b9c7da; min-height: 0; flex: 1 1 auto; }
         .live-debug-row { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); white-space: pre-wrap; word-break: break-word; }
         .live-empty { color: var(--live-muted); font-size: 12px; padding: 6px 2px; }
-        #live-source-modal, #live-config-modal { position: fixed; inset: 0; z-index: 30; }
+        #live-source-modal, #live-config-modal, #live-tts-modal { position: fixed; inset: 0; z-index: 30; }
         .live-modal-backdrop { position: absolute; inset: 0; background: rgba(2, 4, 10, 0.72); }
         .live-modal-card { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(520px, calc(100vw - 40px)); border-radius: 22px; border: 1px solid var(--live-line); background: rgba(11, 15, 23, 0.96); padding: 18px; box-shadow: 0 30px 80px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 12px; }
         .live-source-option { display: flex; gap: 10px; align-items: center; }
@@ -1725,6 +1961,7 @@ const injectStyle = () => {
         #live-source-modal[data-mode="local"] .local-pane { display: block; }
         .live-modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
         .live-modal-hint { min-height: 20px; color: var(--live-muted); font-size: 13px; }
+        .live-tts-info { border: 1px solid rgba(137,156,181,0.18); border-radius: 10px; padding: 10px; background: rgba(255,255,255,0.03); line-height: 1.5; }
         .live-config-modal-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--live-muted); }
         .live-config-modal-row .range { flex: 1 1 auto; }
         @media (max-width: 1280px) {
