@@ -153,6 +153,7 @@ const serializeTask = async (task) => {
         execution_mode: task.behavior,
         target_fov: task.targetFov ?? null,
         move_speed_mps: task.moveSpeedMps,
+        segment_duration_ms: task.segmentDurationMs ?? 0,
         dwell_ms: task.dwellMs,
         tts_lang: task.ttsLang,
         tts_voice: task.ttsVoice || null,
@@ -786,6 +787,7 @@ const parseCsvTasks = (csvText) => {
         const pitch = toNullableNum(get(parts, 'target_pitch'));
         const targetFov = toNullableNum(get(parts, 'target_fov'));
         const speed = toNum(get(parts, 'move_speed_mps'), 0.8);
+        const segmentDurationMs = Math.max(0, Math.floor(toNum(get(parts, 'segment_duration_ms'), 0)));
         const dwell = Math.max(0, Math.floor(toNum(get(parts, 'dwell_ms'), 900)));
         const text = get(parts, 'content') || '';
         const audioUrl = get(parts, 'audio_url') || null;
@@ -808,6 +810,7 @@ const parseCsvTasks = (csvText) => {
                 targetFov,
                 content: { text, audioUrl },
                 moveSpeedMps: speed,
+                segmentDurationMs,
                 dwellMs: dwell,
                 targetFov,
                 ttsLang: tts,
@@ -1364,7 +1367,7 @@ const server = createServer(async (req, res) => {
     }
 });
 
-const port = Number(process.env.OT_TOUR_PLAYER_PORT || 3032);
+const port = Number(process.env.OT_TOUR_PLAYER_PORT || 3033);
 server.listen(port, () => {
     console.log(`[ot-tour-player] listening on http://localhost:${port}`);
 });

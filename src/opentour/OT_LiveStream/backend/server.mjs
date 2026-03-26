@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import Database from 'better-sqlite3';
 
-const port = Number(process.env.OT_LIVE_STREAM_PORT || 3035);
+const port = Number(process.env.OT_LIVE_STREAM_PORT || 3036);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, '../../../../');

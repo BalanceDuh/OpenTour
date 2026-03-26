@@ -2,3117 +2,136 @@ import {
     OT_TOUR_CSV_HEADERS,
     OT_TOUR_CSV_VERSION
 } from '../OT_Shared/fieldStandard';
-import type {
-    EmbeddedMediaSpec,
-    HotspotWorldPoint,
-    ProjectedScreenPoint
+import {
+    createHotspotController,
+    normalizeHotspot,
+    type EmbeddedMediaSpec,
+    type HotspotController,
+    type HotspotRecord,
+    type HotspotWorldPoint,
+    type ProjectedScreenPoint
 } from '../OT_Shared/hotspot';
+import {
+    CINE_ICON_CHEVRON,
+    CINE_ICON_COMPILE,
+    CINE_ICON_EYE,
+    CINE_ICON_FILE_PLUS,
+    CINE_ICON_FOLDER,
+    CINE_ICON_FOCUS,
+    CINE_ICON_GEAR,
+    CINE_ICON_LIST,
+    CINE_ICON_LOCK,
+    CINE_ICON_MAGIC,
+    CINE_ICON_MAP,
+    CINE_ICON_MINI,
+    CINE_ICON_MINUS,
+    CINE_ICON_MUSIC,
+    CINE_ICON_PAUSE,
+    CINE_ICON_PLAY,
+    CINE_ICON_PLUS,
+    CINE_ICON_PROMPT,
+    CINE_ICON_REFRESH,
+    CINE_ICON_SAVE,
+    CINE_ICON_SAVE_AS,
+    CINE_ICON_SLIDERS,
+    CINE_ICON_STOP,
+    CINE_ICON_TARGET,
+    CINE_ICON_TTS,
+    CINE_ICON_VOLUME,
+    CINE_ICON_WAND,
+    CSV_ICON_CLOSE,
+    CSV_ICON_DELETE,
+    CSV_ICON_DOWNLOAD,
+    CSV_ICON_FULLSCREEN,
+    CSV_ICON_GENERATE,
+    CSV_ICON_SAVE,
+    CSV_ICON_SAVE_AS,
+    CSV_ICON_TIMING,
+    CSV_ICON_VOICE,
+    DEFAULT_CINEMATIC_PLANNER_PROMPT,
+    DEFAULT_CINEMATIC_SIMPLE_PROMPT,
+    DEFAULT_CSV_PROMPT_TEMPLATE,
+    DEFAULT_CSV_TARGET_DURATION_SEC,
+    DEFAULT_LLM_MODEL,
+    DEFAULT_MOVE_PROMPT_TEMPLATE,
+    DEFAULT_POI_FOV,
+    DEFAULT_PROMPT_TEMPLATE,
+    DEFAULT_QWEN_MODEL,
+    DEFAULT_TTS_MODEL,
+    DEFAULT_TTS_VOICE,
+    GEMINI_MODELS,
+    MAX_POI_FOV,
+    MIN_POI_FOV,
+    PANEL_ID,
+    QWEN_MODELS,
+    STYLE_ID,
+    TTS_VOICE_OPTIONS_BY_MODEL
+} from './constants';
+import { ensureStyle } from './style';
+import {
+    buildCsvTextFromGrid,
+    downloadCsvText,
+    parseCsvText,
+    renderCsvGrid,
+    renderCsvTimingConfig,
+    renderCsvVersionList,
+    renderCsvVoiceConfig,
+} from './csv/workspace';
+import {
+    cinematicBgmEffectiveRate,
+    clamp,
+    clampFov,
+    clampMusicRate,
+    countSpeechChars,
+    degToRad,
+    formatCsvTimingSummary,
+    escapeCsv,
+    escapeHtmlAttr,
+    formatSecondsLabel,
+    isAudioFileName,
+    normalizeCsvTimingConfig,
+    normalizeCsvVoiceConfig,
+    normalizeCwMediaObjectConfig,
+    normalizeMusicDuration,
+    plannerPromptRequestsMediaObject,
+    plannerPromptRequestsOrbitLikeCamera,
+    radToDeg,
+} from './utils';
+import {
+    type CameraPose,
+    type CinematicBgmConfig,
+    type CinematicBgmLibraryItem,
+    type CinematicCameraBehavior,
+    type CinematicKeyframe,
+    type CinematicMediaObjectConfig,
+    type CinematicPlan,
+    type CinematicRecordingAudioMixRuntime,
+    type CinematicRecordingRuntime,
+    type CinematicRecordingSettings,
+    type CinematicShot,
+    type CinematicStoredRecordingEntry,
+    type CinematicVersionDetail,
+    type CinematicVersionSummary,
+    type CinematicWorkspaceController,
+    type CinematicWorkspaceOptions,
+    type CsvTimingConfigState,
+    type CsvTimingSummary,
+    type CsvVersionDetail,
+    type CsvVersionSummary,
+    type CsvVoiceConfigState,
+    type JobState,
+    type LlmConfigState,
+    type LlmProvider,
+    type MapBounds,
+    type Mp4CompressionPreset,
+    type PromptEditorContext,
+    type ProviderConfig,
+    type TourPoi,
+    type TtsVoiceOption,
+    type WorldPoint
+} from './types';
 
-type CameraPose = {
-    eye: { x: number; y: number; z: number };
-    forward: { x: number; y: number; z: number };
-};
-
-type WorldPoint = { x: number; y: number; z: number; opacity?: number };
-
-type TourPoi = {
-    poiId: string;
-    poiName: string;
-    sortOrder: number;
-    targetX: number;
-    targetY: number;
-    targetZ: number;
-    targetYaw: number;
-    targetPitch: number;
-    targetFov: number;
-    moveSpeedMps: number;
-    dwellMs: number;
-    content: string;
-    ttsLang: string;
-    promptTemplate?: string;
-    screenshotDataUrl?: string;
-    screenshotUpdatedAt?: string;
-    contentUpdatedAt?: string;
-    promptUpdatedAt?: string;
-};
-
-type LlmProvider = 'gemini' | 'qwen';
-
-type ProviderConfig = {
-    modelName: string;
-    apiKey: string;
-};
-
-type LlmConfigState = {
-    selectedProvider: LlmProvider;
-    gemini: ProviderConfig;
-    qwen: ProviderConfig;
-    updatedAt: string | null;
-    promptUpdatedAt: string | null;
-};
-
-type PromptEditorContext =
-    | { scope: 'global' }
-    | { scope: 'poi'; poiId: string };
-
-type TourLoaderOptions = {
-    launcherButton?: HTMLButtonElement;
-    getModelFilename: () => string | null;
-    getWorldSamplePoints?: () => WorldPoint[];
-    getLiveCameraPose?: () => { pose: CameraPose; fovDeg: number } | null;
-    setLiveCameraPose?: (pose: CameraPose, fovDeg: number) => Promise<void> | void;
-    getCaptureCanvas?: () => HTMLCanvasElement | null;
-    requestCaptureRender?: () => void;
-    captureScreenshotPng?: () => Promise<string>;
-    pickWorldPointAtScreen?: (x: number, y: number) => Promise<HotspotWorldPoint | null>;
-    projectWorldToScreen?: (point: HotspotWorldPoint) => ProjectedScreenPoint | null;
-    showEmbeddedMedia?: (spec: EmbeddedMediaSpec | null) => void;
-    resolveAssetUrl?: (value: string) => string;
-    apiBaseUrl?: string;
-    onModelLoaded?: (callback: (modelFilename: string | null) => void) => (() => void);
-};
-
-type TourLoaderController = {
-    open: () => void;
-    close: () => void;
-    toggle: () => void;
-};
-
-type JobState = {
-    jobId: string | null;
-    paused: boolean;
-    streaming: boolean;
-};
-
-type MapBounds = {
-    xMin: number;
-    xMax: number;
-    yMin: number;
-    yMax: number;
-};
-
-type CsvVersionSummary = {
-    id: number;
-    modelFilename: string;
-    versionNo: number;
-    status: string;
-    source: string;
-    llmModel: string | null;
-    createdAt: string;
-    updatedAt: string;
-    confirmedAt: string | null;
-    csvChars: number;
-};
-
-type CsvVersionDetail = CsvVersionSummary & {
-    csvText: string;
-    csvPromptTemplate: string | null;
-    movePromptTemplate: string | null;
-};
-
-type TtsVoiceOption = {
-    value: string;
-    label: string;
-    subtitle: string;
-    group: string;
-};
-
-type CsvVoiceConfigState = {
-    enabled: boolean;
-    mode: 'fixed' | 'shuffle_round_robin';
-    model: string;
-    fixedVoice: string;
-    voicePool: string[];
-};
-
-type CsvTimingConfigState = {
-    enabled: boolean;
-    targetDurationSec: number;
-};
-
-type CsvTimingSummary = {
-    enabled: boolean;
-    targetDurationSec: number;
-    minimumAchievableSec: number | null;
-    estimatedDurationSec: number | null;
-};
-
-type CinematicKeyframe = {
-    keyframeId: string;
-    shotId: string;
-    t: number;
-    x: number;
-    y: number;
-    z: number;
-    yaw: number;
-    pitch: number;
-    fov: number;
-    moveSpeedMps: number;
-    mediaObject?: CinematicMediaObjectConfig | null;
-    cameraBehavior?: CinematicCameraBehavior | null;
-};
-
-type CinematicCameraBehavior = {
-    type: 'orbit' | 'approach' | 'reveal' | 'follow';
-    target: 'mediaObject';
-    radius?: number;
-    angleDeg?: number;
-    heightOffset?: number;
-};
-
-type CinematicMediaObjectConfig = {
-    enabled: boolean;
-    src: string;
-    fileName: string;
-    anchorWorld: HotspotWorldPoint | null;
-    scale: number;
-    yaw: number;
-    pitch: number;
-    roll: number;
-    depthOffset: number;
-    placeholder?: boolean;
-    placeholderLabel?: string;
-};
-
-type CinematicShot = {
-    shotId: string;
-    label: string;
-    intent: string;
-    durationSec: number;
-    speechText: string;
-    speechMode: 'INTERRUPTIBLE' | 'BLOCKING';
-    speechMatchEnabled?: boolean;
-    speechAudioUrl?: string | null;
-    speechMetrics?: {
-        durationSec: number;
-        charsPerSecond: number;
-        measuredChars: number;
-        updatedAt: string;
-        ttsModel?: string;
-        ttsVoice?: string;
-    } | null;
-    keyframes: CinematicKeyframe[];
-};
-
-type CinematicBgmConfig = {
-    audioPath: string;
-    audioStartSeconds: number;
-    audioEndSeconds: number;
-    audioPlaybackRate: number;
-    targetMusicDurationSeconds: number | null;
-    audioDisplayName?: string;
-};
-
-type CinematicPlan = {
-    version: string;
-    modelFilename: string;
-    selectedPoiIds: string[];
-    sceneDescription: string;
-    storyBackground: string;
-    styleText: string;
-    targetDurationSec: number;
-    bgm: CinematicBgmConfig | null;
-    bounds: {
-        top: { xMin: number; xMax: number; zMin: number; zMax: number };
-        front: { xMin: number; xMax: number; yMin: number; yMax: number };
-    };
-    shots: CinematicShot[];
-};
-
-type CinematicBgmLibraryItem = {
-    id: string;
-    name: string;
-    audioPath: string;
-    audioUrl: string;
-    source: 'folder' | 'path';
-};
-
-type CinematicVersionSummary = {
-    id: number;
-    modelFilename: string;
-    versionNo: number;
-    status: string;
-    source: string;
-    createdAt: string;
-    updatedAt: string;
-    confirmedAt: string | null;
-    planChars: number;
-};
-
-type CinematicVersionDetail = CinematicVersionSummary & {
-    simplePrompt: string;
-    plannerPrompt: string;
-    sceneDescription: string;
-    storyBackground: string;
-    styleText: string;
-    targetDurationSec: number | null;
-    selectedPoiIds: string[];
-    plan: CinematicPlan | null;
-    csvText: string;
-};
-
-type Mp4CompressionPreset = 'original' | 'fast_export' | 'balanced' | 'archive_smallest' | 'target_10mb';
-
-type CinematicRecordingSettings = {
-    frameRate: number;
-    videoBitsPerSecond: number;
-    audioBitsPerSecond: number;
-    mp4CompressionPreset: Mp4CompressionPreset;
-    includeTts: boolean;
-    autoPlay: boolean;
-    stopWithPlayback: boolean;
-    hidePanelDuringRecording: boolean;
-    disableInterrupts: boolean;
-    masterVolume: number;
-    ttsVolume: number;
-    bgmVolume: number;
-    subtitlesEnabled: boolean;
-    subtitleFont: string;
-    subtitleFontSize: number;
-    subtitleColor: string;
-};
-
-type CinematicRecordingRuntime = {
-    settings: CinematicRecordingSettings;
-    recorder: MediaRecorder;
-    stream: MediaStream;
-    displayStream: MediaStream | null;
-    chunks: BlobPart[];
-    startedAt: number;
-    mimeType: string;
-    extension: string;
-    bytesWritten: number;
-    lastProgressLogAt: number;
-    paused: boolean;
-};
-
-type CinematicRecordingAudioMixRuntime = {
-    context: AudioContext;
-    destination: MediaStreamAudioDestinationNode;
-    masterGain: GainNode;
-    bgmGain: GainNode;
-    duckGain: GainNode;
-    speechGain: GainNode;
-    compressor: DynamicsCompressorNode;
-    sources: WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>;
-};
-
-type CinematicStoredRecordingEntry = {
-    id: string;
-    name: string;
-    status: 'processing' | 'ready' | 'mp4_failed';
-    transcodeJobId?: string;
-    transcodePercent?: number;
-    transcodeEtaSec?: number | null;
-    transcodeHeartbeatAt?: number | null;
-    transcodePhase?: string;
-    mimeType: string;
-    extension: string;
-    size: number;
-    durationSec: number;
-    width: number;
-    height: number;
-    createdAt: number;
-    thumbnailDataUrl: string;
-    note?: string;
-    blob: Blob;
-};
-
-const iconSvg = (paths: string, viewBox = '0 0 24 24') => `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        ${paths}
-    </svg>
-`;
-
-const CSV_ICON_TIMING = iconSvg('<path d="M12 2v4"/><path d="M10 2h4"/><path d="M15.5 5.5l1.5-1.5"/><circle cx="12" cy="14" r="8"/><path d="M12 10v4l2 2"/>');
-const CSV_ICON_VOICE = iconSvg('<path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>');
-const CSV_ICON_GENERATE = iconSvg('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>');
-const CSV_ICON_SAVE = iconSvg('<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>');
-const CSV_ICON_SAVE_AS = iconSvg('<path d="M15 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v5"/><polyline points="13 21 13 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/><line x1="20" y1="16" x2="20" y2="22"/><line x1="17" y1="19" x2="23" y2="19"/>');
-const CSV_ICON_DELETE = iconSvg('<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>');
-const CSV_ICON_DOWNLOAD = iconSvg('<path d="M21 15v4a2 2 0 0 1-2-2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
-const CSV_ICON_FULLSCREEN = iconSvg('<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>');
-const CSV_ICON_CLOSE = iconSvg('<line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/>');
-const CINE_ICON_PLAY = iconSvg('<path d="M7 5.5l12 6.5-12 6.5v-13z"/>');
-const CINE_ICON_SAVE = CSV_ICON_SAVE;
-const CINE_ICON_SAVE_AS = iconSvg('<path d="M15 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v3"/><polyline points="7 3 7 8 15 8"/><path d="M7 21v-8h6"/><circle cx="18" cy="18" r="5" opacity="0.18"/><path d="M18 15v6"/><path d="M15 18h6"/>');
-const CINE_ICON_COMPILE = iconSvg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M12 11v8"/><path d="M20 2v6"/><path d="M17 5h6"/>');
-const CINE_ICON_PROMPT = iconSvg('<path d="M7 7.5h10"/><path d="M7 11.5h10"/><path d="M7 15.5h6"/><path d="M5.5 4.5h13a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1v-13a1 1 0 0 1 1-1Z"/>');
-const CINE_ICON_MAGIC = iconSvg('<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275Z"/><path d="M5 3v4"/><path d="M7 5H3"/><path d="M19 17v4"/><path d="M21 19h-4"/>');
-const CINE_ICON_GEAR = iconSvg('<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>');
-const CINE_ICON_LIST = iconSvg('<path d="M8 7h10"/><path d="M8 12h10"/><path d="M8 17h10"/><path d="M5.5 7h.01"/><path d="M5.5 12h.01"/><path d="M5.5 17h.01"/>');
-const CINE_ICON_SLIDERS = iconSvg('<path d="M5 7h14"/><path d="M9 7a2 2 0 1 1 0 .01"/><path d="M5 12h14"/><path d="M15 12a2 2 0 1 1 0 .01"/><path d="M5 17h14"/><path d="M11 17a2 2 0 1 1 0 .01"/>');
-const CINE_ICON_MAP = iconSvg('<path d="M12 5 19 12 12 19 5 12Z"/>');
-const CINE_ICON_TTS = iconSvg('<path d="M4 6h10"/><path d="M4 10h10"/><path d="M4 14h5"/><path d="M16 14a4 4 0 0 1 0 8"/><path d="M19 12a7 7 0 0 1 0 12"/>');
-const CINE_ICON_REFRESH = iconSvg('<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/>');
-const CINE_ICON_CHEVRON = iconSvg('<path d="m8 10 4 4 4-4"/>');
-const CINE_ICON_LOCK = iconSvg('<path d="M8 10V8a4 4 0 1 1 8 0v2"/><rect x="6" y="10" width="12" height="9" rx="2"/>');
-const CINE_ICON_EYE = iconSvg('<path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/>');
-const CINE_ICON_VOLUME = iconSvg('<path d="M5 14h3l4 4V6L8 10H5Z"/><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M17.8 6.8a7 7 0 0 1 0 10.4"/>');
-const CINE_ICON_MUSIC = iconSvg('<path d="M9 18V6l11-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="17" cy="16" r="3"/>');
-const CINE_ICON_TARGET = iconSvg('<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>');
-const CINE_ICON_WAND = iconSvg('<path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72Z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/>');
-const CINE_ICON_FOCUS = iconSvg('<circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/>');
-const CINE_ICON_MINUS = iconSvg('<line x1="5" x2="19" y1="12" y2="12"/>');
-const CINE_ICON_PLUS = iconSvg('<line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/>');
-const CINE_ICON_MINI = iconSvg('<path d="M4.5 8.5h15"/><path d="M4.5 15.5h9"/>');
-const CINE_ICON_PAUSE = iconSvg('<rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/>');
-const CINE_ICON_STOP = iconSvg('<rect x="6" y="6" width="12" height="12" rx="2"/>');
-const CINE_ICON_FOLDER = iconSvg('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 10h18"/>');
-const CINE_ICON_FILE_PLUS = iconSvg('<path d="M14 3v5h5"/><path d="M5 3h9l5 5v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M10 14v6"/><path d="M7 17h6"/>');
-
-const STYLE_ID = 'ot-tour-loader-style';
-const PANEL_ID = 'ot-tour-loader-panel';
-const DEFAULT_PROMPT_TEMPLATE = '你是世界级的，正在描述你的视角给观众讲解，不要旁白和画外音。content 只允许使用：中文、英文、数字、空格，以及中文标点 `，。；：！？（）`禁止使用任何英文 CSV 控制字符，尤其是 `,` 和 `"`，绝对不要让 content 出现真实换行，不包含：\\r \\n \\t ，整体文字少于100字。';
-const DEFAULT_CSV_PROMPT_TEMPLATE = `You are a CSV tour route planner.
-Given POI data (poi_id, poi_name, content), output the best ordered tour steps.
-
-Rules:
-1) Output JSON only, no extra text.
-2) Do not output from/to fields.
-3) Every step must include: poi_id, action, audio_mode.
-4) action should be one of MOVE/LOOK/SPEAK when possible.
-5) audio_mode must be INTERRUPTIBLE or BLOCKING.
-6) steps must cover all poi_id values from POI_DATA_JSON at least once.
-7) Prefer each poi_id to appear once (duplicates only if truly necessary).
-
-Output format:
-{"steps":[{"poi_id":"kitchen","action":"MOVE","audio_mode":"INTERRUPTIBLE"}]}`;
-const DEFAULT_MOVE_PROMPT_TEMPLATE = `You are a tour navigation copywriter for MOVE steps.
-Given ordered MOVE contexts, produce concise transition narration for each step.
-
-Rules:
-1) Output JSON only, no extra text.
-2) Keep each content to one short sentence.
-3) Mention from -> to clearly.
-4) Do not repeat scenic description from POI content.
-5) Follow language field strictly: zh-CN => Chinese, en-US => English.
-
-Output format:
-{"moves":[{"seq":1,"content":"我们从起点前往大厅，向前移动约6米。"}]}`;
-const DEFAULT_CINEMATIC_SIMPLE_PROMPT = [
-    '1. 随手需求：请用一句话描述你想拍什么，例如“做一个一镜到底的山路探索镜头”“从入口走到观景点再回望收束”。',
-    '2. 空间是什么：请描述空间类型与关键路径，例如“山径 / 洞穴 / 展厅 / 街巷 / 室内长廊 / 高台边缘”。',
-    '3. 故事背景：请说明观众为什么要这样看、情绪是什么，例如“独自探索”“发现线索”“被景观吸引”“完成一次抵达与回望”。',
-    '4. 风格（可选其一或组合）：电影感、纪录片感、神秘、史诗、宁静、治愈、悬疑、梦幻、克制、展览导览、游戏过场。',
-    '5. 节奏要求（可选其一或组合）：慢推进、匀速巡游、先抑后扬、先扬后稳、渐进揭示、快速切入后放缓、平稳克制、结尾停驻、全程不停顿。',
-    '6. 如果需要 3D Media Object，请明确说明：它位于哪里、在哪个镜头阶段或关键帧附近出现、镜头是否需要围绕它飞行；如果暂时没有视频内容，也可以先只要求生成一个空的 3D Media 占位位置。'
-].join('\n');
-const DEFAULT_CINEMATIC_PLANNER_PROMPT = `你是电影级运镜设计师。
-请基于选中 POI 的空间范围 图像参考 场景描述 故事背景和目标时长，生成连续不间断的一镜到底运镜方案。
-
-硬性规则：
-1. 输出 JSON only。
-2. POI 只是空间锚点，可以生成中间 keyframe。
-3. 运镜必须连续，shots 至少 4 段，每段至少 2 个 keyframes。
-4. keyframe 必须停留在输入 bounds 内。
-5. 优先使用推进 抬升 reveal 侧移 回望 俯仰变化形成节奏。
-6. 每个 shot 需要 label intent durationSec speechText speechMode keyframes。
-7. speechMode 仅可为 INTERRUPTIBLE 或 BLOCKING。
-8. keyframe 需要 t x y z yaw pitch fov moveSpeedMps。
-9. total duration 接近 targetDurationSec。
-10. 如果复杂提示词明确要求 3D Media Object，则必须在相关 keyframe 上生成 mediaObject 字段，至少说明 enabled anchorWorld scale yaw pitch roll depthOffset，并通过后续 keyframe 的相机位置表现围绕它、靠近它、掠过它或回望它。
-11. 如果提示词提到 3D Media Object 但没有视频内容，也允许生成 placeholder 形式的 mediaObject，占位后续再绑定视频。
-12. 可以为未来镜头语义预留 cameraBehavior 字段，但当前仍然要输出可直接播放的关键帧相机位置。
-13. 除 JSON 外不要输出任何说明。`;
-const GEMINI_MODELS = [
-    'gemini-2.5-pro',
-    'gemini-2.5-flash',
-    'gemini-3-pro-preview',
-    'gemini-3-flash-preview'
-];
-const QWEN_MODELS = [
-    'qwen3-max',
-    'qwen3.5-plus',
-    'qwen3.5-flash'
-];
-const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
-const DEFAULT_QWEN_MODEL = 'qwen3.5-plus';
-const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
-const DEFAULT_TTS_VOICE = 'longyuan_v3';
-const DEFAULT_CSV_TARGET_DURATION_SEC = 30;
-const TTS_VOICE_OPTIONS_BY_MODEL: Record<string, TtsVoiceOption[]> = {
-    'cosyvoice-v3-plus': [
-        { value: 'longyuan_v3', label: '龙媛', subtitle: '温暖治愈女', group: '旁白 / 有声书' },
-        { value: 'longyue_v3', label: '龙悦', subtitle: '温暖磁性女', group: '旁白 / 有声书' },
-        { value: 'longsanshu_v3', label: '龙三叔', subtitle: '沉稳质感男', group: '旁白 / 有声书' },
-        { value: 'longshuo_v3', label: '龙硕', subtitle: '博才干练男', group: '新闻播报' },
-        { value: 'loongbella_v3', label: 'Bella3.0', subtitle: '精准干练女', group: '新闻播报' },
-        { value: 'longxiaochun_v3', label: '龙小淳', subtitle: '知性积极女', group: '语音助手' },
-        { value: 'longxiaoxia_v3', label: '龙小夏', subtitle: '沉稳权威女', group: '语音助手' },
-        { value: 'longanwen_v3', label: '龙安温', subtitle: '优雅知性女', group: '语音助手' },
-        { value: 'longanli_v3', label: '龙安莉', subtitle: '利落从容女', group: '语音助手' },
-        { value: 'longanlang_v3', label: '龙安朗', subtitle: '清爽利落男', group: '语音助手' },
-        { value: 'longyingling_v3', label: '龙应聆', subtitle: '温和共情女', group: '客服' },
-        { value: 'longanzhi_v3', label: '龙安智', subtitle: '睿智轻熟男', group: '社交陪伴' }
-    ],
-    'cosyvoice-v3-flash': [
-        { value: 'longyuan_v3', label: '龙媛', subtitle: '温暖治愈女', group: '旁白 / 有声书' },
-        { value: 'longyue_v3', label: '龙悦', subtitle: '温暖磁性女', group: '旁白 / 有声书' },
-        { value: 'longsanshu_v3', label: '龙三叔', subtitle: '沉稳质感男', group: '旁白 / 有声书' },
-        { value: 'longshuo_v3', label: '龙硕', subtitle: '博才干练男', group: '新闻播报' },
-        { value: 'loongbella_v3', label: 'Bella3.0', subtitle: '精准干练女', group: '新闻播报' },
-        { value: 'longxiaochun_v3', label: '龙小淳', subtitle: '知性积极女', group: '语音助手' },
-        { value: 'longxiaoxia_v3', label: '龙小夏', subtitle: '沉稳权威女', group: '语音助手' },
-        { value: 'longanwen_v3', label: '龙安温', subtitle: '优雅知性女', group: '语音助手' },
-        { value: 'longanli_v3', label: '龙安莉', subtitle: '利落从容女', group: '语音助手' },
-        { value: 'longanlang_v3', label: '龙安朗', subtitle: '清爽利落男', group: '语音助手' },
-        { value: 'longyingling_v3', label: '龙应聆', subtitle: '温和共情女', group: '客服' },
-        { value: 'longanzhi_v3', label: '龙安智', subtitle: '睿智轻熟男', group: '社交陪伴' }
-    ]
-};
-const DEFAULT_POI_FOV = 60;
-const MIN_POI_FOV = 20;
-const MAX_POI_FOV = 120;
-
-const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
-const degToRad = (v: number) => v * Math.PI / 180;
-const radToDeg = (v: number) => v * 180 / Math.PI;
-const clampFov = (v: number, fallback = DEFAULT_POI_FOV) => {
-    const n = Number.isFinite(v) ? v : fallback;
-    return clamp(n, MIN_POI_FOV, MAX_POI_FOV);
-};
-const normalizeCwMediaObjectConfig = (input: unknown): CinematicMediaObjectConfig => {
-    const source = input && typeof input === 'object' ? input as Partial<CinematicMediaObjectConfig> : {};
-    const anchor = source.anchorWorld;
-    const safeAnchor = anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y) && Number.isFinite(anchor.z)
-        ? { x: Number(anchor.x), y: Number(anchor.y), z: Number(anchor.z) }
-        : null;
-    const src = String(source.src || '').trim();
-    const fileName = String(source.fileName || (src ? src.split('/').pop() || src : '')).trim();
-    return {
-        enabled: source.enabled !== false,
-        src,
-        fileName,
-        anchorWorld: safeAnchor,
-        scale: clamp(Number(source.scale) || 1.6, 0.1, 120),
-        yaw: Number(source.yaw) || 0,
-        pitch: Number(source.pitch) || 0,
-        roll: Number(source.roll) || 0,
-        depthOffset: clamp(Number(source.depthOffset) || 0.06, -2, 2),
-        placeholder: source.placeholder === true,
-        placeholderLabel: String(source.placeholderLabel || '').trim()
-    };
-};
-
-const plannerPromptRequestsMediaObject = (text: string) => /3d\s*media|media object|media project|video screen|天幕|视频屏|空屏|占位|3d媒体/i.test(String(text || ''));
-const plannerPromptRequestsOrbitLikeCamera = (text: string) => /围绕|环绕|orbit|围着|掠过|回望|围绕.*3d\s*media|围绕.*天幕/i.test(String(text || ''));
-
-const ensureStyle = () => {
-    const existing = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
-    const style = existing || document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-        :root {
-            --otl-bg-base: #101014;
-            --otl-bg-panel: #1a1a20;
-            --otl-bg-card: #23232a;
-            --otl-bg-input: #151519;
-            --otl-text-main: #e2e2e9;
-            --otl-text-muted: #8b8b99;
-            --otl-primary: #3b82f6;
-            --otl-primary-hover: #60a5fa;
-            --otl-success: #10b981;
-            --otl-danger: #ef4444;
-            --otl-border: #33333e;
-            --otl-border-light: #454552;
-            --otl-font-ui: 'PingFang SC', 'Noto Sans SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
-        }
-        #${PANEL_ID} {
-            position: fixed;
-            right: 56px;
-            top: 84px;
-            width: 460px;
-            height: fit-content;
-            max-height: min(92vh, 910px);
-            background: var(--otl-bg-panel);
-            border: 1px solid var(--otl-border);
-            border-radius: 12px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.6);
-            color: var(--otl-text-main);
-            font-family: var(--otl-font-ui);
-            display: flex;
-            flex-direction: column;
-            z-index: 170;
-            pointer-events: auto;
-        }
-        #${PANEL_ID}.hidden { display: none; }
-        #${PANEL_ID}.cinematic-only {
-            width: 0;
-            height: 0;
-            max-height: none;
-            background: transparent;
-            border: 0;
-            box-shadow: none;
-            overflow: visible;
-        }
-        #${PANEL_ID}.cinematic-only > .otl-header,
-        #${PANEL_ID}.cinematic-only > .otl-content,
-        #${PANEL_ID}.cinematic-only > .otl-footer,
-        #${PANEL_ID}.cinematic-only > [data-role="run-settings-modal"],
-        #${PANEL_ID}.cinematic-only > [data-role="batch-modal"],
-        #${PANEL_ID}.cinematic-only > [data-role="llm-popover"],
-        #${PANEL_ID}.cinematic-only > [data-role="prompt-modal"],
-        #${PANEL_ID}.cinematic-only > [data-role="csv-prompt-modal"],
-        #${PANEL_ID}.cinematic-only > [data-role="move-prompt-modal"],
-        #${PANEL_ID}.cinematic-only > [data-role="csv-workspace-modal"],
-        #${PANEL_ID}.cinematic-only > [data-role="csv-content-modal"] {
-            display: none !important;
-        }
-        #${PANEL_ID} * { box-sizing: border-box; }
-        .otl-header {
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--otl-border);
-            display: flex;
-            justify-content: flex-start;
-            align-items: center;
-            cursor: move;
-            background: rgba(0,0,0,0.2);
-            gap: 8px;
-        }
-        .otl-header-actions { display:flex; align-items:center; gap:8px; }
-        .otl-header-playback {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-left: auto;
-        }
-        .otl-title { font-size: 14px; font-weight: 700; letter-spacing: 0.01em; }
-        .otl-content {
-            flex: 0 0 auto;
-            overflow-y: auto;
-            padding: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .otl-card {
-            border: 1px solid var(--otl-border);
-            background: var(--otl-bg-card);
-            border-radius: 10px;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .otl-step-head { display:flex; align-items:center; gap:8px; font-size:13px; font-weight:700; }
-        .otl-step-actions { margin-left: auto; display:flex; align-items:center; gap:6px; }
-        .otl-badge {
-            width: 18px;
-            height: 18px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.1);
-            color: var(--otl-text-muted);
-            font-size: 11px;
-            display:flex;
-            justify-content:center;
-            align-items:center;
-        }
-        .otl-map-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
-        .otl-map-box { position: relative; border: 1px solid var(--otl-border); border-radius: 8px; background: #0e1015; overflow: hidden; }
-        .otl-map-label { font-size: 11px; color: var(--otl-text-muted); padding: 6px 8px; border-bottom: 1px solid var(--otl-border); }
-        .otl-map { width: 100%; height: 180px; display:block; cursor: crosshair; }
-        .otl-map-controls {
-            position: absolute;
-            left: 8px;
-            bottom: 8px;
-            display: flex;
-            flex-direction: row;
-            gap: 4px;
-            z-index: 3;
-            padding: 0;
-            border: none;
-            background: transparent;
-        }
-        .otl-map-controls .otl-icon-btn {
-            width: 20px;
-            height: 20px;
-            border-radius: 10px;
-            font-size: 10px;
-            line-height: 1;
-            padding: 0;
-        }
-        .otl-row { display:flex; gap:8px; align-items:center; }
-        .otl-row > * { min-width: 0; }
-        .otl-cinematic-duration-label {
-            margin: 12px 0 8px;
-            font-size: 12px;
-            font-weight: 700;
-            color: #8ea3cf;
-        }
-        .otl-cinematic-duration-row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-            gap: 12px;
-            margin: 0 0 14px;
-            width: 100%;
-        }
-        .otl-cinematic-duration-row > * {
-            width: 100%;
-            min-width: 0;
-        }
-        .otl-input, .otl-select {
-            width: 100%;
-            border: 1px solid var(--otl-border);
-            border-radius: 6px;
-            background: var(--otl-bg-input);
-            color: var(--otl-text-main);
-            padding: 8px 10px;
-            font-size: 12px;
-            outline: none;
-            font-family: var(--otl-font-ui);
-        }
-        .otl-btn {
-            height: 32px;
-            border: 1px solid var(--otl-border);
-            border-radius: 6px;
-            background: var(--otl-bg-input);
-            color: var(--otl-text-main);
-            padding: 0 10px;
-            font-size: 12px;
-            font-weight: 600;
-            cursor: pointer;
-            font-family: var(--otl-font-ui);
-        }
-        .otl-btn:hover:not(:disabled) { border-color: var(--otl-border-light); }
-        .otl-btn:disabled { opacity: 0.45; cursor:not-allowed; }
-        .otl-btn.primary { background: var(--otl-primary); color: #fff; border-color: rgba(255,255,255,0.12); }
-        .otl-btn.primary:hover:not(:disabled) { background: var(--otl-primary-hover); }
-        .otl-btn.danger { color: #ffd3d3; border-color: #7f2e3a; background: rgba(127,46,58,0.2); }
-        .otl-icon-btn {
-            width: 32px;
-            height: 32px;
-            border-radius: 16px;
-            border: 1px solid var(--otl-border);
-            background: var(--otl-bg-input);
-            color: var(--otl-text-main);
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            font-size: 13px;
-        }
-        .otl-icon-btn:hover:not(:disabled) {
-            border-color: rgba(120, 140, 180, 0.45);
-            background: rgba(74, 93, 130, 0.16);
-            color: #d7e6ff;
-        }
-        .otl-icon-btn svg {
-            width: 16px;
-            height: 16px;
-            stroke: currentColor;
-            fill: none;
-            stroke-width: 1.8;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        .otl-icon-btn.primary {
-            background: #f2f3f7;
-            color: #11131a;
-            border-color: rgba(255,255,255,0.3);
-        }
-        .otl-icon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-        .otl-poi-list { display:flex; flex-direction:column; gap:8px; max-height: 220px; overflow:auto; }
-        .otl-poi-item {
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            padding: 8px;
-            background: #181820;
-            display:grid;
-            grid-template-columns: 70px 1fr;
-            gap: 8px;
-        }
-        .otl-thumb { width:70px; height:52px; border-radius:4px; background:#000; object-fit:cover; }
-        .otl-poi-meta { display:flex; flex-direction:column; gap:6px; }
-        .otl-status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; }
-        .otl-footer {
-            border-top: 1px solid var(--otl-border);
-            background: var(--otl-bg-input);
-            padding: 10px 14px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-        }
-        .otl-footer .otl-muted[data-role="status"] { display: none; }
-        .otl-run-status {
-            font-size: 11px;
-            color: var(--otl-text-muted);
-            font-weight: 500;
-            margin-left: 6px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 220px;
-        }
-        .otl-playback-speed {
-            width: 74px;
-            height: 28px;
-            border: 1px solid var(--otl-border);
-            border-radius: 6px;
-            background: var(--otl-bg-input);
-            color: var(--otl-text-main);
-            font-size: 12px;
-            padding: 0 8px;
-        }
-        .otl-settings-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4,6,10,0.72);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 24px;
-            z-index: 9998;
-        }
-        .otl-settings-modal.hidden { display: none; }
-        .otl-settings-panel {
-            width: min(980px, calc(100vw - 56px));
-            max-height: calc(100vh - 64px);
-            overflow: hidden;
-            border: 1px solid #2e2e36;
-            border-radius: 12px;
-            background: #16161a;
-            box-shadow: 0 24px 50px rgba(0,0,0,0.6);
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 0;
-        }
-        .otl-table-wrap {
-            border: none;
-            border-top: 1px solid #2e2e36;
-            padding: 16px 18px;
-            overflow: auto;
-            max-height: calc(100vh - 160px);
-            background: transparent;
-        }
-        .otl-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 12px;
-        }
-        .otl-table th,
-        .otl-table td {
-            border-bottom: 1px solid var(--otl-border);
-            padding: 8px;
-            text-align: left;
-            vertical-align: top;
-            white-space: nowrap;
-        }
-        .otl-table th { color: var(--otl-text-muted); font-weight: 600; }
-        .otl-cell-content {
-            max-width: 220px;
-            white-space: normal;
-            line-height: 1.4;
-            color: #cfd3df;
-        }
-        .otl-cell-actions { display:flex; gap:6px; flex-wrap: wrap; }
-        .otl-mini-thumb { width: 52px; height: 38px; object-fit: cover; border-radius: 4px; background:#000; }
-        .otl-settings-head {
-            display:flex;
-            align-items: center;
-            gap:10px;
-            padding: 14px 18px;
-            background: rgba(0,0,0,0.2);
-            border-bottom: 1px solid #2e2e36;
-        }
-        .otl-settings-head .otl-step-actions { margin-left: auto; }
-        .otl-status-pill {
-            border: 1px solid var(--otl-border);
-            border-radius: 999px;
-            padding: 4px 10px;
-            font-size: 11px;
-            color: var(--otl-text-muted);
-        }
-        .otl-form-col { display:flex; flex-direction: column; gap:8px; }
-        .otl-provider-tabs {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
-        }
-        .otl-provider-card {
-            border: 1px solid #2e3544;
-            border-radius: 8px;
-            padding: 10px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            background: rgba(10,14,22,0.5);
-        }
-        .otl-provider-card.active {
-            border-color: rgba(59,130,246,0.55);
-            box-shadow: inset 0 0 0 1px rgba(59,130,246,0.18);
-        }
-        .otl-provider-radio {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-            color: var(--otl-text-main);
-        }
-        .otl-provider-radio input { margin: 0; }
-        .otl-provider-summary {
-            border-top: 1px solid #2b3240;
-            padding-top: 8px;
-        }
-        .otl-row-cards {
-            display: flex;
-            flex-direction: column;
-            gap: 14px;
-        }
-        .otl-poi-card {
-            border: 1px solid #2e2e36;
-            border-radius: 8px;
-            background: #1f1f24;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .otl-poi-row-top {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .otl-poi-id {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-family: Consolas, 'Courier New', monospace;
-            font-size: 12px;
-            color: var(--otl-text-muted);
-            flex: 1;
-            min-width: 0;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        .otl-title-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #3b82f6;
-            box-shadow: 0 0 8px rgba(59,130,246,0.55);
-            flex-shrink: 0;
-        }
-        .otl-poi-params { display:flex; align-items:center; gap:8px; flex-shrink: 0; }
-        .otl-poi-actions-inline { display:flex; align-items:center; gap:6px; }
-        .otl-inline-group {
-            display:flex;
-            align-items:center;
-            border: 1px solid #2e2e36;
-            border-radius: 4px;
-            overflow: hidden;
-            background: #121216;
-        }
-        .otl-inline-label {
-            font-size: 10px;
-            color: var(--otl-text-muted);
-            letter-spacing: 0.4px;
-            padding: 0 8px;
-            border-right: 1px solid #2e2e36;
-            height: 26px;
-            display:flex;
-            align-items:center;
-        }
-        .otl-inline-input {
-            border: none;
-            background: transparent;
-            color: var(--otl-text-main);
-            font-size: 12px;
-            height: 26px;
-            padding: 0 8px;
-            outline: none;
-        }
-        .otl-inline-input.name { width: 150px; }
-        .otl-inline-input.num { width: 58px; text-align:center; }
-        .otl-poi-icon {
-            width: 28px;
-            height: 28px;
-            border-radius: 4px;
-            border: 1px solid transparent;
-            background: transparent;
-            color: var(--otl-text-muted);
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .otl-poi-icon:hover { border-color: rgba(120,140,180,0.45); background: rgba(74,93,130,0.16); color: #cfe0ff; }
-        .otl-poi-icon.danger:hover { border-color: rgba(239,68,68,0.35); background: rgba(239,68,68,0.1); color: #ef4444; }
-        .otl-poi-row-bottom {
-            display: flex;
-            gap: 12px;
-            align-items: stretch;
-            min-height: 118px;
-        }
-        .otl-poi-preview {
-            width: 170px;
-            height: 100%;
-            border-radius: 7px;
-            object-fit: cover;
-            background: #000;
-            border: 1px solid #2e2e36;
-            flex-shrink: 0;
-        }
-        .otl-poi-content-wrap { position: relative; flex: 1; min-height: 118px; }
-        .otl-poi-content {
-            width: 100%;
-            min-height: 118px;
-            max-height: 300px;
-            resize: vertical;
-            overflow-y: auto;
-            border: 1px solid #2e2e36;
-            border-radius: 7px;
-            background: #121216;
-            color: var(--otl-text-main);
-            padding: 10px 40px 10px 12px;
-            outline: none;
-            font-size: 12.5px;
-            line-height: 1.45;
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-            word-break: break-word;
-        }
-        .otl-poi-content:focus { border-color: #3f3f4a; background: #15151a; }
-        .otl-poi-gen {
-            position: absolute;
-            right: 8px;
-            bottom: 8px;
-            width: 28px;
-            height: 28px;
-            border-radius: 4px;
-            border: 1px solid #2e2e36;
-            background: #1f1f24;
-            color: #60a5fa;
-            cursor: pointer;
-        }
-        .otl-poi-gen:hover:not(:disabled) { border-color: #3b82f6; background: rgba(59,130,246,0.12); }
-        .otl-poi-gen:disabled { opacity: 0.55; cursor: wait; }
-        .otl-poi-prompt {
-            position: absolute;
-            right: 42px;
-            bottom: 8px;
-            width: 28px;
-            height: 28px;
-            border-radius: 4px;
-            border: 1px solid #2e2e36;
-            background: #1f1f24;
-            color: #9bb8ff;
-            cursor: pointer;
-        }
-        .otl-poi-prompt:hover:not(:disabled) { border-color: #6f97ff; background: rgba(111,151,255,0.13); }
-        .otl-poi-prompt:disabled { opacity: 0.55; cursor: wait; }
-        .otl-poi-preview.placeholder {
-            background:
-                radial-gradient(circle at 22% 28%, rgba(116,174,255,0.40), transparent 38%),
-                radial-gradient(circle at 76% 78%, rgba(139,92,246,0.30), transparent 42%),
-                linear-gradient(145deg, #121827, #0f1320);
-            border-color: #354059;
-        }
-        .otl-llm-popover {
-            position: fixed;
-            min-width: 460px;
-            max-width: 520px;
-            border: 1px solid var(--otl-border);
-            border-radius: 10px;
-            background: #191d28;
-            padding: 10px;
-            z-index: 10000;
-            box-shadow: 0 12px 24px rgba(0,0,0,0.45);
-        }
-        .otl-llm-popover.hidden { display:none; }
-        .otl-llm-info { font-size: 12px; color: var(--otl-text-main); line-height: 1.5; word-break: break-all; }
-        .otl-prompt-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4,6,10,0.72);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10001;
-            padding: 24px;
-        }
-        .otl-prompt-modal.hidden { display:none; }
-        .otl-prompt-panel {
-            width: min(760px, calc(100vw - 40px));
-            border: 1px solid var(--otl-border);
-            border-radius: 10px;
-            background: #171a24;
-            box-shadow: 0 16px 36px rgba(0,0,0,0.55);
-            padding: 14px;
-            display:flex;
-            flex-direction:column;
-            gap: 10px;
-        }
-        .otl-prompt-input {
-            width: 100%;
-            min-height: 180px;
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #11131b;
-            color: var(--otl-text-main);
-            resize: vertical;
-            padding: 10px;
-            font-size: 12px;
-            line-height: 1.45;
-            outline: none;
-            font-family: var(--otl-font-ui);
-        }
-        .otl-csv-workspace-panel {
-            width: min(1080px, calc(100vw - 40px));
-            max-height: min(760px, calc(100vh - 40px));
-            border: 1px solid var(--otl-border);
-            border-radius: 10px;
-            background: #171a24;
-            box-shadow: 0 16px 36px rgba(0,0,0,0.55);
-            padding: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            position: relative;
-        }
-        .otl-csv-workspace-panel.floating {
-            position: fixed;
-            z-index: 10001;
-        }
-        .otl-csv-workspace-panel.fullscreen {
-            position: fixed;
-            left: 12px !important;
-            top: 12px !important;
-            width: calc(100vw - 24px) !important;
-            height: calc(100vh - 24px);
-            max-height: none;
-            border-radius: 10px;
-            z-index: 10003;
-        }
-        .otl-csv-workspace-drag-handle {
-            cursor: move;
-            user-select: none;
-        }
-        .otl-csv-workspace-grid {
-            display: grid;
-            grid-template-columns: 260px 1fr;
-            gap: 10px;
-            min-height: 420px;
-            flex: 1;
-        }
-        .otl-csv-version-list {
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #11131b;
-            padding: 8px;
-            overflow: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .otl-csv-version-item {
-            text-align: left;
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #181c27;
-            color: var(--otl-text-main);
-            padding: 8px;
-            cursor: pointer;
-            font-size: 12px;
-        }
-        .otl-csv-version-item.active {
-            border-color: #4b73ff;
-            box-shadow: inset 0 0 0 1px rgba(75, 115, 255, 0.35);
-        }
-        .otl-cinematic-shell {
-            background: linear-gradient(180deg, rgba(4, 6, 12, 0.08), rgba(4, 6, 12, 0.24));
-            justify-content: flex-end;
-            align-items: stretch;
-            padding: 14px 14px 14px 92px;
-            pointer-events: none;
-            z-index: 10000;
-        }
-        .otl-cinematic-shell .otl-csv-workspace-panel {
-            width: min(1240px, calc(100vw - 106px));
-            height: min(860px, calc(100vh - 28px));
-            max-height: calc(100vh - 28px);
-            pointer-events: auto;
-            position: relative;
-            z-index: 1;
-            background:
-                radial-gradient(circle at top left, rgba(95, 108, 176, 0.12), transparent 28%),
-                linear-gradient(180deg, rgba(11, 13, 20, 0.985), rgba(7, 8, 12, 0.985));
-            border-color: rgba(53, 58, 82, 0.9);
-            border-radius: 18px;
-            box-shadow: 0 28px 60px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.03);
-            padding: 16px;
-            overflow: hidden;
-            display: grid;
-            grid-template-rows: auto minmax(0, 1fr);
-            gap: 14px;
-        }
-        .otl-cinematic-shell .otl-csv-workspace-panel.floating {
-            position: fixed;
-            z-index: 10001;
-        }
-        .otl-cinematic-shell .otl-csv-workspace-panel.fullscreen {
-            position: fixed !important;
-            left: 12px !important;
-            top: 12px !important;
-            width: calc(100vw - 24px) !important;
-            height: calc(100vh - 24px) !important;
-            max-height: none !important;
-            gap: 12px;
-            z-index: 10003;
-        }
-        .otl-cinematic-main {
-            display: grid;
-            grid-template-columns: 310px minmax(0, 1fr);
-            grid-template-rows: minmax(0, 1fr) auto;
-            gap: 14px;
-            min-height: 0;
-            min-width: 0;
-            flex: 1;
-        }
-        .otl-cinematic-left {
-            display: flex;
-            flex-direction: column;
-            gap: 14px;
-            min-height: 0;
-            min-width: 0;
-            grid-row: 1;
-        }
-        .otl-cinematic-left .otl-cinematic-pane {
-            display: flex;
-            flex-direction: column;
-        }
-        .otl-cinematic-left .otl-cinematic-pane.control-pane {
-            position: relative;
-            overflow: visible;
-            z-index: 14;
-            flex: 1;
-        }
-        .otl-cinematic-left .otl-cinematic-pane.control-pane [data-role="cinematic-workspace-status"] {
-            padding-top: 12px;
-        }
-        .otl-cinematic-right {
-            display: grid;
-            grid-template-rows: minmax(0, 1fr);
-            gap: 14px;
-            min-height: 0;
-            min-width: 0;
-            grid-row: 1;
-        }
-        .otl-cinematic-bottom-dock {
-            grid-column: 1 / -1;
-            grid-row: 2;
-            min-width: 0;
-            align-self: end;
-        }
-        .otl-cinematic-timeline-frame {
-            position: relative;
-            min-height: 0;
-        }
-        .otl-cinematic-ruler-zoom {
-            position: absolute;
-            top: 4px;
-            left: 10px;
-            z-index: 7;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            padding: 4px 6px;
-            border-radius: 8px;
-            border: 1px solid rgba(58, 64, 90, 0.9);
-            background: rgba(17, 18, 26, 0.96);
-            box-shadow: 0 10px 18px rgba(0,0,0,0.22);
-            pointer-events: auto;
-        }
-        .otl-cinematic-ruler-zoom .otl-cinematic-icon-btn {
-            width: 24px;
-            height: 24px;
-            border-radius: 7px;
-        }
-        .otl-cinematic-zoom-range {
-            width: 58px;
-            accent-color: #7166ff;
-        }
-        .otl-cinematic-middle {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-            gap: 14px;
-            min-height: 0;
-            min-width: 0;
-            align-items: stretch;
-        }
-        .otl-cinematic-pane {
-            border: 1px solid rgba(45, 50, 70, 0.92);
-            border-radius: 16px;
-            background:
-                linear-gradient(180deg, rgba(17,19,28,0.96), rgba(11,12,18,0.98));
-            padding: 16px;
-            min-height: 0;
-            min-width: 0;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 14px 32px rgba(0,0,0,0.2);
-        }
-        .otl-cinematic-pane.timeline-pane {
-            border: 1px solid rgba(45, 50, 70, 0.96);
-            border-radius: 16px;
-            background: linear-gradient(180deg, rgba(17,19,27,0.98), rgba(7,8,12,0.98));
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 18px 34px rgba(0,0,0,0.25);
-            padding: 0;
-            overflow: hidden;
-        }
-        .otl-cinematic-pane.map-pane,
-        .otl-cinematic-pane.preview-pane,
-        .otl-cinematic-pane.parameters-pane {
-            display: flex;
-            flex-direction: column;
-        }
-        .otl-cinematic-pane.preview-pane,
-        .otl-cinematic-pane.map-pane {
-            min-height: 0;
-        }
-        .otl-cinematic-pane.parameters-pane {
-            overflow: hidden;
-            display: none;
-        }
-        .otl-cinematic-parameter-scroll {
-            min-height: 0;
-            overflow: auto;
-            padding-right: 4px;
-        }
-        .otl-cinematic-parameter-card {
-            display: grid;
-            grid-template-rows: repeat(3, auto);
-            gap: 10px;
-        }
-        .otl-cinematic-parameter-top {
-            display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 8px 10px;
-            align-items: start;
-        }
-        .otl-cinematic-parameter-bottom {
-            display: grid;
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 8px 10px;
-        }
-        .otl-cinematic-parameter-speech-row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto auto auto;
-            gap: 8px 10px;
-            align-items: end;
-        }
-        .otl-cinematic-speech-play-btn {
-            height: 30px;
-            min-width: 36px;
-            padding: 0 10px;
-        }
-        .otl-cinematic-speech-metric {
-            min-width: 96px;
-            height: 30px;
-            border-radius: 10px;
-            border: 1px solid rgba(43, 61, 100, 0.56);
-            background: rgba(10, 15, 27, 0.84);
-            color: #dce7ff;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0 10px;
-            font-size: 11px;
-            font-weight: 700;
-            white-space: nowrap;
-        }
-        .otl-cinematic-editor-modal {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: flex-start;
-            justify-content: flex-end;
-            z-index: 30;
-            padding: 72px 18px 18px;
-            pointer-events: none;
-        }
-        .otl-cinematic-editor-modal.hidden { display: none; }
-        .otl-cinematic-editor-panel {
-            width: min(760px, calc(100% - 24px));
-            max-height: calc(100% - 24px);
-            overflow: auto;
-            border-radius: 16px;
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            background:
-                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
-                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
-            box-shadow: 0 22px 42px rgba(0,0,0,0.36);
-            padding: 18px;
-            pointer-events: auto;
-        }
-        .otl-cinematic-editor-body {
-            display: grid;
-            gap: 16px;
-        }
-        .otl-cinematic-editor-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 14px 16px;
-        }
-        .otl-cinematic-editor-grid.shot {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-        }
-        .otl-cinematic-editor-speech {
-            display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto auto auto;
-            gap: 10px;
-            align-items: end;
-        }
-        .otl-cinematic-check {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            color: #dce7ff;
-            font-size: 12px;
-            font-weight: 700;
-        }
-        .otl-cinematic-speech-track {
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: 112px;
-        }
-        .otl-cinematic-speech-row-lane {
-            position: relative;
-            height: 52px;
-            margin-top: 0;
-            border-top: 1px solid rgba(42, 45, 61, 0.72);
-        }
-        .otl-cinematic-speech-chip {
-            position: absolute;
-            top: 11px;
-            height: 28px;
-            border-radius: 9px;
-            border: 1px solid rgba(73, 166, 119, 0.4);
-            background: linear-gradient(180deg, rgba(26, 64, 48, 0.9), rgba(13, 33, 24, 0.96));
-            color: #d8ffea;
-            font-size: 10px;
-            padding: 0 10px;
-            display: inline-flex;
-            align-items: center;
-            overflow: hidden;
-            white-space: nowrap;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-        }
-        .otl-cinematic-speech-chip.active {
-            border-color: rgba(94, 152, 255, 0.95);
-            box-shadow: inset 0 0 0 1px rgba(94, 152, 255, 0.42), 0 0 0 1px rgba(94, 152, 255, 0.18);
-        }
-        .otl-cinematic-poi-list {
-            max-height: 220px;
-            overflow: auto;
-        }
-        .otl-cinematic-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 0;
-            min-height: 52px;
-        }
-        .otl-cinematic-brand {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-        .otl-cinematic-title-group {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-        .otl-cinematic-mini-toggle {
-            height: 28px;
-            padding: 0 10px;
-            border-radius: 999px;
-            border: 1px solid rgba(72, 92, 135, 0.58);
-            background: rgba(18, 24, 40, 0.92);
-            color: #d6e2ff;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 0.06em;
-            font-family: var(--otl-font-ui);
-            cursor: pointer;
-        }
-        .otl-cinematic-badge {
-            border-radius: 7px;
-            background: rgba(86, 110, 160, 0.34);
-            color: #f0f5ff;
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: 0.12em;
-            padding: 6px 9px;
-        }
-        .otl-cinematic-title {
-            font-size: 15px;
-            font-weight: 800;
-            color: #f5f7ff;
-        }
-        .otl-cinematic-actions {
-            display: flex;
-            gap: 8px;
-        }
-        .otl-cinematic-icon-btn {
-            width: 38px;
-            height: 38px;
-            border-radius: 12px;
-            border: 1px solid rgba(72, 92, 135, 0.6);
-            background: rgba(20, 28, 46, 0.95);
-            color: #eef4ff;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
-        }
-        .otl-cinematic-icon-btn svg,
-        .otl-cinematic-section-title svg,
-        .otl-cinematic-poi-trigger svg,
-        .otl-cinematic-mini-play svg {
-            width: 18px;
-            height: 18px;
-            stroke: currentColor;
-            fill: none;
-            stroke-width: 1.9;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-            flex: 0 0 auto;
-        }
-        .otl-cinematic-icon-btn:hover {
-            border-color: rgba(103, 141, 255, 0.95);
-            background: rgba(26, 39, 67, 1);
-            transform: translateY(-1px);
-        }
-        .otl-cinematic-icon-btn.primary {
-            border-color: rgba(74, 122, 255, 0.75);
-            box-shadow: 0 0 0 1px rgba(74,122,255,0.18) inset;
-        }
-        .otl-cinematic-section-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 14px;
-        }
-        .otl-cinematic-section-title {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            font-size: 13px;
-            font-weight: 700;
-            color: #eef3ff;
-        }
-        .otl-cinematic-step-badge {
-            border-radius: 999px;
-            border: 1px solid rgba(72, 92, 135, 0.65);
-            padding: 5px 12px;
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: 0.14em;
-            color: #cad8ff;
-        }
-        .otl-cinematic-subactions {
-            display: flex;
-            gap: 8px;
-        }
-        .otl-cinematic-poi-box {
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            border-radius: 14px;
-            background: rgba(12, 13, 20, 0.92);
-            overflow: visible;
-            position: relative;
-            z-index: 20;
-        }
-        .otl-cinematic-poi-trigger {
-            width: 100%;
-            border: 0;
-            background: transparent;
-            color: #eaf1ff;
-            padding: 14px 16px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            font-size: 12px;
-            font-weight: 700;
-            cursor: pointer;
-            font-family: var(--otl-font-ui);
-        }
-        .otl-cinematic-poi-items {
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: calc(100% + 6px);
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            padding: 10px 12px 12px;
-            max-height: 300px;
-            overflow: auto;
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            border-radius: 12px;
-            background: rgba(12, 13, 20, 0.98);
-            box-shadow: 0 18px 28px rgba(0,0,0,0.36);
-        }
-        .otl-cinematic-poi-items.hidden {
-            display: none;
-        }
-        .otl-cinematic-poi-row {
-            display: grid;
-            grid-template-columns: 18px 1fr auto;
-            gap: 10px;
-            align-items: center;
-            padding: 10px 12px;
-            border: 1px solid rgba(42, 57, 95, 0.55);
-            border-radius: 12px;
-            background: rgba(13, 18, 31, 0.88);
-            color: #edf3ff;
-        }
-        .otl-cinematic-poi-row .otl-muted { color: #8e9ec2; }
-        .otl-cinematic-grid-inputs {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 14px;
-        }
-        .otl-cinematic-field {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .otl-cinematic-field label {
-            font-size: 11px;
-            font-weight: 800;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: #7f92ba;
-        }
-        .otl-cinematic-media-box {
-            margin-top: 12px;
-            padding-top: 12px;
-            border-top: 1px solid rgba(51, 70, 109, 0.48);
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .otl-cinematic-media-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-        }
-        .otl-cinematic-media-right {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-            justify-content: flex-end;
-        }
-        .otl-cinematic-media-path-row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            gap: 8px;
-            align-items: end;
-        }
-        .otl-cinematic-media-anchor-row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            gap: 8px;
-            align-items: end;
-        }
-        .otl-cinematic-media-icon-btn {
-            width: 34px;
-            height: 34px;
-            border-radius: 10px;
-            border: 1px solid rgba(72, 92, 135, 0.6);
-            background: rgba(20, 28, 46, 0.95);
-            color: #eef4ff;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
-        }
-        .otl-cinematic-media-icon-btn:hover {
-            border-color: rgba(103, 141, 255, 0.95);
-            background: rgba(26, 39, 67, 1);
-            transform: translateY(-1px);
-        }
-        .otl-cinematic-media-icon-btn svg {
-            width: 16px;
-            height: 16px;
-            stroke: currentColor;
-            fill: none;
-            stroke-width: 1.9;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        .otl-cinematic-media-actions {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        .otl-cinematic-media-note {
-            font-size: 11px;
-            color: #8ea0c9;
-        }
-        .otl-cinematic-timeline {
-            position: relative;
-            height: 308px;
-            overflow: hidden;
-            border: 0;
-            border-radius: 0;
-            background:
-                linear-gradient(180deg, rgba(15, 17, 24, 0.98), rgba(7, 8, 13, 0.99)),
-                linear-gradient(90deg, rgba(100,120,255,0.025), rgba(255,255,255,0));
-            min-width: 0;
-            box-shadow: none;
-        }
-        .otl-cinematic-timeline-shell {
-            display: grid;
-            grid-template-columns: 224px minmax(0, 1fr);
-            height: 100%;
-            min-width: 0;
-        }
-        .otl-cinematic-timeline-side {
-            border-right: 1px solid rgba(42, 45, 61, 0.95);
-            background: linear-gradient(180deg, rgba(22,24,33,0.98), rgba(15,16,23,0.98));
-            display: flex;
-            flex-direction: column;
-            min-width: 0;
-        }
-        .otl-cinematic-sequence-head {
-            height: 36px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 0 14px;
-            border-bottom: 1px solid rgba(42, 45, 61, 0.95);
-            color: #d9e4ff;
-            font-size: 12px;
-            font-weight: 700;
-        }
-        .otl-cinematic-sequence-head.empty {
-            color: transparent;
-        }
-        .otl-cinematic-sequence-pill {
-            height: 18px;
-            min-width: 18px;
-            border-radius: 6px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(69, 98, 168, 0.18);
-            color: #8ea9ff;
-            font-size: 10px;
-            font-weight: 800;
-        }
-        .otl-cinematic-lane-side {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
-        .otl-cinematic-lane-title,
-        .otl-cinematic-lane-audio {
-            position: relative;
-            padding: 0 16px;
-            border-bottom: 1px solid rgba(42, 45, 61, 0.95);
-            color: #8d9ab9;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-            font-weight: 700;
-        }
-        .otl-cinematic-lane-title { height: 112px; }
-        .otl-cinematic-lane-audio { height: 52px; }
-        .otl-cinematic-lane-dot {
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            background: rgba(255,255,255,0.22);
-        }
-        .otl-cinematic-lane-tools {
-            margin-left: auto;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .otl-cinematic-lane-tool {
-            width: 18px;
-            height: 18px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            color: #667493;
-            opacity: 0.82;
-        }
-        .otl-cinematic-timeline-main {
-            min-width: 0;
-            display: flex;
-            flex-direction: column;
-        }
-        .otl-cinematic-ruler-wrap {
-            position: relative;
-            height: 36px;
-            overflow: auto hidden;
-            border-bottom: 1px solid rgba(42, 45, 61, 0.95);
-            background: linear-gradient(180deg, rgba(22,24,33,0.98), rgba(15,16,22,0.98));
-            scrollbar-width: none;
-        }
-        .otl-cinematic-ruler-wrap::-webkit-scrollbar { display: none; }
-        .otl-cinematic-ruler-inner,
-        .otl-cinematic-track-scroll {
-            position: relative;
-            min-width: 760px;
-        }
-        .otl-cinematic-ruler-inner { height: 36px; }
-        .otl-cinematic-track-wrap {
-            flex: 1;
-            position: relative;
-            overflow: auto;
-            background:
-                linear-gradient(180deg, rgba(11,12,17,0.98), rgba(7,8,12,0.99)),
-                linear-gradient(90deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
-        }
-        .otl-cinematic-track-scroll {
-            min-height: 138px;
-        }
-        .otl-cinematic-time-ruler {
-            position: absolute;
-            inset: 0;
-        }
-        .otl-cinematic-tick {
-            position: absolute;
-            bottom: 0;
-            width: 1px;
-            height: 9px;
-            background: rgba(112, 118, 148, 0.28);
-        }
-        .otl-cinematic-tick.major {
-            height: 21px;
-            background: rgba(143, 152, 196, 0.72);
-        }
-        .otl-cinematic-tick.mid {
-            height: 15px;
-            background: rgba(126, 135, 171, 0.5);
-        }
-        .otl-cinematic-tick-label {
-            position: absolute;
-            top: 5px;
-            transform: translateX(8px);
-            font-size: 10px;
-            color: #949ab8;
-            letter-spacing: 0.02em;
-        }
-        .otl-cinematic-track-grid {
-            position: absolute;
-            inset: 0;
-            pointer-events: none;
-        }
-        .otl-cinematic-grid-line {
-            position: absolute;
-            top: 0;
-            bottom: 0;
-            width: 1px;
-            background: rgba(255,255,255,0.035);
-        }
-        .otl-cinematic-grid-line.major {
-            background: rgba(255,255,255,0.06);
-        }
-        .otl-cinematic-grid-line.mid {
-            background: rgba(255,255,255,0.045);
-        }
-        .otl-cinematic-shot-row {
-            position: absolute;
-            left: 0;
-            right: 0;
-            top: 0;
-            height: 112px;
-            border-bottom: 1px solid rgba(42, 45, 61, 0.72);
-        }
-        .otl-cinematic-shot-bar {
-            position: absolute;
-            top: 16px;
-            height: 54px;
-            border-radius: 12px;
-            border: 1px solid rgba(88, 92, 111, 0.75);
-            background:
-                linear-gradient(180deg, rgba(70, 72, 86, 0.18), rgba(29, 31, 40, 0.72)),
-                repeating-linear-gradient(135deg, rgba(255,255,255,0.038) 0 4px, rgba(255,255,255,0.012) 4px 8px);
-            color: #e5ecff;
-            font-size: 11px;
-            padding: 15px 12px 8px;
-            overflow: visible;
-            min-width: 0;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 8px 18px rgba(0,0,0,0.16);
-        }
-        .otl-cinematic-shot-bar.active {
-            border-color: rgba(118, 102, 255, 0.95);
-            background:
-                linear-gradient(180deg, rgba(99, 87, 214, 0.34), rgba(35, 32, 66, 0.78)),
-                repeating-linear-gradient(135deg, rgba(145,139,255,0.09) 0 4px, rgba(255,255,255,0.022) 4px 8px);
-            box-shadow: 0 0 0 1px rgba(118,102,255,0.28), 0 12px 24px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.08);
-        }
-        .otl-cinematic-shot-line {
-            position: absolute;
-            left: 10px;
-            right: 10px;
-            top: -13px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-            pointer-events: none;
-        }
-        .otl-cinematic-shot-title {
-            font-weight: 800;
-            text-align: left;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            padding: 3px 8px;
-            border-radius: 6px;
-            background: rgba(6, 7, 12, 0.98);
-            border: 1px solid rgba(69, 73, 93, 0.92);
-            max-width: calc(100% - 74px);
-        }
-        .otl-cinematic-shot-meta {
-            font-size: 10px;
-            color: #b3c1e7;
-            text-align: right;
-            padding: 3px 8px;
-            border-radius: 6px;
-            background: rgba(6, 7, 12, 0.98);
-            border: 1px solid rgba(69, 73, 93, 0.92);
-            white-space: nowrap;
-        }
-        .otl-cinematic-shot-klabels {
-            position: relative;
-            height: 15px;
-            margin-top: 10px;
-        }
-        .otl-cinematic-keyframe-label {
-            position: absolute;
-            top: 0;
-            transform: translateX(-50%);
-            font-size: 9px;
-            color: #727792;
-            white-space: nowrap;
-            pointer-events: none;
-        }
-        .otl-cinematic-shot-dots {
-            position: relative;
-            height: 22px;
-            margin-top: 8px;
-        }
-        .otl-cinematic-pane.parameters-pane .otl-cinematic-section-head {
-            margin-bottom: 10px !important;
-        }
-        .otl-cinematic-pane.parameters-pane .otl-cinematic-field {
-            gap: 4px;
-        }
-        .otl-cinematic-pane.parameters-pane .otl-cinematic-field label {
-            font-size: 10px;
-            letter-spacing: 0.05em;
-        }
-        .otl-cinematic-pane.parameters-pane .otl-input,
-        .otl-cinematic-pane.parameters-pane .otl-select {
-            font-size: 11px;
-            padding: 6px 8px;
-            min-height: 30px;
-        }
-        .otl-cinematic-pane.parameters-pane .otl-btn {
-            height: 28px;
-            font-size: 11px;
-            padding: 0 8px;
-        }
-        .otl-cinematic-pane.parameters-pane .otl-cinematic-keyframe-heading {
-            display: none;
-        }
-        .otl-cinematic-keyframe-dot {
-            position: absolute;
-            width: 13px;
-            height: 13px;
-            border-radius: 3px;
-            border: 1px solid rgba(139, 141, 158, 0.88);
-            background: linear-gradient(180deg, rgba(34, 36, 46, 0.98), rgba(15, 16, 22, 0.98));
-            transform: translate(-50%, -50%);
-            cursor: pointer;
-            rotate: 45deg;
-            box-shadow: inset 0 1px 0 rgba(255,255,255,0.08), 0 0 0 1px rgba(0,0,0,0.2);
-        }
-        .otl-cinematic-keyframe-dot.active {
-            background: linear-gradient(180deg, rgba(123, 113, 255, 1), rgba(91, 80, 238, 0.98));
-            border-color: #f3f5ff;
-            box-shadow: 0 0 0 4px rgba(110,98,255,0.18), inset 0 1px 0 rgba(255,255,255,0.22);
-        }
-        .otl-cinematic-keyframe-dot::after { content: none; }
-        .otl-cinematic-playhead {
-            position: absolute;
-            top: 0;
-            bottom: 0;
-            width: 2px;
-            background: linear-gradient(180deg, rgba(115, 103, 255, 1), rgba(115, 103, 255, 0.12));
-            transform: translateX(-1px);
-            pointer-events: none;
-            z-index: 4;
-        }
-        .otl-cinematic-playhead::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 50%;
-            width: 14px;
-            height: 14px;
-            background: #7666ff;
-            border-radius: 50%;
-            transform: translate(-50%, -22%);
-            box-shadow: 0 0 0 4px rgba(110,98,255,0.18);
-        }
-        .otl-cinematic-request-hint {
-            font-size: 11px;
-            color: #8595b8;
-            line-height: 1.45;
-        }
-        .otl-cinematic-panel-title {
-            font-size: 12px;
-            font-weight: 800;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: #95a8cf;
-            margin-bottom: 12px;
-        }
-        .otl-cinematic-map-wrap {
-            position: relative;
-            border: 1px solid rgba(43, 59, 97, 0.54);
-            border-radius: 14px;
-            overflow: hidden;
-            background: radial-gradient(circle at center, rgba(18,29,56,0.55), rgba(7,10,19,0.96));
-            min-height: 280px;
-        }
-        .otl-cinematic-map-split {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 10px;
-            min-height: 0;
-            flex: 1;
-        }
-        .otl-cinematic-map-box {
-            min-width: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            justify-content: flex-start;
-            flex: 1;
-            min-height: 0;
-        }
-        .otl-cinematic-map-box canvas {
-            display: block;
-            width: 100%;
-            height: 100%;
-            aspect-ratio: 260 / 210;
-            max-width: 100%;
-            object-fit: contain;
-            flex: 1;
-            min-height: 0;
-        }
-        .otl-cinematic-map-box .otl-map-controls {
-            align-self: flex-start;
-            margin-top: 8px;
-        }
-        .otl-cinematic-preview-box {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            min-height: 0;
-            flex: 1;
-        }
-        .otl-cinematic-preview-wrap {
-            border: 1px solid rgba(43, 59, 97, 0.54);
-            border-radius: 14px;
-            overflow: hidden;
-            background: rgba(7,10,19,0.96);
-            width: 100%;
-            min-height: 0;
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-        }
-        .otl-cinematic-preview-wrap img {
-            display: block;
-            width: 100%;
-            height: 100%;
-            aspect-ratio: 16 / 9;
-            object-fit: contain;
-            background: #050912;
-            flex: 1;
-            min-height: 0;
-        }
-        .otl-cinematic-map-meta {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 10px;
-            gap: 12px;
-        }
-        .otl-cinematic-map-actions {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-left: auto;
-        }
-        .otl-cinematic-map-current {
-            border-radius: 8px;
-            background: rgba(40, 54, 88, 0.78);
-            color: #d5e1ff;
-            padding: 5px 8px;
-            font-size: 11px;
-            font-weight: 700;
-        }
-        .otl-cinematic-route-toggle {
-            height: 30px;
-            padding: 0 12px;
-            border-radius: 999px;
-            border: 1px solid rgba(72, 92, 135, 0.58);
-            background: rgba(20, 28, 46, 0.95);
-            color: #d6e2ff;
-            font-size: 11px;
-            font-weight: 700;
-            font-family: var(--otl-font-ui);
-            cursor: pointer;
-        }
-        .otl-cinematic-route-toggle.active {
-            border-color: rgba(74, 122, 255, 0.82);
-            background: rgba(20, 42, 92, 0.95);
-            color: #f0f5ff;
-        }
-        .otl-cinematic-prompt-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4, 4, 8, 0.76);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 18px;
-            z-index: 10020;
-            backdrop-filter: blur(18px);
-        }
-        .otl-cinematic-prompt-modal.hidden { display: none; }
-        .otl-cinematic-prompt-panel {
-            width: min(980px, calc(100vw - 40px));
-            min-height: 560px;
-            max-height: calc(100vh - 40px);
-            border-radius: 16px;
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            background:
-                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
-                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
-            box-shadow: 0 28px 60px rgba(0,0,0,0.5);
-            display: grid;
-            grid-template-rows: auto 1fr;
-            overflow: hidden;
-        }
-        .otl-cinematic-prompt-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 16px 18px;
-            border-bottom: 1px solid rgba(56, 61, 86, 0.65);
-        }
-        .otl-cinematic-keyframe-head-left {
-            display: inline-flex;
-            align-items: center;
-            gap: 14px;
-            min-width: 0;
-            flex-wrap: wrap;
-        }
-        .otl-cinematic-keyframe-head-tools {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            justify-content: flex-start;
-            flex-wrap: wrap;
-        }
-        .otl-cinematic-prompt-body {
-            display: grid;
-            grid-template-columns: 240px 1fr;
-            min-height: 0;
-        }
-        .otl-cinematic-prompt-versions {
-            border-right: 1px solid rgba(56, 61, 86, 0.65);
-            padding: 14px;
-            overflow: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .otl-cinematic-prompt-editor {
-            display: grid;
-            grid-template-rows: 1fr auto;
-            min-height: 0;
-        }
-        .otl-cinematic-prompt-text {
-            width: 100%;
-            height: 100%;
-            border: 0;
-            background: transparent;
-            color: #f3f7ff;
-            resize: none;
-            padding: 18px;
-            line-height: 1.6;
-            outline: none;
-            font-size: 14px;
-            font-family: var(--otl-font-ui);
-        }
-        .otl-cinematic-prompt-footer {
-            border-top: 1px solid rgba(56, 61, 86, 0.65);
-            padding: 14px 18px;
-            display: flex;
-            justify-content: flex-end;
-            gap: 12px;
-        }
-        .otl-cinematic-prompt-version-item {
-            border: 1px solid rgba(56, 61, 86, 0.92);
-            border-radius: 12px;
-            background: rgba(15, 16, 24, 0.92);
-            color: #dce7ff;
-            text-align: left;
-            padding: 12px;
-            cursor: pointer;
-        }
-        .otl-cinematic-prompt-version-item.active {
-            border-color: #7666ff;
-            box-shadow: inset 0 0 0 1px rgba(118,102,255,0.26);
-            background: rgba(37, 32, 66, 0.92);
-        }
-        .otl-cinematic-prompt-version-meta {
-            color: #7f92ba;
-            font-size: 11px;
-            margin-top: 6px;
-        }
-        .otl-cinematic-parameter-speech {
-            min-height: 30px;
-            font-size: 11px;
-            resize: none;
-        }
-        .otl-cinematic-mini {
-            display: none;
-            align-items: center;
-            gap: 14px;
-            min-width: 340px;
-            padding-left: 12px;
-        }
-        .otl-cinematic-mini-play {
-            width: 38px;
-            height: 38px;
-            border-radius: 12px;
-            border: 1px solid rgba(72, 92, 135, 0.58);
-            background: rgba(20, 28, 46, 0.95);
-            color: #eef4ff;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-        }
-        .otl-cinematic-mini-timeline {
-            position: relative;
-            flex: 1;
-            height: 40px;
-            border: 1px solid rgba(46, 63, 103, 0.45);
-            border-radius: 999px;
-            background: linear-gradient(180deg, rgba(6,9,18,0.98), rgba(8,11,20,0.98));
-            overflow: hidden;
-        }
-        .otl-cinematic-mini-track,
-        .otl-cinematic-mini-progress {
-            position: absolute;
-            top: 50%;
-            transform: translateY(-50%);
-            height: 6px;
-            border-radius: 999px;
-        }
-        .otl-cinematic-mini-track {
-            left: 12px;
-            right: 12px;
-            background: rgba(83, 104, 148, 0.26);
-        }
-        .otl-cinematic-mini-progress {
-            left: 12px;
-            background: linear-gradient(90deg, rgba(44,117,255,0.88), rgba(120,170,255,0.88));
-            min-width: 6px;
-        }
-        .otl-cinematic-mini-playhead {
-            position: absolute;
-            top: 50%;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            background: #f3f7ff;
-            box-shadow: 0 0 0 4px rgba(47,124,255,0.18);
-            transform: translate(-50%, -50%);
-        }
-        .otl-cinematic-mini-time {
-            min-width: 56px;
-            color: #9ab0da;
-            font-size: 11px;
-            font-weight: 700;
-        }
-        .otl-cinematic-bgm-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4, 4, 8, 0.76);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 18px;
-            z-index: 10030;
-            backdrop-filter: blur(16px);
-        }
-        .otl-cinematic-bgm-modal.hidden { display: none; }
-        .otl-cinematic-bgm-panel {
-            width: min(980px, calc(100vw - 24px));
-            max-height: calc(100vh - 24px);
-            border-radius: 16px;
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            background: linear-gradient(180deg, rgba(18, 19, 27, 0.985), rgba(11, 12, 17, 0.99));
-            box-shadow: 0 28px 60px rgba(0,0,0,0.5);
-            display: grid;
-            grid-template-rows: auto 1fr;
-            overflow: hidden;
-        }
-        .otl-cinematic-bgm-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            padding: 14px 16px;
-            border-bottom: 1px solid rgba(56, 61, 86, 0.65);
-        }
-        .otl-cinematic-bgm-grid {
-            display: grid;
-            grid-template-columns: 320px 1fr;
-            gap: 14px;
-            min-height: 0;
-            padding: 14px;
-        }
-        .otl-cinematic-bgm-library,
-        .otl-cinematic-bgm-editor {
-            min-height: 0;
-            border: 1px solid rgba(56, 61, 86, 0.74);
-            border-radius: 12px;
-            background: rgba(10, 12, 18, 0.92);
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .otl-cinematic-bgm-list {
-            min-height: 0;
-            overflow: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-        .otl-cinematic-bgm-item {
-            width: 100%;
-            border: 1px solid rgba(50, 62, 92, 0.64);
-            border-radius: 10px;
-            background: rgba(17, 23, 36, 0.9);
-            color: #ecf3ff;
-            padding: 8px 10px;
-            text-align: left;
-            cursor: pointer;
-            font-family: var(--otl-font-ui);
-            font-size: 12px;
-        }
-        .otl-cinematic-bgm-item.active {
-            border-color: rgba(96, 136, 255, 0.92);
-            box-shadow: inset 0 0 0 1px rgba(96, 136, 255, 0.25);
-        }
-        .otl-cinematic-bgm-item .meta {
-            display: block;
-            color: #8ca2d0;
-            font-size: 10px;
-            margin-top: 4px;
-        }
-        .otl-cinematic-bgm-toolbar {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 8px;
-        }
-        .otl-cinematic-bgm-list-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-        }
-        .otl-cinematic-bgm-head-actions {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-        }
-        .otl-cinematic-bgm-head-actions .otl-cinematic-icon-btn.primary {
-            border-color: rgba(74, 122, 255, 0.78);
-            background: rgba(34, 72, 156, 0.92);
-        }
-        .otl-cinematic-bgm-head-actions .otl-cinematic-icon-btn.primary:hover {
-            background: rgba(44, 84, 176, 0.98);
-        }
-        .otl-cinematic-bgm-head-actions .otl-cinematic-icon-btn.danger {
-            border-color: rgba(255, 96, 118, 0.42);
-            background: rgba(42, 14, 20, 0.92);
-            color: #ffd4da;
-        }
-        .otl-cinematic-bgm-head-actions .otl-cinematic-icon-btn.danger:hover {
-            border-color: rgba(255, 120, 138, 0.62);
-            background: rgba(54, 16, 24, 0.96);
-        }
-        .otl-cinematic-bgm-list-head .otl-cinematic-icon-btn {
-            width: 34px;
-            height: 34px;
-            border-radius: 10px;
-        }
-        .otl-cinematic-bgm-player {
-            display: flex;
-            justify-content: flex-start;
-            gap: 12px;
-            align-items: center;
-            flex-wrap: nowrap;
-            min-width: 0;
-        }
-        .otl-cinematic-bgm-player .otl-cinematic-icon-btn {
-            width: 36px;
-            height: 36px;
-            border-radius: 10px;
-            flex: 0 0 auto;
-        }
-        .otl-cinematic-bgm-player .otl-select {
-            width: auto;
-            min-width: 70px;
-            padding-right: 28px;
-            flex: 0 0 auto;
-        }
-        .otl-cinematic-bgm-time {
-            white-space: nowrap;
-            min-width: 0;
-            text-align: left;
-            flex: 0 0 auto;
-        }
-        .otl-cinematic-bgm-progress-hidden {
-            position: absolute;
-            width: 1px;
-            height: 1px;
-            padding: 0;
-            margin: -1px;
-            overflow: hidden;
-            clip: rect(0, 0, 0, 0);
-            white-space: nowrap;
-            border: 0;
-        }
-        .otl-cinematic-bgm-wave {
-            width: 100%;
-            height: 120px;
-            border-radius: 10px;
-            border: 1px solid rgba(50, 62, 92, 0.64);
-            background: linear-gradient(180deg, rgba(6, 9, 16, 0.98), rgba(8, 12, 22, 0.98));
-            cursor: crosshair;
-        }
-        .otl-cinematic-bgm-range {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr)) auto auto;
-            gap: 8px;
-            align-items: end;
-        }
-        .otl-cinematic-bgm-params {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 8px;
-            align-items: end;
-        }
-        .otl-cine-record-btn {
-            border: 1px solid rgba(255, 84, 110, 0.48);
-            border-radius: 999px;
-            background: rgba(26, 8, 12, 0.9);
-            color: #ffd9e1;
-            font-weight: 700;
-            font-size: 11px;
-            padding: 7px 12px;
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            cursor: pointer;
-        }
-        .otl-cine-record-btn .dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #ff2a4f;
-            box-shadow: 0 0 0 2px rgba(255, 42, 79, 0.18);
-        }
-        .otl-cine-record-btn.hidden { display: none; }
-        .otl-cine-record-timer {
-            min-width: 78px;
-            text-align: right;
-            font-size: 11px;
-            color: #a7bad6;
-        }
-        .otl-cine-record-modal {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: flex-start;
-            justify-content: center;
-            background: rgba(4, 9, 18, 0.72);
-            z-index: 40;
-            padding: 84px 22px 22px;
-        }
-        .otl-cine-record-modal.hidden { display: none; }
-        .otl-cine-record-panel {
-            width: min(1160px, calc(100vw - 90px));
-            max-height: calc(100vh - 110px);
-            display: flex;
-            flex-direction: column;
-            border-radius: 18px;
-            border: 1px solid rgba(102, 132, 176, 0.34);
-            background: linear-gradient(180deg, rgba(13, 20, 34, 0.98), rgba(9, 14, 26, 0.98));
-            box-shadow: 0 28px 68px rgba(2, 5, 12, 0.6);
-            overflow: hidden;
-        }
-        .otl-cine-record-tool-group { position: relative; }
-        .otl-cine-record-popover {
-            position: absolute;
-            top: calc(100% + 8px);
-            right: 0;
-            width: min(360px, calc(100vw - 70px));
-            border-radius: 12px;
-            border: 1px solid rgba(106, 138, 184, 0.32);
-            background: rgba(12, 19, 32, 0.96);
-            box-shadow: 0 18px 48px rgba(3, 6, 16, 0.56);
-            padding: 10px;
-            display: none;
-            z-index: 5;
-        }
-        .otl-cine-record-popover.open { display: block; }
-        .otl-cine-record-pop-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-        .otl-cine-record-pop-close { background: none; border: 0; color: #b8cae6; cursor: pointer; font-size: 18px; }
-        .otl-cine-record-row {
-            display: grid;
-            grid-template-columns: 120px 1fr;
-            align-items: center;
-            gap: 8px;
-            margin-top: 7px;
-            color: #9eb2d1;
-            font-size: 12px;
-        }
-        .otl-cine-record-row select,
-        .otl-cine-record-row input[type="range"],
-        .otl-cine-record-row input[type="number"],
-        .otl-cine-record-row input[type="color"] {
-            width: 100%;
-        }
-        .otl-cine-record-check {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 12px;
-            color: #afc0da;
-            margin-top: 8px;
-        }
-        .otl-cine-record-inline {
-            display: grid;
-            grid-template-columns: 1fr auto;
-            align-items: center;
-            gap: 8px;
-        }
-        .otl-cine-record-section {
-            border: 1px solid rgba(96, 127, 170, 0.28);
-            border-radius: 14px;
-            padding: 12px;
-            background: rgba(14, 21, 36, 0.6);
-        }
-        .otl-cine-record-section-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            margin-bottom: 10px;
-            gap: 10px;
-            padding-bottom: 10px;
-            border-bottom: 1px solid rgba(102, 132, 176, 0.2);
-        }
-        .otl-cine-record-section-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: #d5e4ff; }
-        .otl-cine-record-section-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
-        .otl-cine-record-content { flex: 1; overflow: auto; padding-top: 2px; }
-        .otl-cine-record-pagination { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid rgba(96, 127, 170, 0.32); border-radius: 10px; background: rgba(11, 17, 28, 0.74); }
-        .otl-cine-record-page-btn { width: 30px; height: 30px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
-        .otl-cine-record-page-label { min-width: 62px; text-align: center; font-size: 11px; color: #a9bbd7; font-weight: 600; letter-spacing: 0.03em; }
-        .otl-cine-record-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 10px;
-        }
-        .otl-cine-record-card-item {
-            border: 1px solid rgba(90, 120, 164, 0.34);
-            border-radius: 12px;
-            background: rgba(8, 13, 24, 0.9);
-            overflow: hidden;
-        }
-        .otl-cine-record-video { width: 100%; aspect-ratio: 16 / 9; background: #000; }
-        .otl-cine-record-card-body { padding: 8px 10px 10px; display: grid; gap: 6px; }
-        .otl-cine-record-name { font-size: 13px; font-weight: 700; color: #eaf2ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .otl-cine-record-meta { font-size: 11px; color: #8ea3c2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .otl-cine-record-status {
-            justify-self: start;
-            font-size: 10px;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            color: #c8d6ed;
-            border: 1px solid rgba(118, 141, 174, 0.4);
-            padding: 2px 6px;
-            border-radius: 999px;
-        }
-        .otl-cine-record-status.processing { color: #d8b768; border-color: rgba(216, 183, 104, 0.45); }
-        .otl-cine-record-status.warn { color: #f0a1a1; border-color: rgba(240, 161, 161, 0.45); }
-        .otl-cine-record-actions { display: flex; justify-content: flex-end; }
-        .otl-cine-record-delete { border: 0; background: none; color: #c2d2ea; cursor: pointer; }
-        .otl-cine-record-status-line {
-            padding: 10px 0 2px;
-            border-top: 1px solid rgba(102, 132, 176, 0.18);
-            margin-top: 12px;
-        }
-        .otl-csv-workspace-panel.recording-lock .otl-cinematic-main,
-        .otl-csv-workspace-panel.recording-lock .otl-cinematic-bottom-dock {
-            pointer-events: none;
-            opacity: 0.78;
-        }
-        .otl-cinematic-shell.mini {
-            align-items: flex-end;
-            padding: 16px 16px 90px 96px;
-        }
-        .otl-cinematic-shell.mini .otl-csv-workspace-panel {
-            width: auto;
-            min-width: 520px;
-            height: auto;
-            padding: 14px 16px;
-        }
-        .otl-cinematic-shell.mini .otl-cinematic-main,
-        .otl-cinematic-shell.mini .otl-cinematic-header .otl-cinematic-actions {
-            display: none;
-        }
-        .otl-cinematic-shell.mini .otl-cinematic-mini {
-            display: flex;
-        }
-        @media (max-width: 1280px) {
-            .otl-cinematic-main { grid-template-columns: 280px minmax(0, 1fr); }
-            .otl-cinematic-middle { grid-template-columns: 1fr; }
-            .otl-cinematic-parameter-top,
-            .otl-cinematic-parameter-bottom { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-            .otl-cinematic-parameter-speech-row { grid-template-columns: minmax(0, 1fr) auto auto; }
-        }
-        @media (max-width: 980px) {
-            .otl-cinematic-main,
-            .otl-cinematic-right,
-            .otl-cinematic-middle,
-            .otl-cinematic-prompt-body,
-            .otl-cinematic-bgm-grid,
-            .otl-cinematic-map-split,
-            .otl-cinematic-grid-inputs { grid-template-columns: 1fr; }
-            .otl-cinematic-right { grid-template-rows: auto auto minmax(260px, 1fr); }
-            .otl-cinematic-parameter-top,
-            .otl-cinematic-parameter-bottom { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-            .otl-cinematic-parameter-speech-row { grid-template-columns: 1fr; }
-            .otl-cinematic-bgm-player,
-            .otl-cinematic-bgm-range,
-            .otl-cinematic-bgm-params { grid-template-columns: 1fr; }
-            .otl-cine-record-grid { grid-template-columns: 1fr; }
-            .otl-cine-record-title { font-size: 22px; }
-            .otl-cine-record-row { grid-template-columns: 1fr; }
-            .otl-cine-record-section-head { flex-wrap: wrap; }
-        }
-        .otl-csv-editor {
-            width: 100%;
-            min-height: 420px;
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #11131b;
-            color: var(--otl-text-main);
-            resize: vertical;
-            padding: 10px;
-            font-size: 12px;
-            line-height: 1.45;
-            outline: none;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-        }
-        .otl-csv-grid-wrap {
-            width: 100%;
-            min-height: 420px;
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #11131b;
-            overflow: auto;
-        }
-        .otl-csv-grid {
-            width: max-content;
-            min-width: 100%;
-            border-collapse: collapse;
-            font-size: 12px;
-        }
-        .otl-csv-grid th,
-        .otl-csv-grid td {
-            border-right: 1px solid #272c3a;
-            border-bottom: 1px solid #272c3a;
-            padding: 0;
-            vertical-align: top;
-            background: #11131b;
-        }
-        .otl-csv-grid th {
-            position: sticky;
-            top: 0;
-            z-index: 2;
-            background: #1a1f2c;
-            color: #aeb9d7;
-            font-weight: 700;
-            padding: 7px 8px;
-            min-width: 120px;
-        }
-        .otl-csv-grid td {
-            min-width: 120px;
-        }
-        .otl-csv-grid th.row-action,
-        .otl-csv-grid td.row-action {
-            min-width: 64px;
-            width: 64px;
-            text-align: center;
-            padding: 0;
-        }
-        .otl-csv-grid td.row-action {
-            background: #121625;
-        }
-        .otl-csv-row-tools {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            padding: 4px 4px;
-        }
-        .otl-csv-row-index {
-            color: #8fa0c8;
-            font-size: 11px;
-            min-width: 20px;
-            text-align: right;
-        }
-        .otl-csv-row-delete {
-            width: 22px;
-            height: 22px;
-            border-radius: 6px;
-            border: 1px solid #3a445e;
-            background: #171d2b;
-            color: #f08686;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0;
-        }
-        .otl-csv-row-delete:hover {
-            border-color: #e27878;
-            background: rgba(226, 120, 120, 0.16);
-        }
-        .otl-csv-row-delete svg {
-            width: 12px;
-            height: 12px;
-            stroke: currentColor;
-            fill: none;
-            stroke-width: 1.8;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        .otl-csv-grid-empty {
-            padding: 10px;
-            color: var(--otl-text-muted);
-            text-align: center;
-            font-size: 12px;
-        }
-        .otl-csv-grid-cell {
-            width: 100%;
-            min-width: 120px;
-            border: none;
-            outline: none;
-            background: transparent;
-            color: var(--otl-text-main);
-            padding: 7px 8px;
-            font-size: 12px;
-            line-height: 1.35;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-        }
-        .otl-csv-grid-cell:focus {
-            background: rgba(75, 115, 255, 0.16);
-            box-shadow: inset 0 0 0 1px rgba(75, 115, 255, 0.35);
-        }
-        .otl-csv-content-cell {
-            min-height: 31px;
-            padding: 7px 8px;
-            color: var(--otl-text-main);
-            cursor: pointer;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            max-width: 320px;
-        }
-        .otl-csv-content-cell:hover {
-            background: rgba(75, 115, 255, 0.12);
-        }
-        .otl-csv-content-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4,6,10,0.72);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10002;
-            padding: 24px;
-        }
-        .otl-csv-content-modal.hidden { display: none; }
-        .otl-csv-content-panel {
-            width: min(860px, calc(100vw - 40px));
-            border: 1px solid var(--otl-border);
-            border-radius: 10px;
-            background: #171a24;
-            box-shadow: 0 16px 36px rgba(0,0,0,0.55);
-            padding: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .otl-csv-content-input {
-            width: 100%;
-            min-height: 300px;
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #11131b;
-            color: var(--otl-text-main);
-            resize: vertical;
-            padding: 10px;
-            font-size: 13px;
-            line-height: 1.5;
-            outline: none;
-        }
-        .otl-csv-voice-tools {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex-wrap: wrap;
-        }
-        .otl-csv-toolbar {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        .otl-csv-toolbar-sep {
-            width: 1px;
-            height: 22px;
-            background: rgba(148, 163, 184, 0.18);
-            margin: 0 2px;
-        }
-        .otl-check {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            color: var(--otl-text-main);
-            font-size: 12px;
-        }
-        .otl-check input { accent-color: var(--otl-primary); }
-        .otl-voice-pill {
-            border: 1px solid var(--otl-border);
-            border-radius: 999px;
-            padding: 4px 10px;
-            background: #121723;
-            color: #cbd5e1;
-            font-size: 11px;
-        }
-        .otl-voice-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4,6,10,0.72);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10002;
-            padding: 24px;
-        }
-        .otl-voice-modal.hidden { display: none; }
-        #${PANEL_ID}.cinematic-only > .otl-voice-modal {
-            z-index: 10010;
-            background: rgba(5, 8, 16, 0.62);
-            backdrop-filter: blur(10px);
-        }
-        #${PANEL_ID}.cinematic-only > .otl-voice-modal .otl-voice-panel {
-            width: min(760px, calc(100vw - 80px));
-            max-height: min(760px, calc(100vh - 80px));
-            border-radius: 18px;
-            border: 1px solid rgba(52, 72, 118, 0.56);
-            background: linear-gradient(180deg, rgba(10,14,24,0.98), rgba(7,10,19,0.98));
-            box-shadow: 0 24px 48px rgba(0,0,0,0.42);
-            padding: 20px;
-            gap: 14px;
-        }
-        .otl-voice-modal.workspace-local {
-            position: absolute;
-            inset: 0;
-            background: transparent;
-            align-items: flex-start;
-            justify-content: flex-end;
-            z-index: 34;
-            padding: 72px 18px 18px;
-            pointer-events: none;
-        }
-        .otl-voice-modal.workspace-local .otl-voice-panel {
-            width: min(760px, calc(100% - 24px));
-            max-height: calc(100% - 24px);
-            border-radius: 16px;
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            background:
-                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
-                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
-            box-shadow: 0 22px 42px rgba(0,0,0,0.36);
-            padding: 18px;
-            gap: 12px;
-            pointer-events: auto;
-        }
-        .otl-voice-panel {
-            width: min(520px, calc(100vw - 32px));
-            max-height: min(720px, calc(100vh - 32px));
-            overflow: auto;
-            border: 1px solid var(--otl-border);
-            border-radius: 12px;
-            background: #171a24;
-            box-shadow: 0 16px 36px rgba(0,0,0,0.55);
-            padding: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .otl-config-modal {
-            position: fixed;
-            inset: 0;
-            background: rgba(4,6,10,0.72);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            z-index: 10002;
-            padding: 24px;
-        }
-        .otl-config-modal.hidden { display: none; }
-        .otl-config-modal.workspace-local {
-            position: absolute;
-            inset: 0;
-            background: transparent;
-            align-items: flex-start;
-            justify-content: flex-end;
-            z-index: 34;
-            padding: 72px 18px 18px;
-            pointer-events: none;
-        }
-        .otl-config-modal.workspace-local .otl-config-panel {
-            width: min(420px, calc(100% - 24px));
-            max-height: calc(100% - 24px);
-            border-radius: 16px;
-            border: 1px solid rgba(56, 61, 86, 0.95);
-            background:
-                radial-gradient(circle at top left, rgba(94, 104, 165, 0.14), transparent 26%),
-                linear-gradient(180deg, rgba(18,19,27,0.985), rgba(11,12,17,0.99));
-            box-shadow: 0 22px 42px rgba(0,0,0,0.36);
-            padding: 16px;
-            pointer-events: auto;
-        }
-        .otl-config-panel {
-            width: min(420px, calc(100vw - 32px));
-            border: 1px solid var(--otl-border);
-            border-radius: 12px;
-            background: #171a24;
-            box-shadow: 0 16px 36px rgba(0,0,0,0.55);
-            padding: 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        .otl-config-stat {
-            border: 1px solid var(--otl-border);
-            border-radius: 10px;
-            background: #11131b;
-            padding: 10px 12px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            gap: 10px;
-        }
-        .otl-config-stat strong {
-            color: var(--otl-text-main);
-            font-size: 14px;
-        }
-        .otl-voice-list {
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            max-height: 420px;
-            overflow: auto;
-            padding-right: 4px;
-        }
-        .otl-voice-group-title {
-            color: var(--otl-text-muted);
-            font-size: 11px;
-            margin-top: 8px;
-        }
-        .otl-voice-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 10px;
-            border: 1px solid var(--otl-border);
-            border-radius: 8px;
-            background: #11131b;
-        }
-        .otl-voice-item-main {
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-        }
-        .otl-voice-code {
-            color: var(--otl-text-muted);
-            font-size: 11px;
-        }
-        .otl-toolbar-title {
-            font-size: 11px;
-            color: var(--otl-text-muted);
-            margin-right: 4px;
-        }
-        .otl-muted { color: var(--otl-text-muted); font-size: 11px; }
-        .otl-hidden { display: none !important; }
-        @media (max-width: 980px) {
-            #${PANEL_ID} {
-                right: 8px;
-                top: 72px;
-                width: min(460px, calc(100vw - 16px));
-                height: fit-content;
-                max-height: calc(100vh - 82px);
-            }
-            .otl-map-grid { grid-template-columns: 1fr; }
-            .otl-settings-panel { width: min(760px, calc(100vw - 16px)); }
-            .otl-poi-row-top { flex-wrap: wrap; }
-            .otl-poi-row-bottom { flex-direction: column; height: auto; }
-            .otl-poi-preview { width: 100%; height: 140px; }
-            .otl-provider-tabs { grid-template-columns: 1fr; }
-            .otl-csv-workspace-panel { width: min(1080px, calc(100vw - 16px)); }
-            .otl-csv-workspace-grid { grid-template-columns: 1fr; min-height: 0; }
-            .otl-csv-version-list { max-height: 180px; }
-            .otl-csv-grid-wrap { min-height: 260px; }
-            .otl-csv-editor { min-height: 260px; }
-        }
-    `;
-    if (!existing) document.head.appendChild(style);
-};
-
-const escapeCsv = (value: string | number) => {
-    const text = String(value ?? '');
-    if (!/[",\n]/.test(text)) return text;
-    return `"${text.replace(/"/g, '""')}"`;
-};
-
-const escapeHtmlAttr = (value: string | number) => String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-const countSpeechChars = (value: string) => (String(value || '').match(/[\u3400-\u9fffA-Za-z0-9]/g) || []).length;
-
-const normalizeCsvVoiceConfig = (config?: Partial<CsvVoiceConfigState> | null): CsvVoiceConfigState => {
-    const model = TTS_VOICE_OPTIONS_BY_MODEL[String(config?.model || '').trim()]
-        ? String(config?.model || '').trim()
-        : DEFAULT_TTS_MODEL;
-    const options = TTS_VOICE_OPTIONS_BY_MODEL[model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
-    const fixedVoice = options.some((item) => item.value === String(config?.fixedVoice || '').trim())
-        ? String(config?.fixedVoice || '').trim()
-        : (options.find((item) => item.value === DEFAULT_TTS_VOICE)?.value || options[0]?.value || DEFAULT_TTS_VOICE);
-    const voicePool = Array.isArray(config?.voicePool)
-        ? Array.from(new Set(config.voicePool.map((item) => String(item || '').trim()).filter((item) => options.some((opt) => opt.value === item))))
-        : [];
-    const enabled = Boolean(config?.enabled);
-    return {
-        enabled,
-        mode: enabled && voicePool.length > 0 ? 'shuffle_round_robin' : 'fixed',
-        model,
-        fixedVoice,
-        voicePool
-    };
-};
-
-const summarizeCsvVoiceConfig = (config: CsvVoiceConfigState) => {
-    if (!config.enabled || config.voicePool.length < 1) return `固定声音: ${config.fixedVoice}`;
-    return `洗牌轮询: ${config.voicePool.length} voices`;
-};
-
-const normalizeCsvTimingConfig = (config?: Partial<CsvTimingConfigState> | null): CsvTimingConfigState => {
-    const targetDurationSec = Math.max(5, Math.min(900, Number(config?.targetDurationSec) || DEFAULT_CSV_TARGET_DURATION_SEC));
-    return {
-        enabled: Boolean(config?.enabled),
-        targetDurationSec
-    };
-};
-
-const formatCsvTimingSummary = (summary?: CsvTimingSummary | null) => {
-    if (!summary?.enabled) return '';
-    const target = Number(summary.targetDurationSec).toFixed(summary.targetDurationSec % 1 === 0 ? 0 : 1);
-    const estimated = typeof summary.estimatedDurationSec === 'number' && Number.isFinite(summary.estimatedDurationSec)
-        ? `预计 ${summary.estimatedDurationSec.toFixed(1)}s`
-        : '';
-    const minimum = typeof summary.minimumAchievableSec === 'number' && Number.isFinite(summary.minimumAchievableSec)
-        ? `最短 ${summary.minimumAchievableSec.toFixed(1)}s`
-        : '';
-    return [
-        `目标 ${target}s`,
-        estimated,
-        minimum
-    ].filter(Boolean).join(' | ');
-};
-
-const isAudioFileName = (value: string) => /\.(mp3|wav|m4a|aac|ogg|flac)$/i.test(String(value || '').trim());
-
-const clampMusicRate = (value: number) => clamp(Number.isFinite(value) ? value : 1, 0.5, 2);
-
-const normalizeMusicDuration = (value: number | null | undefined) => {
-    if (!Number.isFinite(Number(value))) return null;
-    const n = Number(value);
-    if (n <= 0) return null;
-    return clamp(n, 0.2, 600);
-};
-
-const formatSecondsLabel = (value: number) => {
-    const sec = Math.max(0, Number(value) || 0);
-    const m = Math.floor(sec / 60);
-    const s = sec - m * 60;
-    return `${m}:${s.toFixed(2).padStart(5, '0')}`;
-};
-
-const cinematicBgmEffectiveRate = (bgm: Pick<CinematicBgmConfig, 'audioStartSeconds' | 'audioEndSeconds' | 'audioPlaybackRate' | 'targetMusicDurationSeconds'>) => {
-    const clipDuration = Math.max(0.001, Number(bgm.audioEndSeconds || 0) - Number(bgm.audioStartSeconds || 0));
-    const target = normalizeMusicDuration(bgm.targetMusicDurationSeconds);
-    if (target) return clampMusicRate(clipDuration / Math.max(0.001, target));
-    return clampMusicRate(Number(bgm.audioPlaybackRate) || 1);
-};
-
-const describeTimingValue = (value: number | null | undefined) => {
-    if (typeof value !== 'number' || !Number.isFinite(value)) return '尚未计算';
-    return `${value.toFixed(1)}s`;
-};
-
-class TourLoaderPanel implements TourLoaderController {
+class CinematicWorkspacePanel implements CinematicWorkspaceController {
     private readonly root: HTMLDivElement;
     private readonly topCanvas: HTMLCanvasElement;
     private readonly frontCanvas: HTMLCanvasElement;
@@ -3191,8 +210,13 @@ class TourLoaderPanel implements TourLoaderController {
     private readonly cinematicWorkspacePanel: HTMLDivElement;
     private readonly cinematicVersionListEl: HTMLDivElement;
     private readonly cinematicStatusEl: HTMLDivElement;
+    private readonly cinematicPoiPickerModal: HTMLDivElement;
     private readonly cinematicPoiListEl: HTMLDivElement;
     private readonly cinematicTimelineEl: HTMLDivElement;
+    private cinematicTimelineTrackWrapEl: HTMLDivElement | null = null;
+    private cinematicTimelineRulerWrapEl: HTMLDivElement | null = null;
+    private cinematicTimelinePlayheadEl: HTMLDivElement | null = null;
+    private cinematicTimelineScrollLeft = 0;
     private readonly cinematicKeyframeModal: HTMLDivElement;
     private readonly cinematicKeyframeEditorBodyEl: HTMLDivElement;
     private readonly cinematicShotModal: HTMLDivElement;
@@ -3238,8 +262,8 @@ class TourLoaderPanel implements TourLoaderController {
     private readonly cinematicBgmEffectiveRateEl: HTMLDivElement;
     private readonly cinematicRecordingModalEl: HTMLDivElement;
     private readonly cinematicRecordBtn: HTMLButtonElement;
-    private readonly cinematicRecordPauseBtn: HTMLButtonElement;
-    private readonly cinematicRecordStopBtn: HTMLButtonElement;
+    private readonly cinematicRecordPauseBtn: HTMLButtonElement | null;
+    private readonly cinematicRecordStopBtn: HTMLButtonElement | null;
     private readonly cinematicRecordTimerEl: HTMLSpanElement;
     private readonly cinematicRecordingModalStatusEl: HTMLDivElement;
     private readonly cinematicRecordingFrameRateSelect: HTMLSelectElement;
@@ -3270,6 +294,7 @@ class TourLoaderPanel implements TourLoaderController {
     private readonly stopBtn: HTMLButtonElement;
     private readonly playToggleBtn: HTMLButtonElement;
     private readonly globalSaveBtn: HTMLButtonElement;
+    private readonly hotspotController: HotspotController;
 
     private modelFilename: string | null = null;
     private modelReady = false;
@@ -3285,7 +310,7 @@ class TourLoaderPanel implements TourLoaderController {
     private drag: {
         active: boolean;
         pointerId: number;
-        mode: 'top-pan' | 'front-pan' | 'top-yaw' | 'front-pitch' | 'front-move' | null;
+        mode: 'top-pan' | 'front-pan' | 'top-yaw' | 'front-pitch' | 'front-move' | 'top-move' | null;
         startX: number;
         startY: number;
     } = { active: false, pointerId: -1, mode: null, startX: 0, startY: 0 };
@@ -3338,6 +363,7 @@ class TourLoaderPanel implements TourLoaderController {
     private cinematicStyleText = 'cinematic one take';
     private cinematicTargetDurationSec = 14;
     private cinematicSelectedPoiIds: string[] = [];
+    private cinematicPoiDraftIds: string[] = [];
     private cinematicPlan: CinematicPlan | null = null;
     private cinematicWorkspaceDrag = { active: false, dragging: false, pointerId: -1, startX: 0, startY: 0, left: 0, top: 0 };
     private cinematicWorkspaceFloatPos = { left: 0, top: 0, initialized: false };
@@ -3345,7 +371,6 @@ class TourLoaderPanel implements TourLoaderController {
     private cinematicMiniMode = false;
     private cinematicHideRootOnClose = false;
     private cinematicShowRouteOverlay = false;
-    private cinematicPoiExpanded = false;
     private cinematicBgmLibrary: CinematicBgmLibraryItem[] = [];
     private cinematicBgmFilter = '';
     private cinematicBgmSelection: CinematicBgmConfig | null = null;
@@ -3357,6 +382,7 @@ class TourLoaderPanel implements TourLoaderController {
     private cinematicBgmAudioDurationSec = 0;
     private cinematicBgmClipPreviewPlaying = false;
     private cinematicBgmObjectUrls: string[] = [];
+    private cinematicBgmHandleDbPromise: Promise<IDBDatabase> | null = null;
     private cinematicBgmWaveDrag = { active: false, pointerId: -1, mode: 'range' as 'range' | 'start' | 'end', anchorSec: 0 };
     private cinematicBgmTimelineSelected = false;
     private selectedCinematicShotId: string | null = null;
@@ -3465,8 +491,25 @@ class TourLoaderPanel implements TourLoaderController {
     private lastLiveDrawAt = 0;
     private lastLivePose: CameraPose | null = null;
 
-    constructor(private readonly options: TourLoaderOptions) {
+    constructor(private readonly options: CinematicWorkspaceOptions) {
         ensureStyle();
+        this.hotspotController = createHotspotController({
+            getModelFilename: () => this.modelFilename,
+            getPoiById: (poiId: string) => this.pois.find((poi) => poi.poiId === poiId) || null,
+            moveToPoi: async (poiId: string) => {
+                const poi = this.pois.find((item) => item.poiId === poiId);
+                if (!poi) return;
+                await this.moveToPoi(poi, 1);
+                this.hotspotController.activatePoi(poiId);
+            },
+            captureScreenshotPng: this.options.captureScreenshotPng,
+            saveState: (reason: string) => this.saveState(reason),
+            setStatus: (text: string) => this.setStatus(text),
+            pickWorldPointAtScreen: this.options.pickWorldPointAtScreen,
+            projectWorldToScreen: this.options.projectWorldToScreen,
+            resolveAssetUrl: this.options.resolveAssetUrl,
+            showEmbeddedMedia: this.options.showEmbeddedMedia
+        });
         this.root = document.createElement('div');
         this.root.id = PANEL_ID;
         this.root.className = 'hidden';
@@ -3753,25 +796,34 @@ class TourLoaderPanel implements TourLoaderController {
             <div class="otl-settings-modal otl-cinematic-shell hidden" data-role="cinematic-workspace-modal">
                 <div class="otl-csv-workspace-panel" data-role="cinematic-workspace-panel">
                     <div class="otl-cinematic-header otl-csv-workspace-drag-handle" data-role="cinematic-workspace-drag-handle">
-                        <div class="otl-cinematic-brand"><span class="otl-cinematic-badge">CINE</span><div class="otl-cinematic-title-group"><span class="otl-cinematic-title">Cinematic Workspace</span><button class="otl-cinematic-mini-toggle" data-act="cinematic-mini-mode" type="button">Mini</button></div></div>
+                        <div class="otl-cinematic-header-left">
+                            <div class="otl-cinematic-brand"><span class="otl-cinematic-badge">CINE</span><div class="otl-cinematic-title-group"><button class="otl-cinematic-mini-toggle" data-act="cinematic-mini-mode" type="button">Mini</button></div></div>
+                            <div class="otl-cinematic-playbar">
+                                <button class="otl-cinematic-icon-btn primary" data-act="cinematic-preview-toggle" title="预览 (Preview)">${CINE_ICON_PLAY}</button>
+                                <button class="otl-cinematic-icon-btn" data-act="cinematic-preview-stop" title="停止 (Stop)">${CINE_ICON_STOP}</button>
+                                <select class="otl-cinematic-speed-select" data-role="cinematic-playback-speed">
+                                    <option value="0.5">0.5x</option>
+                                    <option value="1" selected>1.0x</option>
+                                    <option value="1.5">1.5x</option>
+                                    <option value="2">2.0x</option>
+                                </select>
+                                <button class="otl-cine-record-btn" data-act="cinematic-record-open" title="录制 (Record)"><span class="dot"></span><span>Rec</span></button>
+                                <span class="otl-cine-record-timer" data-role="cinematic-record-timer"></span>
+                            </div>
+                        </div>
                         <div class="otl-cinematic-actions">
-                            <span class="otl-cine-record-timer" data-role="cinematic-record-timer"></span>
-                            <button class="otl-cine-record-btn" data-act="cinematic-record-open" title="录制 (Record)"><span class="dot"></span><span>Rec</span></button>
-                            <button class="otl-cine-record-btn hidden" data-act="cinematic-record-pause" title="Pause recording"><span>Pause</span></button>
-                            <button class="otl-cine-record-btn hidden" data-act="cinematic-record-stop" title="Stop recording"><span>Stop</span></button>
+                            <button class="otl-cinematic-icon-btn" data-act="cinematic-open-bgm" title="背景音乐 (BGM)">${CINE_ICON_MUSIC}</button>
                             <button class="otl-cinematic-icon-btn" data-act="cinematic-open-keyframe-editor" title="关键帧 (Key Frame)">${CINE_ICON_MAP}</button>
                             <button class="otl-cinematic-icon-btn" data-act="cinematic-open-shot-editor" title="镜头/场景 (Shot)">${CINE_ICON_SLIDERS}</button>
-                            <button class="otl-cinematic-icon-btn" data-act="cinematic-open-bgm" title="背景音乐 (BGM)">${CINE_ICON_MUSIC}</button>
-                            <button class="otl-cinematic-icon-btn" data-act="csv-voice-config" title="文本转语音 (TTS)">${CINE_ICON_TTS}</button>
-                            <button class="otl-cinematic-icon-btn" data-act="cinematic-preview" title="预览 (Preview)">${CINE_ICON_PLAY}</button>
                             <button class="otl-cinematic-icon-btn" data-act="cinematic-save" title="保存 (Save)">${CINE_ICON_SAVE}</button>
                             <button class="otl-cinematic-icon-btn" data-act="cinematic-save-new" title="保存新版本 (Save Version)">${CINE_ICON_SAVE_AS}</button>
                             <button class="otl-cinematic-icon-btn primary" data-act="cinematic-open-cw-csv" title="生成 CSV (Generate CSV)">${CINE_ICON_COMPILE}</button>
+                            <button class="otl-cinematic-icon-btn" data-act="csv-voice-config" title="文本转语音 (TTS)">${CINE_ICON_TTS}</button>
                             <button class="otl-cinematic-icon-btn" data-act="cinematic-workspace-fullscreen" title="Fullscreen">${CSV_ICON_FULLSCREEN}</button>
                             <button class="otl-cinematic-icon-btn" data-act="cinematic-workspace-close" title="Close">${CSV_ICON_CLOSE}</button>
                         </div>
-                        <div class="otl-cinematic-mini">
-                            <button class="otl-cinematic-mini-play" data-act="cinematic-mini-play" title="Play or Pause">${CINE_ICON_PLAY}</button>
+                        <div class="otl-cinematic-mini" style="display:none;">
+                            <button class="otl-cinematic-mini-play" data-act="cinematic-preview-toggle" title="Play or Pause">${CINE_ICON_PLAY}</button>
                             <div class="otl-cinematic-mini-timeline" data-role="cinematic-mini-timeline"></div>
                             <div class="otl-cinematic-mini-time" data-role="cinematic-mini-time">0.0s</div>
                         </div>
@@ -3780,7 +832,7 @@ class TourLoaderPanel implements TourLoaderController {
                         <div class="otl-cinematic-left">
                             <div class="otl-cinematic-pane">
                                 <div class="otl-cinematic-section-head">
-                                    <div class="otl-cinematic-section-title"><span class="otl-cinematic-step-badge">HISTORY</span><span>Versions</span></div>
+                                    <div class="otl-cinematic-section-title"><span>Versions</span></div>
                                     <div class="otl-cinematic-subactions">
                                         <button class="otl-cinematic-icon-btn" data-act="cinematic-version-refresh" title="Refresh Versions">${CINE_ICON_REFRESH}</button>
                                         <button class="otl-cinematic-icon-btn" data-act="cinematic-version-delete" title="Delete Current Version">${CSV_ICON_DELETE}</button>
@@ -3790,8 +842,9 @@ class TourLoaderPanel implements TourLoaderController {
                             </div>
                             <div class="otl-cinematic-pane control-pane">
                                 <div class="otl-cinematic-section-head">
-                                    <div class="otl-cinematic-section-title"><span class="otl-cinematic-step-badge">STEP 1</span><span>POIs</span></div>
+                                    <div class="otl-cinematic-section-title"><span>Create</span></div>
                                     <div class="otl-cinematic-subactions">
+                                        <button class="otl-cinematic-icon-btn" data-act="cinematic-open-poi-picker" title="Select POIs">${CINE_ICON_LIST}</button>
                                         <button class="otl-cinematic-icon-btn" data-act="cinematic-open-simple-prompt" title="Open Simple Prompt">${CINE_ICON_GEAR}</button>
                                         <button class="otl-cinematic-icon-btn" data-act="cinematic-generate-prompt" title="Generate Prompt">${CINE_ICON_MAGIC}</button>
                                         <button class="otl-cinematic-icon-btn" data-act="cinematic-open-complex-prompt" title="Open Complex Prompt">${CINE_ICON_GEAR}</button>
@@ -3802,10 +855,6 @@ class TourLoaderPanel implements TourLoaderController {
                                     <input class="otl-input" data-role="cinematic-duration-input" type="number" min="4" max="180" step="1" placeholder="Duration" />
                                     <button class="otl-btn primary" data-act="cinematic-generate-plan">Generate Timeline</button>
                                     </div>
-                                <div class="otl-cinematic-poi-box">
-                                    <button class="otl-cinematic-poi-trigger" type="button" data-act="cinematic-toggle-pois"><span>SELECT POI</span><span data-role="cinematic-poi-chevron">${CINE_ICON_CHEVRON}</span></button>
-                                    <div class="otl-cinematic-poi-items" data-role="cinematic-poi-list"></div>
-                                </div>
                                 <div style="display:none;">
                                     <textarea class="otl-prompt-input" data-role="cinematic-simple-prompt"></textarea>
                                     <textarea class="otl-prompt-input" data-role="cinematic-planner-prompt"></textarea>
@@ -3815,20 +864,19 @@ class TourLoaderPanel implements TourLoaderController {
                                     <textarea data-role="cinematic-story-input"></textarea>
                                     <input data-role="cinematic-style-input" />
                                 </div>
-                                <div class="otl-muted" data-role="cinematic-workspace-status" style="margin-top:12px;">Ready</div>
+                                <div class="otl-muted otl-cinematic-create-status" data-role="cinematic-workspace-status">Ready</div>
                             </div>
                         </div>
                         <div class="otl-cinematic-right">
                             <div class="otl-cinematic-middle">
                                 <div class="otl-cinematic-pane map-pane">
                                     <div class="otl-cinematic-map-meta">
-                                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_MAP}</span><span>Map View</span></div>
-                                        <div class="otl-cinematic-map-actions"><div class="otl-cinematic-map-current" data-role="cinematic-current-kf-label">K1 (t=0.00s)</div><button class="otl-cinematic-route-toggle" data-act="cinematic-toggle-route" type="button">Route Off</button></div>
+                                        <div class="otl-cinematic-section-title"><span>Map View</span></div>
                                     </div>
                                     <div class="otl-cinematic-map-split">
                                         <div class="otl-map-box otl-cinematic-map-box">
                                             <div class="otl-map-label">TopView (position + yaw)</div>
-                                            <canvas width="260" height="210" data-role="cinematic-top-canvas"></canvas>
+                                            <canvas width="260" height="146" data-role="cinematic-top-canvas"></canvas>
                                             <div class="otl-map-controls">
                                                 <button class="otl-icon-btn" data-act="cinematic-top-zoom-in" title="Top Zoom In">+</button>
                                                 <button class="otl-icon-btn" data-act="cinematic-top-zoom-out" title="Top Zoom Out">−</button>
@@ -3837,7 +885,7 @@ class TourLoaderPanel implements TourLoaderController {
                                         </div>
                                         <div class="otl-map-box otl-cinematic-map-box">
                                             <div class="otl-map-label">FrontView (pitch)</div>
-                                            <canvas width="260" height="210" data-role="cinematic-front-canvas"></canvas>
+                                            <canvas width="260" height="146" data-role="cinematic-front-canvas"></canvas>
                                             <div class="otl-map-controls">
                                                 <button class="otl-icon-btn" data-act="cinematic-front-zoom-in" title="Front Zoom In">+</button>
                                                 <button class="otl-icon-btn" data-act="cinematic-front-zoom-out" title="Front Zoom Out">−</button>
@@ -3845,6 +893,7 @@ class TourLoaderPanel implements TourLoaderController {
                                             </div>
                                         </div>
                                     </div>
+                                    <div class="otl-cinematic-map-footer"><div class="otl-cinematic-map-actions"><div class="otl-cinematic-map-current" data-role="cinematic-current-kf-label">K1 (t=0.00s)</div><button class="otl-cinematic-route-toggle" data-act="cinematic-toggle-route" type="button">Route Off</button></div></div>
                                 </div>
                                 <div class="otl-cinematic-pane preview-pane">
                                     <div class="otl-cinematic-map-meta">
@@ -3855,13 +904,13 @@ class TourLoaderPanel implements TourLoaderController {
                                             <img data-role="cinematic-preview-image" alt="Current camera preview" />
                                         </div>
                                     </div>
+                                    <div class="otl-cinematic-preview-footer-spacer" aria-hidden="true"></div>
                                 </div>
                             </div>
                         </div>
                         <div class="otl-cinematic-bottom-dock">
                             <div class="otl-cinematic-pane timeline-pane">
                                 <div class="otl-cinematic-timeline-frame">
-                                    <div class="otl-cinematic-ruler-zoom"><button class="otl-cinematic-icon-btn" data-act="cinematic-timeline-zoom-out" title="Zoom Out">${CINE_ICON_MINUS}</button><input class="otl-cinematic-zoom-range" data-role="cinematic-timeline-zoom" type="range" min="80" max="260" step="10" value="150" /><button class="otl-cinematic-icon-btn" data-act="cinematic-timeline-zoom-in" title="Zoom In">${CINE_ICON_PLUS}</button></div>
                                     <div class="otl-cinematic-timeline" data-role="cinematic-timeline"></div>
                                 </div>
                             </div>
@@ -3870,17 +919,9 @@ class TourLoaderPanel implements TourLoaderController {
                             <div class="otl-cinematic-editor-panel">
                                 <div class="otl-cinematic-prompt-head">
                                     <div class="otl-cinematic-keyframe-head-left">
-                                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_MAP}</span><span>Key Frame</span></div>
-                                        <div class="otl-cinematic-keyframe-head-tools">
-                                            <span class="otl-cinematic-step-badge">3D Object</span>
-                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="pick" data-act="cinematic-kf-media-pick-main">Place On Main View</button>
-                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="edit" data-act="cinematic-kf-media-toggle-editor">Edit 3D Object In Main View</button>
-                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="move" data-act="cinematic-kf-media-mode-move">Move</button>
-                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="rotate" data-act="cinematic-kf-media-mode-rotate">Rotate</button>
-                                            <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="scale" data-act="cinematic-kf-media-mode-scale">Scale</button>
-                                        </div>
+                                        <div class="otl-cinematic-section-title" data-role="cinematic-keyframe-modal-title"><span>Key Frame</span></div>
                                     </div>
-                                    <button class="otl-cinematic-icon-btn" data-act="cinematic-keyframe-editor-close" title="Close">${CSV_ICON_CLOSE}</button>
+                                    <div class="otl-cinematic-subactions"><button class="otl-cinematic-icon-btn" data-act="cinematic-delete-keyframe" title="Delete Keyframe">${CSV_ICON_DELETE}</button><button class="otl-cinematic-icon-btn" data-act="cinematic-keyframe-editor-close" title="Close">${CSV_ICON_CLOSE}</button></div>
                                 </div>
                                 <div class="otl-cinematic-editor-body" data-role="cinematic-keyframe-editor-body"></div>
                             </div>
@@ -3888,8 +929,8 @@ class TourLoaderPanel implements TourLoaderController {
                         <div class="otl-cinematic-editor-modal hidden" data-role="cinematic-shot-modal">
                             <div class="otl-cinematic-editor-panel">
                                 <div class="otl-cinematic-prompt-head">
-                                    <div class="otl-cinematic-section-title"><span>${CINE_ICON_SLIDERS}</span><span>Shot / Stage</span></div>
-                                    <div class="otl-cinematic-subactions"><button class="otl-cinematic-icon-btn" data-act="cinematic-delete-keyframe" title="Delete Keyframe">${CSV_ICON_DELETE}</button><button class="otl-cinematic-icon-btn" data-act="cinematic-shot-editor-close" title="Close">${CSV_ICON_CLOSE}</button></div>
+                                    <div class="otl-cinematic-section-title"><span>${CINE_ICON_SLIDERS}</span><span>Shot</span></div>
+                                    <div class="otl-cinematic-subactions"><button class="otl-cinematic-icon-btn" data-act="cinematic-delete-shot" title="Delete Shot">${CSV_ICON_DELETE}</button><button class="otl-cinematic-icon-btn" data-act="cinematic-shot-editor-close" title="Close">${CSV_ICON_CLOSE}</button></div>
                                 </div>
                                 <div class="otl-cinematic-editor-body" data-role="cinematic-shot-editor-body"></div>
                             </div>
@@ -3955,9 +996,6 @@ class TourLoaderPanel implements TourLoaderController {
                                     <span class="otl-badge">CSV</span><span style="font-size:14px;font-weight:700;">CSV Workspace</span>
                                     <div class="otl-step-actions">
                                         <div class="otl-csv-toolbar">
-                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-timing-config" title="巡游时长限制">${CSV_ICON_TIMING}</button>
-                                            <button class="otl-icon-btn" data-act="cinematic-cw-csv-voice-config" title="TTS 声音配置">${CSV_ICON_VOICE}</button>
-                                            <span class="otl-csv-toolbar-sep"></span>
                                             <button class="otl-icon-btn primary" data-act="cinematic-cw-csv-version-generate" title="生成新版本">${CSV_ICON_GENERATE}</button>
                                             <button class="otl-icon-btn" data-act="cinematic-cw-csv-version-save" title="保存当前版本">${CSV_ICON_SAVE}</button>
                                             <button class="otl-icon-btn" data-act="cinematic-cw-csv-version-save-new" title="另存为新版本">${CSV_ICON_SAVE_AS}</button>
@@ -3977,11 +1015,9 @@ class TourLoaderPanel implements TourLoaderController {
                                     <textarea class="otl-csv-editor otl-hidden" data-role="cinematic-cw-csv-editor-input" placeholder="Generate or select a CSV version."></textarea>
                                 </div>
                                 <div class="otl-row" style="justify-content:space-between;">
-                                    <div class="otl-csv-voice-tools">
-                                        <div class="otl-muted" data-role="cinematic-cw-csv-workspace-status">Ready</div>
-                                        <div class="otl-voice-pill" data-role="cinematic-cw-csv-voice-summary">固定声音: ${DEFAULT_TTS_VOICE}</div>
-                                    </div>
-                                    <div class="otl-muted" data-role="cinematic-cw-csv-timing-summary">Timing: default generation</div>
+                                    <div class="otl-muted" data-role="cinematic-cw-csv-workspace-status">Ready</div>
+                                    <div class="otl-voice-pill otl-hidden" data-role="cinematic-cw-csv-voice-summary">固定声音: ${DEFAULT_TTS_VOICE}</div>
+                                    <div class="otl-muted otl-hidden" data-role="cinematic-cw-csv-timing-summary">Timing: default generation</div>
                                 </div>
                             </div>
                         </div>
@@ -4054,6 +1090,21 @@ class TourLoaderPanel implements TourLoaderController {
                                 <button class="otl-btn" data-act="cinematic-simple-prompt-update">Update Current</button>
                                 <button class="otl-btn primary" data-act="cinematic-simple-prompt-save-new">Save as New Version</button>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="otl-cinematic-prompt-modal hidden" data-role="cinematic-poi-picker-modal">
+                <div class="otl-cinematic-prompt-panel" style="max-width:420px;">
+                    <div class="otl-cinematic-prompt-head">
+                        <div class="otl-cinematic-section-title"><span>${CINE_ICON_LIST}</span><span>Select POIs</span></div>
+                        <button class="otl-cinematic-icon-btn" data-act="cinematic-poi-picker-close" title="Close">${CSV_ICON_CLOSE}</button>
+                    </div>
+                        <div class="otl-cinematic-prompt-body" style="display:block;">
+                        <div class="otl-cinematic-poi-items otl-cinematic-poi-picker-list" data-role="cinematic-poi-list"></div>
+                            <div class="otl-cinematic-prompt-footer" style="margin-top:16px;">
+                            <button class="otl-btn" data-act="cinematic-poi-picker-cancel">Cancel</button>
+                            <button class="otl-btn primary" data-act="cinematic-poi-picker-save">Done</button>
                         </div>
                     </div>
                 </div>
@@ -4144,7 +1195,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.poiSelect = this.root.querySelector('[data-role="poi-select"]') as HTMLSelectElement;
         this.poiNameInput = this.root.querySelector('[data-role="poi-name"]') as HTMLInputElement;
         this.speedSelect = this.root.querySelector('[data-role="speed"]') as HTMLSelectElement;
-        this.playbackSpeedSelect = this.root.querySelector('[data-role="playback-speed"]') as HTMLSelectElement;
+        this.playbackSpeedSelect = this.root.querySelector('[data-role="cinematic-playback-speed"]') as HTMLSelectElement;
         this.statusEl = this.root.querySelector('[data-role="status"]') as HTMLDivElement;
         this.runStatusEl = this.root.querySelector('[data-role="run-status"]') as HTMLSpanElement;
         this.poiListEl = this.root.querySelector('[data-role="poi-list"]') as HTMLDivElement;
@@ -4216,6 +1267,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicWorkspacePanel = this.root.querySelector('[data-role="cinematic-workspace-panel"]') as HTMLDivElement;
         this.cinematicVersionListEl = this.root.querySelector('[data-role="cinematic-version-list"]') as HTMLDivElement;
         this.cinematicStatusEl = this.root.querySelector('[data-role="cinematic-workspace-status"]') as HTMLDivElement;
+        this.cinematicPoiPickerModal = this.root.querySelector('[data-role="cinematic-poi-picker-modal"]') as HTMLDivElement;
         this.cinematicPoiListEl = this.root.querySelector('[data-role="cinematic-poi-list"]') as HTMLDivElement;
         this.cinematicTimelineEl = this.root.querySelector('[data-role="cinematic-timeline"]') as HTMLDivElement;
         this.cinematicKeyframeModal = this.root.querySelector('[data-role="cinematic-keyframe-modal"]') as HTMLDivElement;
@@ -4233,7 +1285,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicStyleInput = this.root.querySelector('[data-role="cinematic-style-input"]') as HTMLInputElement;
         this.cinematicDurationInput = this.root.querySelector('[data-role="cinematic-duration-input"]') as HTMLInputElement;
         this.cinematicMiniToggleBtn = this.root.querySelector('[data-act="cinematic-mini-mode"]') as HTMLButtonElement;
-        this.cinematicMiniPlayBtn = this.root.querySelector('[data-act="cinematic-mini-play"]') as HTMLButtonElement;
+        this.cinematicMiniPlayBtn = this.root.querySelector('.otl-cinematic-mini [data-act="cinematic-preview-toggle"]') as HTMLButtonElement;
         this.cinematicMiniTimelineEl = this.root.querySelector('[data-role="cinematic-mini-timeline"]') as HTMLDivElement;
         this.cinematicMiniTimeEl = this.root.querySelector('[data-role="cinematic-mini-time"]') as HTMLDivElement;
         this.cinematicSimplePromptModal = this.root.querySelector('[data-role="cinematic-simple-prompt-modal"]') as HTMLDivElement;
@@ -4263,8 +1315,8 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicBgmEffectiveRateEl = this.root.querySelector('[data-role="cinematic-bgm-effective-rate"]') as HTMLDivElement;
         this.cinematicRecordingModalEl = this.root.querySelector('[data-role="cinematic-recording-modal"]') as HTMLDivElement;
         this.cinematicRecordBtn = this.root.querySelector('[data-act="cinematic-record-open"]') as HTMLButtonElement;
-        this.cinematicRecordPauseBtn = this.root.querySelector('[data-act="cinematic-record-pause"]') as HTMLButtonElement;
-        this.cinematicRecordStopBtn = this.root.querySelector('[data-act="cinematic-record-stop"]') as HTMLButtonElement;
+        this.cinematicRecordPauseBtn = this.root.querySelector('[data-act="cinematic-record-pause"]') as HTMLButtonElement | null;
+        this.cinematicRecordStopBtn = this.root.querySelector('[data-act="cinematic-record-stop"]') as HTMLButtonElement | null;
         this.cinematicRecordTimerEl = this.root.querySelector('[data-role="cinematic-record-timer"]') as HTMLSpanElement;
         this.cinematicRecordingModalStatusEl = this.root.querySelector('[data-record="modal-status"]') as HTMLDivElement;
         this.cinematicRecordingFrameRateSelect = this.root.querySelector('[data-record="frame-rate"]') as HTMLSelectElement;
@@ -4400,6 +1452,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicCwCsvContentModal.classList.add('hidden');
         this.cinematicSimplePromptModal.classList.add('hidden');
         this.cinematicComplexPromptModal.classList.add('hidden');
+        this.cinematicPoiPickerModal.classList.add('hidden');
         this.closeCinematicBgmModal();
         this.closeCinematicEditors();
         this.csvVoiceModal.classList.add('hidden');
@@ -4446,6 +1499,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicRecordingModalEl.classList.add('hidden');
         this.closeCinematicBgmModal();
         this.stopPlayback();
+        this.hotspotController.closePresentations();
         this.closeCsvExportEventStream();
         if (this.cinematicWorkspaceModal.classList.contains('hidden')) this.stopLiveDrawLoop();
     }
@@ -4455,7 +1509,7 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private apiBase() {
-        return this.options.apiBaseUrl || 'http://localhost:3031/api/ot-tour-loader';
+        return this.options.apiBaseUrl || 'http://localhost:3032/api/ot-cinematic-workspace';
     }
 
     private resolveAsset(value: string) {
@@ -4603,15 +1657,15 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private logDebug(scope: string, text: string) {
-        const line = `[${new Date().toISOString()}] [OT_TourLoader] ${scope}: ${text}`;
+        const line = `[${new Date().toISOString()}] [OT_CinematicWorkspace] ${scope}: ${text}`;
         const w = window as Window & {
             __otStep3Debug?: Record<string, Array<{ ts: number; text: string }>>;
         };
         if (!w.__otStep3Debug) w.__otStep3Debug = {};
-        if (!w.__otStep3Debug.otTourLoader) w.__otStep3Debug.otTourLoader = [];
-        w.__otStep3Debug.otTourLoader.push({ ts: Date.now(), text: line });
-        if (w.__otStep3Debug.otTourLoader.length > 400) {
-            w.__otStep3Debug.otTourLoader.splice(0, w.__otStep3Debug.otTourLoader.length - 400);
+        if (!w.__otStep3Debug.otCinematicWorkspace) w.__otStep3Debug.otCinematicWorkspace = [];
+        w.__otStep3Debug.otCinematicWorkspace.push({ ts: Date.now(), text: line });
+        if (w.__otStep3Debug.otCinematicWorkspace.length > 400) {
+            w.__otStep3Debug.otCinematicWorkspace.splice(0, w.__otStep3Debug.otCinematicWorkspace.length - 400);
         }
         const globalDebugBody = document.querySelector('#otw-debug [data-debug="body"]') as HTMLDivElement | null;
         if (globalDebugBody) {
@@ -4675,7 +1729,8 @@ class TourLoaderPanel implements TourLoaderController {
             screenshotDataUrl: poi.screenshotDataUrl ? String(poi.screenshotDataUrl) : '',
             screenshotUpdatedAt: poi.screenshotUpdatedAt ? String(poi.screenshotUpdatedAt) : undefined,
             contentUpdatedAt: poi.contentUpdatedAt ? String(poi.contentUpdatedAt) : undefined,
-            promptUpdatedAt: poi.promptUpdatedAt ? String(poi.promptUpdatedAt) : undefined
+            promptUpdatedAt: poi.promptUpdatedAt ? String(poi.promptUpdatedAt) : undefined,
+            hotspots: Array.isArray(poi.hotspots) ? poi.hotspots.map((item, hotspotIdx) => normalizeHotspot(item, hotspotIdx)) : []
         };
     }
 
@@ -4697,6 +1752,7 @@ class TourLoaderPanel implements TourLoaderController {
             content: '',
             ttsLang: '',
             promptTemplate: DEFAULT_PROMPT_TEMPLATE,
+            hotspots: []
         } as TourPoi;
     }
 
@@ -5134,6 +2190,7 @@ class TourLoaderPanel implements TourLoaderController {
             .forEach((poi) => {
                 const hasImage = Boolean((poi.screenshotDataUrl || '').trim());
                 const previewSrc = hasImage ? poi.screenshotDataUrl : this.placeholderImageDataUrl(poi.poiName);
+                const hotspotCount = Array.isArray(poi.hotspots) ? poi.hotspots.length : 0;
                 const card = document.createElement('div');
                 card.className = 'otl-poi-card';
                 card.setAttribute('data-poi-id', poi.poiId);
@@ -5161,6 +2218,7 @@ class TourLoaderPanel implements TourLoaderController {
                             </div>
                         </div>
                         <div class="otl-poi-actions-inline">
+                            <button class="otl-poi-icon" data-act="edit-hotspots" data-poi-id="${poi.poiId}" title="Edit Hotspots">◎</button>
                             <button class="otl-poi-icon" data-act="save-poi-row" data-poi-id="${poi.poiId}" title="Save">💾</button>
                             <button class="otl-poi-icon" data-act="delete-image" data-poi-id="${poi.poiId}" title="Delete Image">🖼</button>
                             <button class="otl-poi-icon danger" data-act="delete-poi-inline" data-poi-id="${poi.poiId}" title="Delete POI">🗑</button>
@@ -5169,6 +2227,7 @@ class TourLoaderPanel implements TourLoaderController {
                     <div class="otl-poi-row-bottom">
                         <img class="otl-poi-preview ${hasImage ? '' : 'placeholder'}" src="${previewSrc}" alt="${poi.poiName}" />
                         <div class="otl-poi-content-wrap">
+                            <div class="otl-muted" style="margin-bottom:6px;">Hotspots: ${hotspotCount}</div>
                             <textarea class="otl-poi-content" data-field="poi-content" data-poi-id="${poi.poiId}" placeholder="AI narrative content...">${poi.content || ''}</textarea>
                             <button class="otl-poi-prompt" data-act="open-prompt" data-poi-id="${poi.poiId}" title="Prompt Settings">⚙</button>
                             <button class="otl-poi-gen" data-act="generate-one" data-poi-id="${poi.poiId}" title="Generate Content">✦</button>
@@ -5342,6 +2401,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.pois.forEach((p, i) => { p.sortOrder = i; });
         if (this.selectedPoiId === poiId) this.selectedPoiId = this.pois[0]?.poiId || null;
         this.refreshPoiControls();
+        this.hotspotController.activatePoi(this.selectedPoiId);
         this.debounceSave('delete-poi-inline');
     }
 
@@ -5409,6 +2469,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.modelFilename = this.options.getModelFilename();
         if (!this.modelFilename) {
             this.stopPlayback();
+            this.hotspotController.activatePoi(null);
             this.points = [];
             this.pois = [];
             this.selectedPoiId = null;
@@ -5462,6 +2523,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.eyeHeightM = Number(data?.profile?.eyeHeightM ?? 1.65);
             this.selectedPoiId = this.pois[0]?.poiId || null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
             this.setStatus(this.pois.length > 0 ? `Loaded ${this.pois.length} POIs` : 'No saved POIs');
             this.logDebug('load', `state loaded for ${this.modelFilename}`);
         } catch (error) {
@@ -5469,6 +2531,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.pois = [];
             this.selectedPoiId = null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(null);
             this.setStatus('Map ready; failed to load saved POIs');
         }
     }
@@ -5632,6 +2695,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.playback.segmentStartMs = 0;
         this.playback.segmentDurationMs = 0;
         this.playback.dwellUntilMs = 0;
+        this.hotspotController.activatePoi(null);
         this.refreshPlaybackUi();
         if (statusText) this.setStatus(statusText);
     }
@@ -5650,6 +2714,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (list.length === 1) {
                 const onlyPoi = list[0];
                 void this.options.setLiveCameraPose?.(this.currentCameraTargetFromPoi(onlyPoi), clampFov(onlyPoi.targetFov, DEFAULT_POI_FOV));
+                this.hotspotController.activatePoi(onlyPoi.poiId, { playback: true });
                 this.playback.rafId = window.requestAnimationFrame(tick);
                 return;
             }
@@ -5657,6 +2722,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (this.playback.dwellUntilMs > now) {
                 const currentPoi = list[this.playback.index % list.length];
                 void this.options.setLiveCameraPose?.(this.currentCameraTargetFromPoi(currentPoi), clampFov(currentPoi.targetFov, DEFAULT_POI_FOV));
+                this.hotspotController.activatePoi(currentPoi.poiId, { playback: true });
                 this.playback.rafId = window.requestAnimationFrame(tick);
                 return;
             }
@@ -5691,6 +2757,7 @@ class TourLoaderPanel implements TourLoaderController {
                 this.playback.segmentDurationMs = 0;
                 this.playback.segmentStartMs = 0;
                 this.playback.dwellUntilMs = now + Math.max(80, arrived.dwellMs);
+                this.hotspotController.activatePoi(arrived.poiId, { playback: true });
             }
 
             this.playback.rafId = window.requestAnimationFrame(tick);
@@ -5709,6 +2776,8 @@ class TourLoaderPanel implements TourLoaderController {
         this.playback.segmentStartMs = 0;
         this.playback.segmentDurationMs = 0;
         this.playback.dwellUntilMs = 0;
+        const firstPoi = this.pois.slice().sort((a, b) => a.sortOrder - b.sortOrder)[0] || null;
+        this.hotspotController.activatePoi(firstPoi?.poiId || null, { playback: true });
         this.refreshPlaybackUi();
         this.setStatus('Playback started');
         this.ensurePlaybackLoop();
@@ -6237,211 +3306,51 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private parseCsvText(csvText: string) {
-        const rows: string[][] = [];
-        let row: string[] = [];
-        let cell = '';
-        let inQuotes = false;
-        const text = String(csvText || '');
-        for (let i = 0; i < text.length; i += 1) {
-            const ch = text[i];
-            if (inQuotes) {
-                if (ch === '"') {
-                    if (text[i + 1] === '"') {
-                        cell += '"';
-                        i += 1;
-                    } else {
-                        inQuotes = false;
-                    }
-                } else {
-                    cell += ch;
-                }
-                continue;
-            }
-            if (ch === '"') {
-                inQuotes = true;
-                continue;
-            }
-            if (ch === ',') {
-                row.push(cell);
-                cell = '';
-                continue;
-            }
-            if (ch === '\n') {
-                row.push(cell);
-                rows.push(row);
-                row = [];
-                cell = '';
-                continue;
-            }
-            if (ch === '\r') continue;
-            cell += ch;
-        }
-        if (cell.length > 0 || row.length > 0) {
-            row.push(cell);
-            rows.push(row);
-        }
-        if (rows.length < 1) return { headers: [], rows: [] as string[][] };
-        const headers = rows[0].map((item) => String(item || ''));
-        const width = Math.max(1, headers.length);
-        const body = rows.slice(1).map((item) => {
-            const out = item.slice(0, width).map((v) => String(v || ''));
-            while (out.length < width) out.push('');
-            return out;
-        });
-        return { headers, rows: body };
+        return parseCsvText(csvText);
     }
 
     private buildCsvTextFromGrid() {
-        if (this.csvGridHeaders.length < 1) return String(this.csvEditorInput.value || '');
-        const width = this.csvGridHeaders.length;
-        const lines: string[] = [];
-        lines.push(this.csvGridHeaders.map((item) => escapeCsv(item)).join(','));
-        this.csvGridRows.forEach((row) => {
-            const cols = row.slice(0, width).map((item) => escapeCsv(item));
-            while (cols.length < width) cols.push('');
-            lines.push(cols.join(','));
-        });
-        return lines.join('\n');
+        return buildCsvTextFromGrid(this.csvGridHeaders, this.csvGridRows, this.csvEditorInput.value);
     }
 
     private renderCsvGrid() {
-        this.csvGridTableEl.innerHTML = '';
-        if (this.csvGridHeaders.length < 1) {
-            const empty = document.createElement('div');
-            empty.className = 'otl-muted';
-            empty.style.padding = '10px';
-            empty.textContent = 'No CSV content';
-            this.csvGridWrapEl.innerHTML = '';
-            this.csvGridWrapEl.appendChild(empty);
-            return;
-        }
-        this.csvGridWrapEl.innerHTML = '';
-        this.csvGridWrapEl.appendChild(this.csvGridTableEl);
-        const head = document.createElement('thead');
-        const headRow = document.createElement('tr');
-        const rowActionTh = document.createElement('th');
-        rowActionTh.className = 'row-action';
-        rowActionTh.textContent = '#';
-        headRow.appendChild(rowActionTh);
-        this.csvGridHeaders.forEach((header) => {
-            const th = document.createElement('th');
-            th.textContent = header;
-            headRow.appendChild(th);
+        renderCsvGrid({
+            tableEl: this.csvGridTableEl,
+            wrapEl: this.csvGridWrapEl,
+            headers: this.csvGridHeaders,
+            rows: this.csvGridRows,
+            onDeleteRow: (rowIndex) => this.deleteCsvGridRow(rowIndex),
+            onEditContent: (rowIndex, colIndex) => this.openCsvContentEditor(rowIndex, colIndex),
+            onInputCell: (rowIndex, colIndex, value) => {
+                this.csvGridRows[rowIndex][colIndex] = value;
+                this.csvEditorInput.value = this.buildCsvTextFromGrid();
+                this.markCsvEditorDirty();
+            }
         });
-        head.appendChild(headRow);
-        this.csvGridTableEl.appendChild(head);
-
-        const body = document.createElement('tbody');
-        if (this.csvGridRows.length < 1) {
-            const tr = document.createElement('tr');
-            const td = document.createElement('td');
-            td.colSpan = this.csvGridHeaders.length + 1;
-            td.className = 'otl-csv-grid-empty';
-            td.textContent = 'No CSV rows';
-            tr.appendChild(td);
-            body.appendChild(tr);
-        }
-        this.csvGridRows.forEach((row, rowIndex) => {
-            const tr = document.createElement('tr');
-            const actionTd = document.createElement('td');
-            actionTd.className = 'row-action';
-            const tools = document.createElement('div');
-            tools.className = 'otl-csv-row-tools';
-            const rowNo = document.createElement('span');
-            rowNo.className = 'otl-csv-row-index';
-            rowNo.textContent = String(rowIndex + 1);
-            const delBtn = document.createElement('button');
-            delBtn.type = 'button';
-            delBtn.className = 'otl-csv-row-delete';
-            delBtn.title = `Delete row ${rowIndex + 1}`;
-            delBtn.innerHTML = CSV_ICON_DELETE;
-            delBtn.addEventListener('click', () => this.deleteCsvGridRow(rowIndex));
-            tools.appendChild(rowNo);
-            tools.appendChild(delBtn);
-            actionTd.appendChild(tools);
-            tr.appendChild(actionTd);
-            this.csvGridHeaders.forEach((headerName, colIndex) => {
-                const td = document.createElement('td');
-                const isContentCol = String(headerName || '').trim().toLowerCase() === 'content';
-                if (isContentCol) {
-                    const preview = document.createElement('div');
-                    preview.className = 'otl-csv-content-cell';
-                    preview.textContent = String(row[colIndex] || '');
-                    preview.title = 'Click to edit content';
-                    preview.addEventListener('click', () => this.openCsvContentEditor(rowIndex, colIndex));
-                    td.appendChild(preview);
-                    tr.appendChild(td);
-                    return;
-                }
-                const input = document.createElement('input');
-                input.className = 'otl-csv-grid-cell';
-                input.type = 'text';
-                input.value = String(row[colIndex] || '');
-                input.setAttribute('data-row', String(rowIndex));
-                input.setAttribute('data-col', String(colIndex));
-                input.addEventListener('input', () => {
-                    this.csvGridRows[rowIndex][colIndex] = input.value;
-                    this.csvEditorInput.value = this.buildCsvTextFromGrid();
-                    this.markCsvEditorDirty();
-                });
-                td.appendChild(input);
-                tr.appendChild(td);
-            });
-            body.appendChild(tr);
-        });
-        this.csvGridTableEl.appendChild(body);
     }
 
     private renderCsvVoiceConfig() {
-        this.csvVoiceConfig = normalizeCsvVoiceConfig(this.csvVoiceConfig);
-        const options = TTS_VOICE_OPTIONS_BY_MODEL[this.csvVoiceConfig.model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
-        this.csvVoiceEnabledInput.checked = this.csvVoiceConfig.enabled;
-        this.csvVoiceModelSelect.value = this.csvVoiceConfig.model;
-        this.csvVoiceFixedSelect.innerHTML = options.map((option) => `<option value="${option.value}">${option.label} - ${option.subtitle} (${option.value})</option>`).join('');
-        this.csvVoiceFixedSelect.value = this.csvVoiceConfig.fixedVoice;
-        const grouped = new Map<string, TtsVoiceOption[]>();
-        options.forEach((option) => {
-            const list = grouped.get(option.group) || [];
-            list.push(option);
-            grouped.set(option.group, list);
+        this.csvVoiceConfig = renderCsvVoiceConfig({
+            config: this.csvVoiceConfig,
+            enabledInput: this.csvVoiceEnabledInput,
+            modelSelect: this.csvVoiceModelSelect,
+            fixedSelect: this.csvVoiceFixedSelect,
+            listEl: this.csvVoiceListEl,
+            summaryEl: this.csvVoiceSummaryEl,
+            itemRole: 'csv-voice-item'
         });
-        this.csvVoiceListEl.innerHTML = '';
-        grouped.forEach((items, group) => {
-            const title = document.createElement('div');
-            title.className = 'otl-voice-group-title';
-            title.textContent = group;
-            this.csvVoiceListEl.appendChild(title);
-            items.forEach((option) => {
-                const label = document.createElement('label');
-                label.className = 'otl-voice-item';
-                const checked = this.csvVoiceConfig.voicePool.includes(option.value);
-                label.innerHTML = `
-                    <input type="checkbox" data-role="csv-voice-item" value="${option.value}" ${checked ? 'checked' : ''} />
-                    <div class="otl-voice-item-main">
-                        <div>${option.label} - ${option.subtitle}</div>
-                        <div class="otl-voice-code">${option.value}</div>
-                    </div>
-                `;
-                this.csvVoiceListEl.appendChild(label);
-            });
-        });
-        this.csvVoiceSummaryEl.textContent = summarizeCsvVoiceConfig(this.csvVoiceConfig);
     }
 
     private renderCsvTimingConfig() {
-        this.csvTimingConfig = normalizeCsvTimingConfig(this.csvTimingConfig);
-        this.csvTimingEnabledInput.checked = this.csvTimingConfig.enabled;
-        this.csvTimingInput.value = String(this.csvTimingConfig.targetDurationSec);
-        this.csvTimingMinimumEl.textContent = describeTimingValue(this.csvTimingSummary?.minimumAchievableSec);
-        this.csvTimingEstimatedEl.textContent = describeTimingValue(this.csvTimingSummary?.estimatedDurationSec);
-        this.csvTimingSummaryEl.textContent = this.csvTimingConfig.enabled
-            ? `Timing: ${formatCsvTimingSummary(this.csvTimingSummary || {
-                enabled: true,
-                targetDurationSec: this.csvTimingConfig.targetDurationSec,
-                minimumAchievableSec: this.csvTimingSummary?.minimumAchievableSec ?? null,
-                estimatedDurationSec: this.csvTimingSummary?.estimatedDurationSec ?? null
-            }) || `目标 ${this.csvTimingConfig.targetDurationSec}s`}`
-            : 'Timing: default generation';
+        this.csvTimingConfig = renderCsvTimingConfig({
+            config: this.csvTimingConfig,
+            enabledInput: this.csvTimingEnabledInput,
+            timingInput: this.csvTimingInput,
+            minimumEl: this.csvTimingMinimumEl,
+            estimatedEl: this.csvTimingEstimatedEl,
+            summaryEl: this.csvTimingSummaryEl,
+            summary: this.csvTimingSummary
+        });
     }
 
     private setCsvEditorText(csvText: string) {
@@ -6462,26 +3371,12 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private renderCsvVersionList() {
-        this.csvVersionListEl.innerHTML = '';
-        if (this.csvVersions.length < 1) {
-            const empty = document.createElement('div');
-            empty.className = 'otl-muted';
-            empty.textContent = 'No CSV versions yet';
-            this.csvVersionListEl.appendChild(empty);
-            return;
-        }
-        const frag = document.createDocumentFragment();
-        this.csvVersions.forEach((version) => {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = `otl-csv-version-item${version.id === this.selectedCsvVersionId ? ' active' : ''}`;
-            btn.setAttribute('data-act', 'csv-version-select');
-            btn.setAttribute('data-version-id', String(version.id));
-            const status = version.status === 'confirmed' ? 'confirmed' : 'draft';
-            btn.textContent = `v${version.versionNo} ${status} ${version.updatedAt}`;
-            frag.appendChild(btn);
+        renderCsvVersionList({
+            listEl: this.csvVersionListEl,
+            versions: this.csvVersions,
+            selectedVersionId: this.selectedCsvVersionId,
+            selectAction: 'csv-version-select'
         });
-        this.csvVersionListEl.appendChild(frag);
     }
 
     private async loadCsvVersionList(preferredVersionId?: number | null) {
@@ -6675,38 +3570,15 @@ class TourLoaderPanel implements TourLoaderController {
         }
         const csvText = await response.text();
         const current = this.selectedCsvVersion();
-        const fallbackName = `ot-tour-loader-${String(this.modelFilename || 'model').replace(/[^a-zA-Z0-9_.-]/g, '_')}-v${current?.versionNo || this.selectedCsvVersionId}.csv`;
-        const picker = (window as Window & {
-            showSaveFilePicker?: (options: {
-                suggestedName: string;
-                types: Array<{ description: string; accept: Record<string, string[]> }>;
-            }) => Promise<any>;
-        }).showSaveFilePicker;
-        if (typeof picker === 'function') {
-            try {
-                const handle = await picker({
-                    suggestedName: fallbackName,
-                    types: [{
-                        description: 'CSV file',
-                        accept: { 'text/csv': ['.csv'] }
-                    }]
-                });
-                const writable = await handle.createWritable();
-                await writable.write(csvText);
-                await writable.close();
-                this.setCsvWorkspaceStatus(`Downloaded v${current?.versionNo || this.selectedCsvVersionId}`);
-                return;
-            } catch (error) {
+        const fallbackName = `ot-cinematic-workspace-${String(this.modelFilename || 'model').replace(/[^a-zA-Z0-9_.-]/g, '_')}-v${current?.versionNo || this.selectedCsvVersionId}.csv`;
+        await downloadCsvText({
+            csvText,
+            fallbackName,
+            preferSavePicker: true,
+            onPickerFallback: (error) => {
                 this.logDebug('csv.download', `save picker fallback: ${String(error)}`);
             }
-        }
-        const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = fallbackName;
-        a.click();
-        URL.revokeObjectURL(blobUrl);
+        });
         this.setCsvWorkspaceStatus(`Downloaded v${current?.versionNo || this.selectedCsvVersionId}`);
     }
 
@@ -6776,209 +3648,51 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private parseCinematicCwCsvText(csvText: string) {
-        const rows: string[][] = [];
-        let row: string[] = [];
-        let cell = '';
-        let inQuotes = false;
-        const text = String(csvText || '');
-        for (let i = 0; i < text.length; i += 1) {
-            const ch = text[i];
-            if (inQuotes) {
-                if (ch === '"') {
-                    if (text[i + 1] === '"') {
-                        cell += '"';
-                        i += 1;
-                    } else {
-                        inQuotes = false;
-                    }
-                } else {
-                    cell += ch;
-                }
-                continue;
-            }
-            if (ch === '"') {
-                inQuotes = true;
-                continue;
-            }
-            if (ch === ',') {
-                row.push(cell);
-                cell = '';
-                continue;
-            }
-            if (ch === '\n') {
-                row.push(cell);
-                rows.push(row);
-                row = [];
-                cell = '';
-                continue;
-            }
-            if (ch === '\r') continue;
-            cell += ch;
-        }
-        if (cell.length > 0 || row.length > 0) {
-            row.push(cell);
-            rows.push(row);
-        }
-        if (rows.length < 1) return { headers: [], rows: [] as string[][] };
-        const headers = rows[0].map((item) => String(item || ''));
-        const width = Math.max(1, headers.length);
-        const body = rows.slice(1).map((item) => {
-            const out = item.slice(0, width).map((v) => String(v || ''));
-            while (out.length < width) out.push('');
-            return out;
-        });
-        return { headers, rows: body };
+        return parseCsvText(csvText);
     }
 
     private buildCinematicCwCsvTextFromGrid() {
-        if (this.cinematicCwCsvGridHeaders.length < 1) return String(this.cinematicCwCsvEditorInput.value || '');
-        const width = this.cinematicCwCsvGridHeaders.length;
-        const lines: string[] = [];
-        lines.push(this.cinematicCwCsvGridHeaders.map((item) => escapeCsv(item)).join(','));
-        this.cinematicCwCsvGridRows.forEach((row) => {
-            const cols = row.slice(0, width).map((item) => escapeCsv(item));
-            while (cols.length < width) cols.push('');
-            lines.push(cols.join(','));
-        });
-        return lines.join('\n');
+        return buildCsvTextFromGrid(this.cinematicCwCsvGridHeaders, this.cinematicCwCsvGridRows, this.cinematicCwCsvEditorInput.value);
     }
 
     private renderCinematicCwCsvGrid() {
-        this.cinematicCwCsvGridTableEl.innerHTML = '';
-        if (this.cinematicCwCsvGridHeaders.length < 1) {
-            const empty = document.createElement('div');
-            empty.className = 'otl-muted';
-            empty.style.padding = '10px';
-            empty.textContent = 'No CSV content';
-            this.cinematicCwCsvGridWrapEl.innerHTML = '';
-            this.cinematicCwCsvGridWrapEl.appendChild(empty);
-            return;
-        }
-        this.cinematicCwCsvGridWrapEl.innerHTML = '';
-        this.cinematicCwCsvGridWrapEl.appendChild(this.cinematicCwCsvGridTableEl);
-        const head = document.createElement('thead');
-        const headRow = document.createElement('tr');
-        const rowActionTh = document.createElement('th');
-        rowActionTh.className = 'row-action';
-        rowActionTh.textContent = '#';
-        headRow.appendChild(rowActionTh);
-        this.cinematicCwCsvGridHeaders.forEach((header) => {
-            const th = document.createElement('th');
-            th.textContent = header;
-            headRow.appendChild(th);
+        renderCsvGrid({
+            tableEl: this.cinematicCwCsvGridTableEl,
+            wrapEl: this.cinematicCwCsvGridWrapEl,
+            headers: this.cinematicCwCsvGridHeaders,
+            rows: this.cinematicCwCsvGridRows,
+            onDeleteRow: (rowIndex) => this.deleteCinematicCwCsvGridRow(rowIndex),
+            onEditContent: (rowIndex, colIndex) => this.openCinematicCwCsvContentEditor(rowIndex, colIndex),
+            onInputCell: (rowIndex, colIndex, value) => {
+                this.cinematicCwCsvGridRows[rowIndex][colIndex] = value;
+                this.cinematicCwCsvEditorInput.value = this.buildCinematicCwCsvTextFromGrid();
+                this.markCinematicCwCsvEditorDirty();
+            }
         });
-        head.appendChild(headRow);
-        this.cinematicCwCsvGridTableEl.appendChild(head);
-
-        const body = document.createElement('tbody');
-        if (this.cinematicCwCsvGridRows.length < 1) {
-            const tr = document.createElement('tr');
-            const td = document.createElement('td');
-            td.colSpan = this.cinematicCwCsvGridHeaders.length + 1;
-            td.className = 'otl-csv-grid-empty';
-            td.textContent = 'No CSV rows';
-            tr.appendChild(td);
-            body.appendChild(tr);
-        }
-        this.cinematicCwCsvGridRows.forEach((row, rowIndex) => {
-            const tr = document.createElement('tr');
-            const actionTd = document.createElement('td');
-            actionTd.className = 'row-action';
-            const tools = document.createElement('div');
-            tools.className = 'otl-csv-row-tools';
-            const rowNo = document.createElement('span');
-            rowNo.className = 'otl-csv-row-index';
-            rowNo.textContent = String(rowIndex + 1);
-            const delBtn = document.createElement('button');
-            delBtn.type = 'button';
-            delBtn.className = 'otl-csv-row-delete';
-            delBtn.title = `Delete row ${rowIndex + 1}`;
-            delBtn.innerHTML = CSV_ICON_DELETE;
-            delBtn.addEventListener('click', () => this.deleteCinematicCwCsvGridRow(rowIndex));
-            tools.appendChild(rowNo);
-            tools.appendChild(delBtn);
-            actionTd.appendChild(tools);
-            tr.appendChild(actionTd);
-            this.cinematicCwCsvGridHeaders.forEach((headerName, colIndex) => {
-                const td = document.createElement('td');
-                const isContentCol = String(headerName || '').trim().toLowerCase() === 'content';
-                if (isContentCol) {
-                    const preview = document.createElement('div');
-                    preview.className = 'otl-csv-content-cell';
-                    preview.textContent = String(row[colIndex] || '');
-                    preview.title = 'Click to edit content';
-                    preview.addEventListener('click', () => this.openCinematicCwCsvContentEditor(rowIndex, colIndex));
-                    td.appendChild(preview);
-                    tr.appendChild(td);
-                    return;
-                }
-                const input = document.createElement('input');
-                input.className = 'otl-csv-grid-cell';
-                input.type = 'text';
-                input.value = String(row[colIndex] || '');
-                input.addEventListener('input', () => {
-                    this.cinematicCwCsvGridRows[rowIndex][colIndex] = input.value;
-                    this.cinematicCwCsvEditorInput.value = this.buildCinematicCwCsvTextFromGrid();
-                    this.markCinematicCwCsvEditorDirty();
-                });
-                td.appendChild(input);
-                tr.appendChild(td);
-            });
-            body.appendChild(tr);
-        });
-        this.cinematicCwCsvGridTableEl.appendChild(body);
     }
 
     private renderCinematicCwCsvVoiceConfig() {
-        this.cinematicCwCsvVoiceConfig = normalizeCsvVoiceConfig(this.cinematicCwCsvVoiceConfig);
-        const options = TTS_VOICE_OPTIONS_BY_MODEL[this.cinematicCwCsvVoiceConfig.model] || TTS_VOICE_OPTIONS_BY_MODEL[DEFAULT_TTS_MODEL] || [];
-        this.cinematicCwCsvVoiceEnabledInput.checked = this.cinematicCwCsvVoiceConfig.enabled;
-        this.cinematicCwCsvVoiceModelSelect.value = this.cinematicCwCsvVoiceConfig.model;
-        this.cinematicCwCsvVoiceFixedSelect.innerHTML = options.map((option) => `<option value="${option.value}">${option.label} - ${option.subtitle} (${option.value})</option>`).join('');
-        this.cinematicCwCsvVoiceFixedSelect.value = this.cinematicCwCsvVoiceConfig.fixedVoice;
-        const grouped = new Map<string, TtsVoiceOption[]>();
-        options.forEach((option) => {
-            const list = grouped.get(option.group) || [];
-            list.push(option);
-            grouped.set(option.group, list);
+        this.cinematicCwCsvVoiceConfig = renderCsvVoiceConfig({
+            config: this.cinematicCwCsvVoiceConfig,
+            enabledInput: this.cinematicCwCsvVoiceEnabledInput,
+            modelSelect: this.cinematicCwCsvVoiceModelSelect,
+            fixedSelect: this.cinematicCwCsvVoiceFixedSelect,
+            listEl: this.cinematicCwCsvVoiceListEl,
+            summaryEl: this.cinematicCwCsvVoiceSummaryEl,
+            itemRole: 'cinematic-cw-csv-voice-item'
         });
-        this.cinematicCwCsvVoiceListEl.innerHTML = '';
-        grouped.forEach((items, group) => {
-            const title = document.createElement('div');
-            title.className = 'otl-voice-group-title';
-            title.textContent = group;
-            this.cinematicCwCsvVoiceListEl.appendChild(title);
-            items.forEach((option) => {
-                const label = document.createElement('label');
-                label.className = 'otl-voice-item';
-                const checked = this.cinematicCwCsvVoiceConfig.voicePool.includes(option.value);
-                label.innerHTML = `
-                    <input type="checkbox" data-role="cinematic-cw-csv-voice-item" value="${option.value}" ${checked ? 'checked' : ''} />
-                    <div class="otl-voice-item-main">
-                        <div>${option.label} - ${option.subtitle}</div>
-                        <div class="otl-voice-code">${option.value}</div>
-                    </div>
-                `;
-                this.cinematicCwCsvVoiceListEl.appendChild(label);
-            });
-        });
-        this.cinematicCwCsvVoiceSummaryEl.textContent = summarizeCsvVoiceConfig(this.cinematicCwCsvVoiceConfig);
     }
 
     private renderCinematicCwCsvTimingConfig() {
-        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig(this.cinematicCwCsvTimingConfig);
-        this.cinematicCwCsvTimingEnabledInput.checked = this.cinematicCwCsvTimingConfig.enabled;
-        this.cinematicCwCsvTimingInput.value = String(this.cinematicCwCsvTimingConfig.targetDurationSec);
-        this.cinematicCwCsvTimingMinimumEl.textContent = describeTimingValue(this.cinematicCwCsvTimingSummary?.minimumAchievableSec);
-        this.cinematicCwCsvTimingEstimatedEl.textContent = describeTimingValue(this.cinematicCwCsvTimingSummary?.estimatedDurationSec);
-        this.cinematicCwCsvTimingSummaryEl.textContent = this.cinematicCwCsvTimingConfig.enabled
-            ? `Timing: ${formatCsvTimingSummary(this.cinematicCwCsvTimingSummary || {
-                enabled: true,
-                targetDurationSec: this.cinematicCwCsvTimingConfig.targetDurationSec,
-                minimumAchievableSec: this.cinematicCwCsvTimingSummary?.minimumAchievableSec ?? null,
-                estimatedDurationSec: this.cinematicCwCsvTimingSummary?.estimatedDurationSec ?? null
-            }) || `目标 ${this.cinematicCwCsvTimingConfig.targetDurationSec}s`}`
-            : 'Timing: default generation';
+        this.cinematicCwCsvTimingConfig = renderCsvTimingConfig({
+            config: this.cinematicCwCsvTimingConfig,
+            enabledInput: this.cinematicCwCsvTimingEnabledInput,
+            timingInput: this.cinematicCwCsvTimingInput,
+            minimumEl: this.cinematicCwCsvTimingMinimumEl,
+            estimatedEl: this.cinematicCwCsvTimingEstimatedEl,
+            summaryEl: this.cinematicCwCsvTimingSummaryEl,
+            summary: this.cinematicCwCsvTimingSummary
+        });
     }
 
     private setCinematicCwCsvEditorText(csvText: string) {
@@ -6999,26 +3713,12 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private renderCinematicCwCsvVersionList() {
-        this.cinematicCwCsvVersionListEl.innerHTML = '';
-        if (this.cinematicCwCsvVersions.length < 1) {
-            const empty = document.createElement('div');
-            empty.className = 'otl-muted';
-            empty.textContent = 'No CSV versions yet';
-            this.cinematicCwCsvVersionListEl.appendChild(empty);
-            return;
-        }
-        const frag = document.createDocumentFragment();
-        this.cinematicCwCsvVersions.forEach((version) => {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = `otl-csv-version-item${version.id === this.selectedCinematicCwCsvVersionId ? ' active' : ''}`;
-            btn.setAttribute('data-act', 'cinematic-cw-csv-version-select');
-            btn.setAttribute('data-version-id', String(version.id));
-            const status = version.status === 'confirmed' ? 'confirmed' : 'draft';
-            btn.textContent = `v${version.versionNo} ${status} ${version.updatedAt}`;
-            frag.appendChild(btn);
+        renderCsvVersionList({
+            listEl: this.cinematicCwCsvVersionListEl,
+            versions: this.cinematicCwCsvVersions,
+            selectedVersionId: this.selectedCinematicCwCsvVersionId,
+            selectAction: 'cinematic-cw-csv-version-select'
         });
-        this.cinematicCwCsvVersionListEl.appendChild(frag);
     }
 
     private async loadCinematicCwCsvVersionList(preferredVersionId?: number | null) {
@@ -7057,11 +3757,6 @@ class TourLoaderPanel implements TourLoaderController {
 
     private async openCinematicCwCsvWorkspace() {
         if (!this.requireModel()) return;
-        this.cinematicCwCsvVoiceConfig = normalizeCsvVoiceConfig(this.csvVoiceConfig);
-        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig(this.csvTimingConfig);
-        this.cinematicCwCsvTimingSummary = this.csvTimingSummary;
-        this.renderCinematicCwCsvVoiceConfig();
-        this.renderCinematicCwCsvTimingConfig();
         this.cinematicCwCsvWorkspaceModal.classList.remove('hidden');
         this.setCinematicCwCsvWorkspaceFullscreen(this.cinematicCwCsvWorkspaceFullscreen);
         this.setCinematicCwCsvWorkspaceStatus('Loading versions...');
@@ -7070,69 +3765,28 @@ class TourLoaderPanel implements TourLoaderController {
 
     private async generateCinematicCwCsvVersion() {
         if (!this.requireModel()) return;
-        const llm = this.currentLlmRequest();
-        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig({
-            ...this.cinematicCwCsvTimingConfig,
-            enabled: this.cinematicCwCsvTimingEnabledInput.checked,
-            targetDurationSec: Number(this.cinematicCwCsvTimingInput.value) || DEFAULT_CSV_TARGET_DURATION_SEC
-        });
-        this.setCinematicCwCsvWorkspaceStatus('Generating CSV...');
-        const response = await fetch(`${this.apiBase()}/csv/versions/generate`, {
+        if (!this.cinematicPlan?.shots?.length) throw new Error('No cinematic plan');
+        const csvText = this.compileCinematicPlanToCsv(this.cinematicPlan);
+        this.setCinematicCwCsvWorkspaceStatus('Compiling CSV from current cinematic timeline...');
+        const response = await fetch(`${this.apiBase()}/csv/versions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 modelFilename: this.modelFilename,
-                llm: {
-                    provider: llm.provider,
-                    model: llm.model,
-                    apiKey: llm.apiKey,
-                    csvPromptTemplate: this.csvPromptTemplate || DEFAULT_CSV_PROMPT_TEMPLATE,
-                    movePromptTemplate: this.movePromptTemplate || DEFAULT_MOVE_PROMPT_TEMPLATE
-                },
-                voiceConfig: this.cinematicCwCsvVoiceConfig,
-                timingConfig: this.cinematicCwCsvTimingConfig
+                source: 'cinematic-keyframes',
+                csvText
             })
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok || !data?.ok || !data?.version?.id) {
-            const error = new Error(data?.error?.message || `HTTP ${response.status}`) as Error & { timingSummary?: CsvTimingSummary | null };
-            error.timingSummary = data?.error?.details?.timingSummary || null;
-            throw error;
+            throw new Error(data?.error?.message || `HTTP ${response.status}`);
         }
         await this.loadCinematicCwCsvVersionList(Number(data.version.id));
-        this.setCinematicCwCsvWorkspaceTimingStatus(`Generated v${data.version.versionNo}`, data?.timingSummary || null);
+        this.setCinematicCwCsvWorkspaceStatus(`Compiled current CW timeline to v${data.version.versionNo}`);
     }
 
     private async estimateCinematicCwCsvTiming() {
-        if (!this.requireModel()) return;
-        const llm = this.currentLlmRequest();
-        this.cinematicCwCsvTimingConfig = normalizeCsvTimingConfig({
-            ...this.cinematicCwCsvTimingConfig,
-            enabled: this.cinematicCwCsvTimingEnabledInput.checked,
-            targetDurationSec: Number(this.cinematicCwCsvTimingInput.value) || DEFAULT_CSV_TARGET_DURATION_SEC
-        });
-        this.renderCinematicCwCsvTimingConfig();
-        this.setCinematicCwCsvWorkspaceStatus('Estimating timing...');
-        const response = await fetch(`${this.apiBase()}/csv/timing/estimate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                modelFilename: this.modelFilename,
-                llm: {
-                    provider: llm.provider,
-                    model: llm.model,
-                    apiKey: llm.apiKey,
-                    csvPromptTemplate: this.csvPromptTemplate || DEFAULT_CSV_PROMPT_TEMPLATE,
-                    movePromptTemplate: this.movePromptTemplate || DEFAULT_MOVE_PROMPT_TEMPLATE
-                },
-                timingConfig: this.cinematicCwCsvTimingConfig
-            })
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || !data?.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`);
-        this.cinematicCwCsvTimingSummary = data?.timingSummary || null;
-        this.renderCinematicCwCsvTimingConfig();
-        this.setCinematicCwCsvWorkspaceTimingStatus('Timing estimated', this.cinematicCwCsvTimingSummary);
+        this.setCinematicCwCsvWorkspaceStatus('Timing controls are disabled for CW WYSIWYG CSV export');
     }
 
     private async saveCinematicCwCsvVersion() {
@@ -7194,14 +3848,12 @@ class TourLoaderPanel implements TourLoaderController {
         }
         const csvText = await response.text();
         const current = this.selectedCinematicCwCsvVersion();
-        const fallbackName = `ot-tour-loader-${String(this.modelFilename || 'model').replace(/[^a-zA-Z0-9_.-]/g, '_')}-v${current?.versionNo || this.selectedCinematicCwCsvVersionId}.csv`;
-        const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
-        const blobUrl = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = fallbackName;
-        a.click();
-        URL.revokeObjectURL(blobUrl);
+        const fallbackName = `ot-cinematic-workspace-${String(this.modelFilename || 'model').replace(/[^a-zA-Z0-9_.-]/g, '_')}-v${current?.versionNo || this.selectedCinematicCwCsvVersionId}.csv`;
+        await downloadCsvText({
+            csvText,
+            fallbackName,
+            preferSavePicker: false
+        });
         this.setCinematicCwCsvWorkspaceStatus(`Downloaded v${current?.versionNo || this.selectedCinematicCwCsvVersionId}`);
     }
 
@@ -7647,7 +4299,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicWorkspaceModal.classList.toggle('mini', this.cinematicMiniMode);
         this.cinematicMiniToggleBtn.textContent = this.cinematicMiniMode ? 'Full' : 'Mini';
         const playMarkup = this.cinematicPreview.playing ? CINE_ICON_PAUSE : CINE_ICON_PLAY;
-        const previewBtn = this.root.querySelector('[data-act="cinematic-preview"]') as HTMLButtonElement | null;
+        const previewBtn = this.root.querySelector('[data-act="cinematic-preview-toggle"]') as HTMLButtonElement | null;
         const routeBtn = this.root.querySelector('[data-act="cinematic-toggle-route"]') as HTMLButtonElement | null;
         if (previewBtn) previewBtn.innerHTML = playMarkup;
         if (routeBtn) {
@@ -7670,8 +4322,142 @@ class TourLoaderPanel implements TourLoaderController {
             audioEndSeconds: Math.max(0, Number(config.audioEndSeconds) || 0),
             audioPlaybackRate: clampMusicRate(Number(config.audioPlaybackRate) || 1),
             targetMusicDurationSeconds: normalizeMusicDuration(config.targetMusicDurationSeconds),
-            audioDisplayName: config.audioDisplayName ? String(config.audioDisplayName) : undefined
+            audioDisplayName: config.audioDisplayName ? String(config.audioDisplayName) : undefined,
+            sourceKey: config.sourceKey ? String(config.sourceKey) : undefined,
+            sourceType: config.sourceType || undefined,
+            audioRelativePath: config.audioRelativePath ? String(config.audioRelativePath) : undefined,
+            directoryName: config.directoryName ? String(config.directoryName) : undefined
         };
+    }
+
+    private cinematicBgmNeedsHandle(config: CinematicBgmConfig | null) {
+        if (!config) return false;
+        const path = String(config.audioPath || '').trim();
+        if (!path) return false;
+        if (/^(blob:|data:|https?:\/\/|\/)/i.test(path)) return false;
+        return true;
+    }
+
+    private cinematicBgmHandleDb() {
+        if (this.cinematicBgmHandleDbPromise) return this.cinematicBgmHandleDbPromise;
+        this.cinematicBgmHandleDbPromise = new Promise((resolve, reject) => {
+            const request = window.indexedDB.open('ot-cw-bgm-handles', 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('open bgm handle db failed'));
+        });
+        return this.cinematicBgmHandleDbPromise;
+    }
+
+    private async cinematicBgmStoreHandle(key: string, handle: FileSystemHandle) {
+        const db = await this.cinematicBgmHandleDb();
+        await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction('handles', 'readwrite');
+            tx.objectStore('handles').put(handle, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('store bgm handle failed'));
+            tx.onabort = () => reject(tx.error || new Error('store bgm handle aborted'));
+        });
+    }
+
+    private async cinematicBgmLoadHandle(key: string): Promise<FileSystemHandle | null> {
+        const db = await this.cinematicBgmHandleDb();
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction('handles', 'readonly');
+            const req = tx.objectStore('handles').get(key);
+            req.onsuccess = () => resolve((req.result as FileSystemHandle) || null);
+            req.onerror = () => reject(req.error || new Error('load bgm handle failed'));
+        });
+    }
+
+    private async cinematicBgmResolveStoredFile(config: CinematicBgmConfig) {
+        const sourceKey = String(config.sourceKey || '').trim();
+        if (!sourceKey) return null;
+        const handle = await this.cinematicBgmLoadHandle(sourceKey);
+        if (!handle) return null;
+        if (config.sourceType === 'file' && handle.kind === 'file') {
+            return await (handle as FileSystemFileHandle).getFile();
+        }
+        if (config.sourceType === 'directory' && handle.kind === 'directory') {
+            const relativePath = String(config.audioRelativePath || config.audioPath || '').trim();
+            if (!relativePath) return null;
+            const parts = relativePath.split('/').filter(Boolean);
+            let current: FileSystemDirectoryHandle | FileSystemFileHandle = handle as FileSystemDirectoryHandle;
+            for (let i = 0; i < parts.length; i += 1) {
+                if (current.kind !== 'directory') return null;
+                current = await (current as FileSystemDirectoryHandle).getFileHandle(parts[i]).catch(async () => {
+                    if (i < parts.length - 1) return await (current as FileSystemDirectoryHandle).getDirectoryHandle(parts[i]);
+                    throw new Error('bgm file missing');
+                });
+            }
+            if (current.kind !== 'file') return null;
+            return await (current as FileSystemFileHandle).getFile();
+        }
+        return null;
+    }
+
+    private cinematicBgmMakeHandleKey(prefix: string) {
+        return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    private async cinematicBgmAbsorbDirectoryHandle(dirHandle: FileSystemDirectoryHandle) {
+        const sourceKey = this.cinematicBgmMakeHandleKey('bgmdir');
+        await this.cinematicBgmStoreHandle(sourceKey, dirHandle);
+        const items: CinematicBgmLibraryItem[] = [];
+        const walk = async (handle: FileSystemDirectoryHandle, prefix = ''): Promise<void> => {
+            for await (const entry of handle.values()) {
+                const child = entry as FileSystemHandle;
+                if (child.kind === 'directory') {
+                    await walk(child as FileSystemDirectoryHandle, `${prefix}${child.name}/`);
+                    continue;
+                }
+                const fileHandle = child as FileSystemFileHandle;
+                const file = await fileHandle.getFile();
+                if (!(file.type.startsWith('audio/') || isAudioFileName(file.name))) continue;
+                const audioUrl = URL.createObjectURL(file);
+                this.cinematicBgmObjectUrls.push(audioUrl);
+                const relativePath = `${prefix}${file.name}`;
+                items.push({
+                    id: this.cinematicBgmMakeHandleKey('bgmfile'),
+                    name: file.name,
+                    audioPath: relativePath,
+                    audioUrl,
+                    source: 'folder',
+                    sourceKey,
+                    sourceType: 'directory',
+                    audioRelativePath: relativePath,
+                    directoryName: dirHandle.name
+                });
+            }
+        };
+        await walk(dirHandle);
+        return items;
+    }
+
+    private async cinematicBgmAbsorbFileHandles(fileHandles: FileSystemFileHandle[]) {
+        const items: CinematicBgmLibraryItem[] = [];
+        for (const handle of fileHandles) {
+            const file = await handle.getFile();
+            if (!(file.type.startsWith('audio/') || isAudioFileName(file.name))) continue;
+            const sourceKey = this.cinematicBgmMakeHandleKey('bgmfile');
+            await this.cinematicBgmStoreHandle(sourceKey, handle);
+            const audioUrl = URL.createObjectURL(file);
+            this.cinematicBgmObjectUrls.push(audioUrl);
+            items.push({
+                id: sourceKey,
+                name: file.name,
+                audioPath: file.name,
+                audioUrl,
+                source: 'path',
+                sourceKey,
+                sourceType: 'file',
+                audioRelativePath: file.name
+            });
+        }
+        return items;
     }
 
     private cinematicEditingBgmConfig() {
@@ -7885,29 +4671,69 @@ class TourLoaderPanel implements TourLoaderController {
             btn.className = `otl-cinematic-bgm-item${item.audioPath === activePath ? ' active' : ''}`;
             btn.setAttribute('data-act', 'cinematic-bgm-select-item');
             btn.setAttribute('data-audio-path', item.audioPath);
+            if (item.sourceKey) btn.setAttribute('data-source-key', item.sourceKey);
             btn.textContent = item.name;
             const meta = document.createElement('span');
             meta.className = 'meta';
-            meta.textContent = item.source === 'folder' ? `Folder: ${item.audioPath}` : item.audioPath;
+            meta.textContent = item.sourceType === 'directory'
+                ? `Folder: ${item.directoryName || item.audioRelativePath || item.audioPath}`
+                : item.audioRelativePath || item.audioPath;
             btn.appendChild(meta);
             frag.appendChild(btn);
         });
         this.cinematicBgmLibraryEl.appendChild(frag);
     }
 
-    private cinematicBgmResolveAudioUrl(audioPath: string) {
-        const path = String(audioPath || '').trim();
+    private async cinematicBgmResolveAudioUrl(config: CinematicBgmConfig) {
+        const path = String(config.audioPath || '').trim();
         if (!path) return '';
         if (/^(blob:|data:|https?:\/\/)/i.test(path)) return path;
-        const item = this.cinematicBgmLibrary.find((row) => row.audioPath === path);
+        const item = this.cinematicBgmLibrary.find((row) => row.audioPath === path && (!config.sourceKey || row.sourceKey === config.sourceKey));
         if (item) return item.audioUrl;
-        return `${this.apiBase()}/local-file?path=${encodeURIComponent(path)}`;
+        if (config.sourceKey) {
+            const file = await this.cinematicBgmResolveStoredFile(config).catch((error): null => {
+                this.logDebug('cine.bgm.restore', String(error));
+                return null;
+            });
+            if (file) {
+                const audioUrl = URL.createObjectURL(file);
+                this.cinematicBgmObjectUrls.push(audioUrl);
+                const itemFromHandle: CinematicBgmLibraryItem = {
+                    id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+                    name: file.name,
+                    audioPath: path,
+                    audioUrl,
+                    source: config.sourceType === 'directory' ? 'folder' : 'path',
+                    sourceKey: config.sourceKey,
+                    sourceType: config.sourceType,
+                    audioRelativePath: config.audioRelativePath,
+                    directoryName: config.directoryName
+                };
+                if (!this.cinematicBgmLibrary.some((row) => row.audioPath === itemFromHandle.audioPath && row.sourceKey === itemFromHandle.sourceKey)) {
+                    this.cinematicBgmLibrary.unshift(itemFromHandle);
+                    this.cinematicBgmRenderLibrary();
+                }
+                return audioUrl;
+            }
+        }
+        return /^(\/|[A-Za-z]:\\)/.test(path) ? `${this.apiBase()}/local-file?path=${encodeURIComponent(path)}` : '';
     }
 
-    private async cinematicBgmLoadAudio(audioPath: string, displayName?: string, target: 'selection' | 'draft' = 'selection') {
+    private async cinematicBgmLoadAudio(audioPath: string, displayName?: string, target: 'selection' | 'draft' = 'selection', savedMeta?: Partial<CinematicBgmConfig>) {
         const path = String(audioPath || '').trim();
         if (!path) throw new Error('audioPath is empty');
-        const audioUrl = this.cinematicBgmResolveAudioUrl(path);
+        const audioUrl = await this.cinematicBgmResolveAudioUrl({
+            audioPath: path,
+            audioStartSeconds: 0,
+            audioEndSeconds: 0,
+            audioPlaybackRate: 1,
+            targetMusicDurationSeconds: null,
+            audioDisplayName: displayName,
+            sourceKey: savedMeta?.sourceKey,
+            sourceType: savedMeta?.sourceType,
+            audioRelativePath: savedMeta?.audioRelativePath,
+            directoryName: savedMeta?.directoryName
+        });
         if (!audioUrl) throw new Error('audio url unavailable');
         this.cinematicBgmStopPreview();
         const preview = new Audio(audioUrl);
@@ -7931,11 +4757,19 @@ class TourLoaderPanel implements TourLoaderController {
                 audioEndSeconds: this.cinematicBgmAudioDurationSec,
                 audioPlaybackRate: 1,
                 targetMusicDurationSeconds: null,
-                audioDisplayName: displayName || path
+                audioDisplayName: displayName || path,
+                sourceKey: savedMeta?.sourceKey,
+                sourceType: savedMeta?.sourceType,
+                audioRelativePath: savedMeta?.audioRelativePath,
+                directoryName: savedMeta?.directoryName
             };
         }
         config.audioPath = path;
         config.audioDisplayName = displayName || config.audioDisplayName || path;
+        config.sourceKey = savedMeta?.sourceKey || config.sourceKey;
+        config.sourceType = savedMeta?.sourceType || config.sourceType;
+        config.audioRelativePath = savedMeta?.audioRelativePath || config.audioRelativePath;
+        config.directoryName = savedMeta?.directoryName || config.directoryName;
         config.audioStartSeconds = clamp(Number(config.audioStartSeconds || 0), 0, this.cinematicBgmAudioDurationSec - 0.01);
         config.audioEndSeconds = clamp(Number(config.audioEndSeconds || this.cinematicBgmAudioDurationSec), config.audioStartSeconds + 0.01, this.cinematicBgmAudioDurationSec);
         if (target === 'draft') this.cinematicBgmDraft = config;
@@ -8174,14 +5008,32 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicComplexVersionListEl.appendChild(complexFrag);
     }
 
+    private openCinematicPoiPicker() {
+        this.cinematicPoiDraftIds = [...this.cinematicSelectedPoiIds];
+        this.renderCinematicPoiList();
+        this.cinematicPoiPickerModal.classList.remove('hidden');
+    }
+
+    private closeCinematicPoiPicker() {
+        this.cinematicPoiPickerModal.classList.add('hidden');
+    }
+
+    private saveCinematicPoiPicker() {
+        this.cinematicSelectedPoiIds = [...this.cinematicPoiDraftIds];
+        this.closeCinematicPoiPicker();
+        this.setCinematicStatus(this.cinematicSelectedPoiIds.length > 0
+            ? `Selected ${this.cinematicSelectedPoiIds.length} POIs`
+            : 'No POIs selected');
+    }
+
     private renderCinematicPoiList() {
         this.cinematicPoiListEl.innerHTML = '';
-        this.cinematicPoiListEl.classList.toggle('hidden', !this.cinematicPoiExpanded);
-        const chevron = this.root.querySelector('[data-role="cinematic-poi-chevron"]') as HTMLSpanElement | null;
-        if (chevron) chevron.style.transform = this.cinematicPoiExpanded ? 'rotate(180deg)' : 'rotate(0deg)';
+        if (this.cinematicPoiPickerModal.classList.contains('hidden')) {
+            this.cinematicPoiDraftIds = [...this.cinematicSelectedPoiIds];
+        }
         const frag = document.createDocumentFragment();
         this.pois.slice().sort((a, b) => a.sortOrder - b.sortOrder).forEach((poi) => {
-            const checked = this.cinematicSelectedPoiIds.includes(poi.poiId);
+            const checked = this.cinematicPoiDraftIds.includes(poi.poiId);
             const item = document.createElement('label');
             item.className = 'otl-cinematic-poi-row';
             item.innerHTML = `<input type="checkbox" data-role="cinematic-poi-item" value="${poi.poiId}" ${checked ? 'checked' : ''} />
@@ -8194,9 +5046,11 @@ class TourLoaderPanel implements TourLoaderController {
 
     private renderCinematicKeyframeList() {
         const shot = this.selectedCinematicShot();
+        const keyframeModalTitleEl = this.root.querySelector('[data-role="cinematic-keyframe-modal-title"]') as HTMLDivElement | null;
         if (!shot) {
             this.cinematicKeyframeEditorBodyEl.innerHTML = '<div class="otl-muted">No keyframe selected</div>';
             this.cinematicShotEditorBodyEl.innerHTML = '<div class="otl-muted">No shot selected</div>';
+            if (keyframeModalTitleEl) keyframeModalTitleEl.innerHTML = '<span>Key Frame</span>';
             const headMediaButtons = Array.from(this.root.querySelectorAll('[data-role="cinematic-kf-head-media"]')) as HTMLButtonElement[];
             headMediaButtons.forEach((btn) => {
                 btn.disabled = true;
@@ -8218,42 +5072,53 @@ class TourLoaderPanel implements TourLoaderController {
         const mediaAnchorZ = media?.anchorWorld ? media.anchorWorld.z.toFixed(3) : '';
         const mediaName = media?.fileName || media?.placeholderLabel || 'No video selected';
         const mediaPath = media?.src || '';
-        this.cinematicKeyframeEditorBodyEl.innerHTML = kf ? `<button type="button" class="otl-btn otl-cinematic-keyframe-heading" data-act="cinematic-keyframe-select" data-keyframe-id="${kf.keyframeId}" style="width:100%;">K${idx + 1} (t=${(kf.t * shotDuration).toFixed(2)}s)</button>
-            <div class="otl-cinematic-editor-grid">
-                <div class="otl-cinematic-field"><label>Position X</label><input class="otl-input" data-act="cinematic-kf-x" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.x.toFixed(2)}" /></div>
-                <div class="otl-cinematic-field"><label>Position Y</label><input class="otl-input" data-act="cinematic-kf-y" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.y.toFixed(2)}" /></div>
-                <div class="otl-cinematic-field"><label>Position Z</label><input class="otl-input" data-act="cinematic-kf-z" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.z.toFixed(2)}" /></div>
-                <div class="otl-cinematic-field"><label>Yaw</label><input class="otl-input" data-act="cinematic-kf-yaw" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${kf.yaw.toFixed(1)}" /></div>
-                <div class="otl-cinematic-field"><label>Pitch</label><input class="otl-input" data-act="cinematic-kf-pitch" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${kf.pitch.toFixed(1)}" /></div>
-                <div class="otl-cinematic-field"><label>FOV</label><input class="otl-input" data-act="cinematic-kf-fov" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" min="20" max="120" value="${kf.fov.toFixed(1)}" /></div>
-            </div>
-            <div class="otl-cinematic-media-box">
-                <div class="otl-cinematic-media-header">
+        if (keyframeModalTitleEl && kf) keyframeModalTitleEl.innerHTML = `<span>Key Frame</span><span class="otl-cinematic-title-meta">(K${idx + 1} t=${(kf.t * shotDuration).toFixed(2)}s)</span>`;
+        this.cinematicKeyframeEditorBodyEl.innerHTML = kf ? `
+            <section class="otl-cinematic-editor-section">
+                <div class="otl-cinematic-keyframe-head-tools otl-cinematic-keyframe-toolbar-grid">
+                    <span class="otl-cinematic-step-badge">3D Object</span>
+                    <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="pick" data-act="cinematic-kf-media-pick-main">Place On Main View</button>
+                    <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="edit" data-act="cinematic-kf-media-toggle-editor">Edit 3D Object In Main View</button>
+                    <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="move" data-act="cinematic-kf-media-mode-move">Move</button>
+                    <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="rotate" data-act="cinematic-kf-media-mode-rotate">Rotate</button>
+                    <button type="button" class="otl-btn" data-role="cinematic-kf-head-media" data-kind="scale" data-act="cinematic-kf-media-mode-scale">Scale</button>
+                </div>
+            </section>
+            <section class="otl-cinematic-editor-section otl-cinematic-media-box">
+                <div class="otl-cinematic-media-actions-row">
                     <label class="otl-cinematic-check"><input type="checkbox" data-act="cinematic-kf-media-enabled" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" ${media?.enabled ? 'checked' : ''} />Enable</label>
-                    <div class="otl-cinematic-media-right">
+                    <div class="otl-cinematic-media-actions-right">
                         <button type="button" class="otl-btn" data-act="cinematic-kf-media-align-view" data-keyframe-id="${kf.keyframeId}">Align To Current View</button>
                         <button type="button" class="otl-btn" data-act="cinematic-kf-media-reset-inherit" data-keyframe-id="${kf.keyframeId}">Reset To Inherited</button>
-                        <button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-remove" data-keyframe-id="${kf.keyframeId}" title="Remove 3D Media Object">${CSV_ICON_DELETE}</button>
+                        <button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-remove" data-keyframe-id="${kf.keyframeId}" title="Clear 3D Object">${CSV_ICON_DELETE}</button>
                     </div>
                 </div>
                 <div class="otl-cinematic-field"><label>Path</label><div class="otl-cinematic-media-path-row"><input class="otl-input" type="text" readonly value="${escapeHtmlAttr(mediaName)}" placeholder="No video selected" /><button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-choose-video" data-keyframe-id="${kf.keyframeId}" title="Choose Video Folder">${CINE_ICON_FOLDER}</button></div></div>
                 <div class="otl-cinematic-media-note" style="display:none;">${escapeHtmlAttr(mediaStatus)} ${escapeHtmlAttr(mediaPath)}</div>
-                <div class="otl-cinematic-editor-grid shot">
+                <div class="otl-cinematic-editor-grid otl-cinematic-editor-grid-five">
                     <div class="otl-cinematic-field"><label>Scale</label><input class="otl-input" data-act="cinematic-kf-media-scale" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.05" min="0.1" max="120" value="${(media?.scale || 1.6).toFixed(2)}" /></div>
                     <div class="otl-cinematic-field"><label>Yaw</label><input class="otl-input" data-act="cinematic-kf-media-yaw" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${(media?.yaw || 0).toFixed(1)}" /></div>
                     <div class="otl-cinematic-field"><label>Pitch</label><input class="otl-input" data-act="cinematic-kf-media-pitch" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${(media?.pitch || 0).toFixed(1)}" /></div>
                     <div class="otl-cinematic-field"><label>Roll</label><input class="otl-input" data-act="cinematic-kf-media-roll" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${(media?.roll || 0).toFixed(1)}" /></div>
                     <div class="otl-cinematic-field"><label>Depth Offset</label><input class="otl-input" data-act="cinematic-kf-media-depth" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" min="-2" max="2" value="${(media?.depthOffset || 0.06).toFixed(2)}" /></div>
                 </div>
-                <div class="otl-cinematic-media-anchor-row">
-                    <div class="otl-cinematic-editor-grid shot">
-                        <div class="otl-cinematic-field"><label>Anchor X</label><input class="otl-input" data-act="cinematic-kf-media-anchor-x" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorX}" placeholder="Unset" /></div>
-                        <div class="otl-cinematic-field"><label>Anchor Y</label><input class="otl-input" data-act="cinematic-kf-media-anchor-y" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorY}" placeholder="Unset" /></div>
-                        <div class="otl-cinematic-field"><label>Anchor Z</label><input class="otl-input" data-act="cinematic-kf-media-anchor-z" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorZ}" placeholder="Unset" /></div>
-                    </div>
-                    <button type="button" class="otl-cinematic-media-icon-btn" data-act="cinematic-kf-media-clear-anchor" data-keyframe-id="${kf.keyframeId}" title="Clear Anchor">${CSV_ICON_DELETE}</button>
+                <div class="otl-cinematic-editor-grid otl-cinematic-editor-grid-anchor">
+                    <div class="otl-cinematic-field"><label>Anchor X</label><input class="otl-input" data-act="cinematic-kf-media-anchor-x" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorX}" placeholder="Unset" /></div>
+                    <div class="otl-cinematic-field"><label>Anchor Y</label><input class="otl-input" data-act="cinematic-kf-media-anchor-y" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorY}" placeholder="Unset" /></div>
+                    <div class="otl-cinematic-field"><label>Anchor Z</label><input class="otl-input" data-act="cinematic-kf-media-anchor-z" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.001" value="${mediaAnchorZ}" placeholder="Unset" /></div>
+                    <button type="button" class="otl-cinematic-media-icon-btn otl-cinematic-anchor-clear-btn" data-act="cinematic-kf-media-clear-anchor" data-keyframe-id="${kf.keyframeId}" title="Clear Anchor">${CSV_ICON_DELETE}</button>
                 </div>
-            </div>` : '<div class="otl-muted">No keyframe selected</div>';
+            </section>
+            <section class="otl-cinematic-editor-section otl-cinematic-camera-section">
+                <div class="otl-cinematic-editor-grid">
+                    <div class="otl-cinematic-field"><label>Position X</label><input class="otl-input" data-act="cinematic-kf-x" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.x.toFixed(2)}" /></div>
+                    <div class="otl-cinematic-field"><label>Position Y</label><input class="otl-input" data-act="cinematic-kf-y" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.y.toFixed(2)}" /></div>
+                    <div class="otl-cinematic-field"><label>Position Z</label><input class="otl-input" data-act="cinematic-kf-z" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.01" value="${kf.z.toFixed(2)}" /></div>
+                    <div class="otl-cinematic-field"><label>Yaw</label><input class="otl-input" data-act="cinematic-kf-yaw" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${kf.yaw.toFixed(1)}" /></div>
+                    <div class="otl-cinematic-field"><label>Pitch</label><input class="otl-input" data-act="cinematic-kf-pitch" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" value="${kf.pitch.toFixed(1)}" /></div>
+                    <div class="otl-cinematic-field"><label>FOV</label><input class="otl-input" data-act="cinematic-kf-fov" data-keyframe-id="${kf.keyframeId}" data-shot-id="${shot.shotId}" type="number" step="0.1" min="20" max="120" value="${kf.fov.toFixed(1)}" /></div>
+                </div>
+            </section>` : '<div class="otl-muted">No keyframe selected</div>';
 
         const headMediaButtons = Array.from(this.root.querySelectorAll('[data-role="cinematic-kf-head-media"]')) as HTMLButtonElement[];
         headMediaButtons.forEach((btn) => {
@@ -8272,6 +5137,14 @@ class TourLoaderPanel implements TourLoaderController {
                 btn.classList.add('primary');
             }
         });
+        const deleteKeyframeBtn = this.root.querySelector('[data-act="cinematic-delete-keyframe"]') as HTMLButtonElement | null;
+        if (deleteKeyframeBtn) {
+            deleteKeyframeBtn.disabled = !kf || shot.keyframes.length <= 2;
+        }
+        const deleteShotBtn = this.root.querySelector('[data-act="cinematic-delete-shot"]') as HTMLButtonElement | null;
+        if (deleteShotBtn) {
+            deleteShotBtn.disabled = !shot;
+        }
 
         const speechMetrics = shot.speechMetrics || this.loadStoredSpeechMetrics(shot.shotId);
         const durationText = speechMetrics?.durationSec ? `${speechMetrics.durationSec.toFixed(2)}s` : 'No audio';
@@ -8293,11 +5166,11 @@ class TourLoaderPanel implements TourLoaderController {
                 <div class="otl-cinematic-field"><label>Voice</label><select class="otl-select" data-act="cinematic-shot-tts-voice" data-shot-id="${shot.shotId}">${voiceOptions}</select></div>
             </div>
             <div class="otl-cinematic-editor-speech">
-                <label class="otl-cinematic-check"><input type="checkbox" data-act="cinematic-shot-speech-match" data-shot-id="${shot.shotId}" ${matchEnabled ? 'checked' : ''} ${speechMetrics?.charsPerSecond ? '' : 'disabled'} />Match speech to timeline</label>
                 <div class="otl-cinematic-field"><label>Speech</label><input class="otl-input otl-cinematic-parameter-speech" data-act="cinematic-shot-speech" data-shot-id="${shot.shotId}" type="text" value="${escapeHtmlAttr(shot.speechText)}" /></div>
                 <button type="button" class="otl-btn otl-cinematic-speech-play-btn" data-act="cinematic-shot-play-speech" data-shot-id="${shot.shotId}" title="Play Speech" ${isSpeechBusy ? 'disabled' : ''}>${CINE_ICON_PLAY}</button>
                 <div class="otl-cinematic-speech-metric">${durationText}</div>
                 <div class="otl-cinematic-speech-metric">${cpsText}</div>
+                <label class="otl-cinematic-check"><input type="checkbox" data-act="cinematic-shot-speech-match" data-shot-id="${shot.shotId}" ${matchEnabled ? 'checked' : ''} ${speechMetrics?.charsPerSecond ? '' : 'disabled'} />Match speech to timeline</label>
             </div>`;
     }
 
@@ -8388,11 +5261,40 @@ class TourLoaderPanel implements TourLoaderController {
         if (current.exactKeyframeId) this.selectedCinematicKeyframeId = current.exactKeyframeId;
         void this.options.setLiveCameraPose?.(this.cinematicPoseFromKeyframe(current.blended), clampFov(current.blended.fov, DEFAULT_POI_FOV));
         this.applyCwMediaForTime(current.currentTimeSec);
-        this.renderCinematicTimeline();
+        this.syncCinematicTimelineState();
         this.renderCinematicKeyframeList();
         this.renderCinematicMap();
         this.drawViews();
         this.syncPreviewSpeechAtTime(this.cinematicCurrentTimeSec);
+    }
+
+    private syncCinematicTimelineState() {
+        const metrics = this.cinematicTimelineData();
+        if (!metrics) {
+            this.cinematicMiniTimelineEl.innerHTML = '';
+            this.cinematicMiniTimeEl.textContent = '0.0s';
+            return;
+        }
+        const pxPerSec = this.cinematicTimelinePixelsPerSecond;
+        const timelineInset = 12;
+        if (this.cinematicTimelinePlayheadEl) {
+            this.cinematicTimelinePlayheadEl.style.left = `${timelineInset + this.cinematicCurrentTimeSec * pxPerSec}px`;
+        }
+        this.cinematicTimelineEl.querySelectorAll('[data-act="cinematic-shot-select"]').forEach((el) => {
+            el.classList.toggle('active', String((el as HTMLElement).getAttribute('data-shot-id') || '') === this.selectedCinematicShotId);
+        });
+        this.cinematicTimelineEl.querySelectorAll('[data-act="cinematic-keyframe-select"]').forEach((el) => {
+            el.classList.toggle('active', String((el as HTMLElement).getAttribute('data-keyframe-id') || '') === this.selectedCinematicKeyframeId);
+        });
+        this.cinematicTimelineEl.querySelectorAll('[data-act="cinematic-bgm-edit"]').forEach((el) => {
+            el.classList.toggle('active', this.cinematicBgmTimelineSelected);
+        });
+        const miniWidth = Math.max(1, this.cinematicMiniTimelineEl.clientWidth || 260);
+        const railLeft = 12;
+        const railWidth = Math.max(24, miniWidth - 24);
+        const progressWidth = railWidth * clamp(this.cinematicCurrentTimeSec / Math.max(metrics.totalDurationSec, 0.001), 0, 1);
+        this.cinematicMiniTimelineEl.innerHTML = `<div class="otl-cinematic-mini-track"></div><div class="otl-cinematic-mini-progress" style="width:${progressWidth}px"></div><div class="otl-cinematic-mini-playhead" style="left:${railLeft + progressWidth}px"></div>`;
+        this.cinematicMiniTimeEl.textContent = `${this.cinematicCurrentTimeSec.toFixed(1)}s`;
     }
 
     private updateKeyframeTimeByGlobalTime(shotId: string, keyframeId: string, globalTimeSec: number) {
@@ -8421,8 +5323,35 @@ class TourLoaderPanel implements TourLoaderController {
         this.refreshCinematicUi();
     }
 
+    private deleteSelectedCinematicShot() {
+        if (!this.cinematicPlan?.shots?.length || !this.selectedCinematicShotId) return;
+        const idx = this.cinematicPlan.shots.findIndex((item) => item.shotId === this.selectedCinematicShotId);
+        if (idx < 0) return;
+        this.cinematicPlan.shots.splice(idx, 1);
+        const replacement = this.cinematicPlan.shots[Math.max(0, idx - 1)] || this.cinematicPlan.shots[0] || null;
+        this.selectedCinematicShotId = replacement?.shotId || null;
+        this.selectedCinematicKeyframeId = replacement?.keyframes?.[0]?.keyframeId || null;
+        this.cinematicCurrentTimeSec = 0;
+        if (!replacement) {
+            this.closeCinematicEditors();
+        }
+        if (replacement) {
+            const metrics = this.cinematicTimelineData();
+            const replacementSpan = metrics?.shots.find((item) => item.shot.shotId === replacement.shotId) || null;
+            if (replacementSpan) {
+                this.scrubCinematicTimeline(replacementSpan.startSec, true);
+            }
+            this.cinematicShotModal.classList.add('hidden');
+        }
+        this.refreshCinematicUi();
+    }
+
     private renderCinematicTimeline() {
+        const preservedScrollLeft = this.cinematicTimelineTrackWrapEl?.scrollLeft || this.cinematicTimelineRulerWrapEl?.scrollLeft || this.cinematicTimelineScrollLeft || 0;
         this.cinematicTimelineEl.innerHTML = '';
+        this.cinematicTimelineTrackWrapEl = null;
+        this.cinematicTimelineRulerWrapEl = null;
+        this.cinematicTimelinePlayheadEl = null;
         const metrics = this.cinematicTimelineData();
         if (!metrics) {
             this.cinematicTimelineEl.innerHTML = '<div class="otl-muted">Generate plan first to see the timeline.</div>';
@@ -8430,11 +5359,11 @@ class TourLoaderPanel implements TourLoaderController {
             this.cinematicMiniTimeEl.textContent = '0.0s';
             return;
         }
-        const timelineInset = 18;
+        const timelineInset = 12;
         const rulerStepCount = 10;
-        const mainLaneHeight = 112;
-        const audioLaneHeight = 52;
-        const musicLaneHeight = 52;
+        const mainLaneHeight = 84;
+        const audioLaneHeight = 38;
+        const musicLaneHeight = 38;
         const pxPerSec = this.cinematicTimelinePixelsPerSecond;
         const width = Math.max(760, Math.ceil(metrics.totalDurationSec * pxPerSec) + timelineInset * 2);
         const bgm = this.cinematicCurrentBgmConfig();
@@ -8461,7 +5390,41 @@ class TourLoaderPanel implements TourLoaderController {
 
         const side = document.createElement('div');
         side.className = 'otl-cinematic-timeline-side';
-        side.innerHTML = '<div class="otl-cinematic-sequence-head empty"></div>';
+        side.innerHTML = `<div class="otl-cinematic-sequence-head controls"><div class="otl-cinematic-ruler-zoom otl-cinematic-ruler-zoom-embedded"><button class="otl-cinematic-icon-btn" data-act="cinematic-timeline-zoom-out" title="Zoom Out">${CINE_ICON_MINUS}</button><input class="otl-cinematic-zoom-range" data-role="cinematic-timeline-zoom" type="range" min="10" max="100" step="1" value="${this.cinematicTimelinePixelsPerSecond}" /><button class="otl-cinematic-icon-btn" data-act="cinematic-timeline-zoom-in" title="Zoom In">${CINE_ICON_PLUS}</button></div></div>`;
+        const sideZoomIn = side.querySelector('[data-act="cinematic-timeline-zoom-in"]') as HTMLButtonElement | null;
+        const sideZoomOut = side.querySelector('[data-act="cinematic-timeline-zoom-out"]') as HTMLButtonElement | null;
+        const sideZoomInput = side.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
+        let lastZoomPointerTs = 0;
+        const handleZoomIn = (event: Event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.type === 'click' && Date.now() - lastZoomPointerTs < 220) return;
+            if (event.type === 'pointerdown') lastZoomPointerTs = Date.now();
+            this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond + 5, 10, 100);
+            this.logDebug('cine.timeline.zoom', `zoom-in pps=${this.cinematicTimelinePixelsPerSecond} tick0.1=${(this.cinematicTimelinePixelsPerSecond / 10).toFixed(1)}px`);
+            if (sideZoomInput) sideZoomInput.value = String(this.cinematicTimelinePixelsPerSecond);
+            this.renderCinematicTimeline();
+        };
+        const handleZoomOut = (event: Event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.type === 'click' && Date.now() - lastZoomPointerTs < 220) return;
+            if (event.type === 'pointerdown') lastZoomPointerTs = Date.now();
+            this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond - 5, 10, 100);
+            this.logDebug('cine.timeline.zoom', `zoom-out pps=${this.cinematicTimelinePixelsPerSecond} tick0.1=${(this.cinematicTimelinePixelsPerSecond / 10).toFixed(1)}px`);
+            if (sideZoomInput) sideZoomInput.value = String(this.cinematicTimelinePixelsPerSecond);
+            this.renderCinematicTimeline();
+        };
+        sideZoomIn?.addEventListener('pointerdown', handleZoomIn);
+        sideZoomIn?.addEventListener('click', handleZoomIn);
+        sideZoomOut?.addEventListener('pointerdown', handleZoomOut);
+        sideZoomOut?.addEventListener('click', handleZoomOut);
+        sideZoomInput?.addEventListener('input', (event) => {
+            event.stopPropagation();
+            this.cinematicTimelinePixelsPerSecond = clamp(Number((event.target as HTMLInputElement).value) || this.cinematicTimelinePixelsPerSecond, 10, 100);
+            this.logDebug('cine.timeline.zoom', `zoom-slider pps=${this.cinematicTimelinePixelsPerSecond} tick0.1=${(this.cinematicTimelinePixelsPerSecond / 10).toFixed(1)}px`);
+            this.renderCinematicTimeline();
+        });
         const laneSide = document.createElement('div');
         laneSide.className = 'otl-cinematic-lane-side';
         const mainLane = document.createElement('div');
@@ -8539,18 +5502,15 @@ class TourLoaderPanel implements TourLoaderController {
             bar.style.width = `${Math.max(60, (item.endSec - item.startSec) * pxPerSec - 6)}px`;
             bar.setAttribute('data-act', 'cinematic-shot-select');
             bar.setAttribute('data-shot-id', item.shot.shotId);
-            const labels = item.shot.keyframes.map((keyframe, keyframeIndex) => {
-                const labelLeft = keyframeIndex === 0 ? '0%' : (keyframeIndex === item.shot.keyframes.length - 1 ? '100%' : `${clamp(keyframe.t, 0, 1) * 100}%`);
-                return `<span class="otl-cinematic-keyframe-label" style="left:${labelLeft};">K${metrics.keyframes.findIndex((entry) => entry.keyframe.keyframeId === keyframe.keyframeId) + 1}</span>`;
+            bar.setAttribute('data-start-sec', String(item.startSec));
+            const markerInset = 10;
+            const markerTravel = `calc(100% - ${markerInset * 2}px)`;
+            const markers = item.shot.keyframes.map((keyframe) => {
+                const markerLeft = `calc(${markerInset}px + ${clamp(keyframe.t, 0, 1)} * ${markerTravel})`;
+                const kIndex = metrics.keyframes.findIndex((entry) => entry.keyframe.keyframeId === keyframe.keyframeId) + 1;
+                return `<button type="button" class="otl-cinematic-keyframe-marker${keyframe.keyframeId === this.selectedCinematicKeyframeId ? ' active' : ''}" style="left:${markerLeft};" data-act="cinematic-keyframe-select" data-keyframe-id="${keyframe.keyframeId}" data-shot-id="${item.shot.shotId}" data-time-sec="${item.startSec + (item.endSec - item.startSec) * keyframe.t}" data-label="K${kIndex}"><span class="otl-cinematic-keyframe-marker-label">K${kIndex}</span><span class="otl-cinematic-keyframe-marker-diamond"></span></button>`;
             }).join('');
-            const dots = item.shot.keyframes.map((keyframe, keyframeIndex) => {
-                const isBoundaryStart = keyframe.t <= 0.001;
-                const isBoundaryEnd = keyframe.t >= 0.999;
-                const dotTop = '50%';
-                const dotLeft = keyframeIndex === 0 ? '0%' : (keyframeIndex === item.shot.keyframes.length - 1 ? '100%' : `${clamp(keyframe.t, 0, 1) * 100}%`);
-                return `<button type="button" class="otl-cinematic-keyframe-dot${keyframe.keyframeId === this.selectedCinematicKeyframeId ? ' active' : ''}" style="left:${dotLeft};top:${dotTop};" data-act="cinematic-keyframe-select" data-keyframe-id="${keyframe.keyframeId}" data-shot-id="${item.shot.shotId}" data-time-sec="${item.startSec + (item.endSec - item.startSec) * keyframe.t}" data-label="K${metrics.keyframes.findIndex((entry) => entry.keyframe.keyframeId === keyframe.keyframeId) + 1}"></button>`;
-            }).join('');
-            bar.innerHTML = `<div class="otl-cinematic-shot-line"><div class="otl-cinematic-shot-title">${item.index + 1}. ${item.shot.label}</div><div class="otl-cinematic-shot-meta">${(item.endSec - item.startSec).toFixed(1)}s</div></div><div class="otl-cinematic-shot-klabels">${labels}</div><div class="otl-cinematic-shot-dots">${dots}</div>`;
+            bar.innerHTML = `<div class="otl-cinematic-shot-line"><div class="otl-cinematic-shot-title">${item.index + 1}. ${item.shot.label}</div><div class="otl-cinematic-shot-meta">${(item.endSec - item.startSec).toFixed(1)}s</div></div><div class="otl-cinematic-shot-markers">${markers}</div>`;
             shotRow.appendChild(bar);
         });
         trackScroll.appendChild(shotRow);
@@ -8604,9 +5564,11 @@ class TourLoaderPanel implements TourLoaderController {
 
         trackWrap.appendChild(trackScroll);
         trackWrap.addEventListener('scroll', () => {
+            this.cinematicTimelineScrollLeft = trackWrap.scrollLeft;
             rulerWrap.scrollLeft = trackWrap.scrollLeft;
         });
         rulerWrap.addEventListener('scroll', () => {
+            this.cinematicTimelineScrollLeft = rulerWrap.scrollLeft;
             trackWrap.scrollLeft = rulerWrap.scrollLeft;
         });
         main.appendChild(rulerWrap);
@@ -8614,13 +5576,13 @@ class TourLoaderPanel implements TourLoaderController {
         shell.appendChild(side);
         shell.appendChild(main);
         this.cinematicTimelineEl.appendChild(shell);
-
-        const miniWidth = Math.max(1, this.cinematicMiniTimelineEl.clientWidth || 260);
-        const railLeft = 12;
-        const railWidth = Math.max(24, miniWidth - 24);
-        const progressWidth = railWidth * clamp(this.cinematicCurrentTimeSec / Math.max(metrics.totalDurationSec, 0.001), 0, 1);
-        this.cinematicMiniTimelineEl.innerHTML = `<div class="otl-cinematic-mini-track"></div><div class="otl-cinematic-mini-progress" style="width:${progressWidth}px"></div><div class="otl-cinematic-mini-playhead" style="left:${railLeft + progressWidth}px"></div>`;
-        this.cinematicMiniTimeEl.textContent = `${this.cinematicCurrentTimeSec.toFixed(1)}s`;
+        this.cinematicTimelineTrackWrapEl = trackWrap;
+        this.cinematicTimelineRulerWrapEl = rulerWrap;
+        this.cinematicTimelinePlayheadEl = playhead;
+        trackWrap.scrollLeft = preservedScrollLeft;
+        rulerWrap.scrollLeft = preservedScrollLeft;
+        this.cinematicTimelineScrollLeft = preservedScrollLeft;
+        this.syncCinematicTimelineState();
     }
 
     private renderCinematicMapCanvas(canvas: HTMLCanvasElement, mode: 'top' | 'front') {
@@ -8740,7 +5702,7 @@ class TourLoaderPanel implements TourLoaderController {
     private cinematicSpeechPlayedShotIds = new Set<string>();
     private cinematicSpeechLastShotId: string | null = null;
     private cinematicSpeechLastTimeSec: number | null = null;
-    private cinematicTimelinePixelsPerSecond = 150;
+    private cinematicTimelinePixelsPerSecond = 50;
 
     private async syncCinematicPreviewCamera() {
         const selected = this.selectedCinematicKeyframe();
@@ -8861,14 +5823,24 @@ class TourLoaderPanel implements TourLoaderController {
                 audioEndSeconds: Math.max(0, Number(this.cinematicPlan.bgm.audioEndSeconds) || 0),
                 audioPlaybackRate: clampMusicRate(Number(this.cinematicPlan.bgm.audioPlaybackRate) || 1),
                 targetMusicDurationSeconds: normalizeMusicDuration(this.cinematicPlan.bgm.targetMusicDurationSeconds),
-                audioDisplayName: this.cinematicPlan.bgm.audioDisplayName ? String(this.cinematicPlan.bgm.audioDisplayName) : undefined
+                audioDisplayName: this.cinematicPlan.bgm.audioDisplayName ? String(this.cinematicPlan.bgm.audioDisplayName) : undefined,
+                sourceKey: this.cinematicPlan.bgm.sourceKey ? String(this.cinematicPlan.bgm.sourceKey) : undefined,
+                sourceType: this.cinematicPlan.bgm.sourceType || undefined,
+                audioRelativePath: this.cinematicPlan.bgm.audioRelativePath ? String(this.cinematicPlan.bgm.audioRelativePath) : undefined,
+                directoryName: this.cinematicPlan.bgm.directoryName ? String(this.cinematicPlan.bgm.directoryName) : undefined
             };
             this.cinematicPlan.bgm = { ...this.cinematicBgmSelection };
-            try {
-                await this.cinematicBgmLoadAudio(this.cinematicBgmSelection.audioPath, this.cinematicBgmSelection.audioDisplayName, 'selection');
-            } catch (error) {
-                this.logDebug('cine.bgm.load.version', String(error));
+            if (this.cinematicBgmNeedsHandle(this.cinematicBgmSelection) && !this.cinematicBgmSelection.sourceKey) {
+                this.logDebug('cine.bgm.orphan', `version=${detail.id} audioPath=${this.cinematicBgmSelection.audioPath} missing sourceKey; clearing orphan bgm`);
                 this.clearCinematicBgmState();
+                await this.persistCinematicBgmForSelectedVersion(null).catch(() => {});
+            } else {
+                try {
+                    await this.cinematicBgmLoadAudio(this.cinematicBgmSelection.audioPath, this.cinematicBgmSelection.audioDisplayName, 'selection', this.cinematicBgmSelection);
+                } catch (error) {
+                    this.logDebug('cine.bgm.load.version', String(error));
+                    this.clearCinematicBgmState();
+                }
             }
         } else {
             this.clearCinematicBgmState();
@@ -8942,6 +5914,7 @@ class TourLoaderPanel implements TourLoaderController {
     private async saveCinematicVersion(asNew = false) {
         if (!this.requireModel()) return;
         this.syncCinematicStateFromInputs();
+        if (this.cinematicPlan) this.cinematicPlan.bgm = this.cloneCinematicBgmConfig(this.cinematicBgmSelection || this.cinematicPlan.bgm || null);
         const body = {
             modelFilename: this.modelFilename,
             status: 'draft',
@@ -9913,11 +6886,14 @@ class TourLoaderPanel implements TourLoaderController {
     private refreshCinematicRecordingButtons() {
         const recording = Boolean(this.activeCinematicRecording);
         const paused = Boolean(this.activeCinematicRecording?.paused);
-        this.cinematicRecordBtn.classList.toggle('hidden', recording);
-        this.cinematicRecordPauseBtn.classList.toggle('hidden', !recording);
-        this.cinematicRecordStopBtn.classList.toggle('hidden', !recording);
-        this.cinematicRecordPauseBtn.textContent = paused ? 'Resume' : 'Pause';
-        this.cinematicRecordTimerEl.textContent = recording ? (paused ? 'PAUSED' : 'REC 00:00') : '';
+        this.cinematicRecordBtn.classList.remove('hidden');
+        this.cinematicRecordPauseBtn?.classList.add('hidden');
+        this.cinematicRecordStopBtn?.classList.add('hidden');
+        this.cinematicRecordBtn.classList.toggle('recording', recording && !paused);
+        this.cinematicRecordBtn.classList.toggle('paused', recording && paused);
+        this.cinematicRecordTimerEl.classList.toggle('active', recording);
+        this.cinematicRecordTimerEl.classList.toggle('paused', recording && paused);
+        this.cinematicRecordTimerEl.textContent = recording ? '00:00' : '';
     }
 
     private updateCinematicRecordTimer() {
@@ -9925,15 +6901,14 @@ class TourLoaderPanel implements TourLoaderController {
             this.cinematicRecordTimerEl.textContent = '';
             return;
         }
-        if (this.activeCinematicRecording.paused) {
-            this.cinematicRecordTimerEl.textContent = 'PAUSED';
-            return;
-        }
-        const elapsedMs = Math.max(0, performance.now() - this.activeCinematicRecording.startedAt);
+        const pausedExtraMs = this.activeCinematicRecording.paused && this.activeCinematicRecording.pausedAt
+            ? Math.max(0, performance.now() - this.activeCinematicRecording.pausedAt)
+            : 0;
+        const elapsedMs = Math.max(0, performance.now() - this.activeCinematicRecording.startedAt - this.activeCinematicRecording.pausedDurationMs - pausedExtraMs);
         const totalSec = Math.floor(elapsedMs / 1000);
         const minutes = Math.floor(totalSec / 60).toString().padStart(2, '0');
         const seconds = (totalSec % 60).toString().padStart(2, '0');
-        this.cinematicRecordTimerEl.textContent = `REC ${minutes}:${seconds}`;
+        this.cinematicRecordTimerEl.textContent = `${minutes}:${seconds}`;
     }
 
     private startCinematicRecordTimer() {
@@ -10058,12 +7033,17 @@ class TourLoaderPanel implements TourLoaderController {
         if (!runtime) return;
         if (runtime.paused) {
             runtime.recorder.resume();
+            if (runtime.pausedAt) {
+                runtime.pausedDurationMs += Math.max(0, performance.now() - runtime.pausedAt);
+                runtime.pausedAt = null;
+            }
             runtime.paused = false;
             if (!this.cinematicPreview.playing && this.cinematicRecordingSettings.autoPlay) void this.startCinematicPreview();
             this.setCinematicStatus('Recording resumed.');
         } else {
             runtime.recorder.pause();
             runtime.paused = true;
+            runtime.pausedAt = performance.now();
             if (this.cinematicPreview.playing) this.stopCinematicPreview('Preview paused');
             this.setCinematicStatus('Recording paused.');
         }
@@ -10775,7 +7755,9 @@ class TourLoaderPanel implements TourLoaderController {
                 extension: 'webm',
                 bytesWritten: 0,
                 lastProgressLogAt: 0,
-                paused: false
+                paused: false,
+                pausedAt: null,
+                pausedDurationMs: 0
             };
             recorder.start(1000);
             this.closeCinematicRecordingModal();
@@ -10812,44 +7794,101 @@ class TourLoaderPanel implements TourLoaderController {
         const rows: string[] = [];
         rows.push(OT_TOUR_CSV_HEADERS.join(','));
         let seq = 1;
-        let voiceIdx = 0;
-        
-        plan.shots.forEach((shot, shotIdx) => {
-            let ttsVoice = shot.speechMetrics?.ttsVoice;
-            if (!ttsVoice) {
-                if (this.csvVoiceConfig.enabled && this.csvVoiceConfig.voicePool.length > 0) {
-                    ttsVoice = this.csvVoiceConfig.voicePool[voiceIdx % this.csvVoiceConfig.voicePool.length];
-                    voiceIdx++;
-                } else {
-                    ttsVoice = this.csvVoiceConfig.fixedVoice || DEFAULT_TTS_VOICE;
-                }
-            }
+        let previousTarget: CinematicKeyframe | null = null;
 
-            for (let i = 0; i < shot.keyframes.length; i += 1) {
-                const kf = shot.keyframes[i];
-                const isLast = shotIdx === plan.shots.length - 1 && i === shot.keyframes.length - 1;
-                const dwell = isLast ? 120 : 0;
+        plan.shots.forEach((shot) => {
+            const keyframes = shot.keyframes.slice().sort((a, b) => a.t - b.t);
+            if (keyframes.length < 1) return;
+            const speechText = String(shot.speechText || '').trim();
+            const speechVoice = String(shot.speechMetrics?.ttsVoice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE;
+            const speechLang = /[\u3400-\u9FFF\uF900-\uFAFF]/.test(speechText) ? 'zh-CN' : 'en-US';
+            const firstKeyframe = keyframes[0];
+            const needsBootstrap = !previousTarget
+                || Math.hypot(firstKeyframe.x - previousTarget.x, firstKeyframe.y - previousTarget.y, firstKeyframe.z - previousTarget.z) > 0.0001
+                || Math.abs(firstKeyframe.yaw - previousTarget.yaw) > 0.01
+                || Math.abs(firstKeyframe.pitch - previousTarget.pitch) > 0.01
+                || Math.abs(firstKeyframe.fov - previousTarget.fov) > 0.01;
+
+            if (needsBootstrap) {
                 rows.push([
                     OT_TOUR_CSV_VERSION,
                     seq++,
-                    i === shot.keyframes.length - 1 ? 'LOOK' : 'MOVE',
+                    'LOOK',
                     shot.speechMode,
-                    kf.keyframeId,
-                    `${shot.label}-${i + 1}`,
-                    kf.x.toFixed(3),
-                    kf.y.toFixed(3),
-                    kf.z.toFixed(3),
-                    kf.yaw.toFixed(2),
-                    kf.pitch.toFixed(2),
-                    kf.fov.toFixed(2),
-                    kf.moveSpeedMps.toFixed(2),
-                    String(dwell),
-                    i === 0 ? shot.speechText : '',
-                    'zh-CN',
-                    ttsVoice,
+                    firstKeyframe.keyframeId,
+                    `${shot.label}-K1`,
+                    firstKeyframe.x.toFixed(3),
+                    firstKeyframe.y.toFixed(3),
+                    firstKeyframe.z.toFixed(3),
+                    firstKeyframe.yaw.toFixed(2),
+                    firstKeyframe.pitch.toFixed(2),
+                    firstKeyframe.fov.toFixed(2),
+                    '999.00',
+                    '0',
+                    '0',
+                    '',
+                    '',
+                    '',
                     plan.modelFilename,
                     this.eyeHeightM.toFixed(2)
                 ].map(escapeCsv).join(','));
+                previousTarget = firstKeyframe;
+            }
+
+            for (let i = 0; i < keyframes.length; i += 1) {
+                const kf = keyframes[i];
+                const next = keyframes[i + 1] || null;
+                const action = next ? 'MOVE' : 'LOOK';
+                const rowSpeechText = i === 0 ? speechText : '';
+                const rowSpeechLang = rowSpeechText ? speechLang : '';
+                const rowSpeechVoice = rowSpeechText ? speechVoice : '';
+                const target = next || kf;
+                const segmentDurationMs = next
+                    ? Math.max(0, Math.round(Math.max(0.12, Number(shot.durationSec) * Math.max(0.001, next.t - kf.t)) * 1000))
+                    : 0;
+
+                let moveSpeedMps = Math.max(0.001, Number(kf.moveSpeedMps) || 0.8);
+                if (next) {
+                    const dx = next.x - kf.x;
+                    const dy = next.y - kf.y;
+                    const dz = next.z - kf.z;
+                    const distance = Math.hypot(dx, dy, dz);
+                    const segmentRatio = Math.max(0.001, next.t - kf.t);
+                    const segmentDurationSec = Math.max(0.12, Number(shot.durationSec) * segmentRatio);
+                    const rawSpeedMps = distance / segmentDurationSec;
+                    if (distance > 0.0001) {
+                        moveSpeedMps = clamp(rawSpeedMps, 0.001, 12);
+                    }
+                    this.logDebug('cw.csv.compile', `shot=${shot.shotId} from=${kf.keyframeId} to=${next.keyframeId} distance=${distance.toFixed(3)} segmentRatio=${segmentRatio.toFixed(4)} shotDuration=${Number(shot.durationSec).toFixed(3)} expectedSec=${segmentDurationSec.toFixed(3)} segmentDurationMs=${segmentDurationMs} rawSpeed=${rawSpeedMps.toFixed(4)} csvSpeed=${moveSpeedMps.toFixed(4)}`);
+                }
+
+                const dwellMs = action === 'LOOK'
+                    ? (i === keyframes.length - 1 ? 120 : 0)
+                    : 0;
+
+                rows.push([
+                    OT_TOUR_CSV_VERSION,
+                    seq++,
+                    action,
+                    shot.speechMode,
+                    target.keyframeId,
+                    `${shot.label}-K${next ? i + 2 : i + 1}`,
+                    target.x.toFixed(3),
+                    target.y.toFixed(3),
+                    target.z.toFixed(3),
+                    target.yaw.toFixed(2),
+                    target.pitch.toFixed(2),
+                    target.fov.toFixed(2),
+                    moveSpeedMps.toFixed(4),
+                    String(segmentDurationMs),
+                    String(dwellMs),
+                    rowSpeechText,
+                    rowSpeechLang,
+                    rowSpeechVoice,
+                    plan.modelFilename,
+                    this.eyeHeightM.toFixed(2)
+                ].map(escapeCsv).join(','));
+                previousTarget = target;
             }
         });
         return rows.join('\n');
@@ -10911,6 +7950,7 @@ class TourLoaderPanel implements TourLoaderController {
         this.poiSelect.addEventListener('change', () => {
             this.selectedPoiId = this.poiSelect.value || null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
         });
 
         this.poiNameInput.addEventListener('change', () => {
@@ -10928,6 +7968,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.pois.forEach((p, i) => { p.sortOrder = i; });
             this.selectedPoiId = this.pois[0]?.poiId || null;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
             this.debounceSave('poi-delete');
         });
 
@@ -10935,6 +7976,7 @@ class TourLoaderPanel implements TourLoaderController {
             const poi = this.selectedPoi();
             if (!poi) return;
             void this.moveToPoi(poi, 1).then(() => {
+                this.hotspotController.activatePoi(poi.poiId);
                 this.setStatus(`Arrived at ${poi.poiName}`);
             });
         });
@@ -11333,32 +8375,37 @@ class TourLoaderPanel implements TourLoaderController {
             });
         });
         (this.root.querySelector('[data-act="cinematic-generate-plan"]') as HTMLButtonElement).addEventListener('click', () => {
-            void this.generateCinematicPlanViaLlm().then(() => {
-                this.cinematicPoiExpanded = false;
-            }).catch((error) => {
+            void this.generateCinematicPlanViaLlm().catch((error) => {
                 this.logDebug('cine.timeline.error', String(error));
                 this.setCinematicStatus(`Generate plan failed: ${String(error)}`);
             });
         });
-        (this.root.querySelector('[data-act="cinematic-preview"]') as HTMLButtonElement).addEventListener('click', () => {
+        (this.root.querySelector('[data-act="cinematic-preview-toggle"]') as HTMLButtonElement).addEventListener('click', () => {
+            if (this.activeCinematicRecording) {
+                this.toggleCinematicRecordingPause();
+                return;
+            }
             if (this.cinematicPreview.playing) {
                 this.stopCinematicPreview('Preview stopped');
-                if (this.activeCinematicRecording && this.cinematicRecordingSettings.stopWithPlayback) {
-                    void this.stopCinematicRecording(true, 'preview-stopped');
-                }
+            } else {
+                void this.startCinematicPreview();
             }
-            else void this.startCinematicPreview();
+        });
+        (this.root.querySelector('[data-act="cinematic-preview-stop"]') as HTMLButtonElement).addEventListener('click', () => {
+            if (this.activeCinematicRecording) {
+                if (this.cinematicPreview.playing) {
+                    this.stopCinematicPreview('Preview stopped');
+                }
+                void this.stopCinematicRecording(true, 'preview-stopped');
+                return;
+            }
+            this.stopCinematicPreview('Preview stopped');
         });
         this.cinematicRecordBtn.addEventListener('click', () => {
             if (this.activeCinematicRecording) {
-                void this.stopCinematicRecording(true, 'record-button');
                 return;
             }
             this.openCinematicRecordingModal();
-        });
-        this.cinematicRecordPauseBtn.addEventListener('click', () => this.toggleCinematicRecordingPause());
-        this.cinematicRecordStopBtn.addEventListener('click', () => {
-            void this.stopCinematicRecording(true, 'record-stop-button');
         });
         this.cinematicRecordingModalEl.querySelector('[data-record-modal="close"]')?.addEventListener('click', () => this.closeCinematicRecordingModal());
         this.cinematicRecordingModalEl.querySelector('[data-record-modal="start"]')?.addEventListener('click', () => {
@@ -11643,9 +8690,17 @@ class TourLoaderPanel implements TourLoaderController {
         (this.root.querySelector('[data-act="cinematic-shot-editor-close"]') as HTMLButtonElement).addEventListener('click', () => {
             this.cinematicShotModal.classList.add('hidden');
         });
-        (this.root.querySelector('[data-act="cinematic-toggle-pois"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.cinematicPoiExpanded = !this.cinematicPoiExpanded;
-            this.renderCinematicPoiList();
+        (this.root.querySelector('[data-act="cinematic-open-poi-picker"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.openCinematicPoiPicker();
+        });
+        (this.root.querySelector('[data-act="cinematic-poi-picker-close"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.closeCinematicPoiPicker();
+        });
+        (this.root.querySelector('[data-act="cinematic-poi-picker-cancel"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.closeCinematicPoiPicker();
+        });
+        (this.root.querySelector('[data-act="cinematic-poi-picker-save"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.saveCinematicPoiPicker();
         });
         this.cinematicMiniToggleBtn.addEventListener('click', () => {
             this.cinematicMiniMode = !this.cinematicMiniMode;
@@ -11661,7 +8716,8 @@ class TourLoaderPanel implements TourLoaderController {
             }
             else void this.startCinematicPreview();
         });
-        (this.root.querySelector('[data-act="cinematic-workspace-fullscreen"]') as HTMLButtonElement).addEventListener('click', () => {
+        const fullscreenBtn = this.root.querySelector('[data-act="cinematic-workspace-fullscreen"]') as HTMLButtonElement | null;
+        fullscreenBtn?.addEventListener('click', () => {
             if (!this.cinematicWorkspaceFullscreen) {
                 const left = Number.parseFloat(this.cinematicWorkspacePanel.style.left || '0');
                 const top = Number.parseFloat(this.cinematicWorkspacePanel.style.top || '0');
@@ -11696,8 +8752,11 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicPoiListEl.addEventListener('change', () => {
             const picked = Array.from(this.cinematicPoiListEl.querySelectorAll('[data-role="cinematic-poi-item"]:checked'))
                 .map((item) => String((item as HTMLInputElement).value || ''));
-            this.cinematicSelectedPoiIds = picked;
+            this.cinematicPoiDraftIds = picked;
             this.renderCinematicPoiList();
+        });
+        this.cinematicPoiPickerModal.addEventListener('click', (event) => {
+            if (event.target === this.cinematicPoiPickerModal) this.closeCinematicPoiPicker();
         });
         this.cinematicMiniTimelineEl.addEventListener('click', (event) => {
             const metrics = this.cinematicTimelineData();
@@ -11738,20 +8797,20 @@ class TourLoaderPanel implements TourLoaderController {
             const bgmButton = target.closest('[data-act="cinematic-bgm-edit"]') as HTMLButtonElement | null;
             if (bgmButton) {
                 this.cinematicBgmTimelineSelected = true;
-                this.refreshCinematicUi();
+                this.syncCinematicTimelineState();
                 return;
             }
             const shotButton = target.closest('button[data-act="cinematic-shot-select"]') as HTMLButtonElement | null;
             if (shotButton) {
                 this.cinematicBgmTimelineSelected = false;
                 this.selectedCinematicShotId = String(shotButton.getAttribute('data-shot-id') || '');
-                this.selectedCinematicKeyframeId = this.selectedCinematicShot()?.keyframes[0]?.keyframeId || null;
-                this.refreshCinematicUi();
+                const timeSec = Number(shotButton.getAttribute('data-start-sec') || 0);
+                this.scrubCinematicTimeline(timeSec, true);
                 return;
             }
             if (this.cinematicBgmTimelineSelected) {
                 this.cinematicBgmTimelineSelected = false;
-                this.refreshCinematicUi();
+                this.syncCinematicTimelineState();
             }
             const position = this.cinematicTimelinePosition(event.clientX);
             if (!position) return;
@@ -11776,6 +8835,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (keyButton) {
                 this.cinematicBgmTimelineSelected = false;
                 this.selectedCinematicKeyframeId = String(keyButton.getAttribute('data-keyframe-id') || '');
+                this.scrubCinematicTimeline(Number(keyButton.getAttribute('data-time-sec') || 0), true);
                 this.openCinematicKeyframeEditor();
                 return;
             }
@@ -11783,7 +8843,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (shotButton) {
                 this.cinematicBgmTimelineSelected = false;
                 this.selectedCinematicShotId = String(shotButton.getAttribute('data-shot-id') || '');
-                this.selectedCinematicKeyframeId = this.selectedCinematicShot()?.keyframes[0]?.keyframeId || null;
+                this.scrubCinematicTimeline(Number(shotButton.getAttribute('data-start-sec') || 0), true);
                 this.openCinematicShotEditor();
             }
         });
@@ -12043,8 +9103,13 @@ class TourLoaderPanel implements TourLoaderController {
         };
         this.cinematicKeyframeEditorBodyEl.addEventListener('change', cinematicEditorChange);
         this.cinematicShotEditorBodyEl.addEventListener('change', cinematicEditorChange);
-        (this.root.querySelector('[data-act="cinematic-delete-keyframe"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.deleteSelectedCinematicKeyframe();
+        this.root.querySelectorAll('[data-act="cinematic-delete-keyframe"]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+                this.deleteSelectedCinematicKeyframe();
+            });
+        });
+        (this.root.querySelector('[data-act="cinematic-delete-shot"]') as HTMLButtonElement).addEventListener('click', () => {
+            this.deleteSelectedCinematicShot();
         });
         (this.root.querySelector('[data-act="cinematic-top-center"]') as HTMLButtonElement).addEventListener('click', () => { this.topView.offsetX = 0; this.topView.offsetY = 0; this.renderCinematicMap(); });
         (this.root.querySelector('[data-act="cinematic-front-center"]') as HTMLButtonElement).addEventListener('click', () => { this.frontView.offsetX = 0; this.frontView.offsetY = 0; this.renderCinematicMap(); });
@@ -12057,21 +9122,26 @@ class TourLoaderPanel implements TourLoaderController {
             this.syncCinematicChrome();
             this.renderCinematicMap();
         });
-        (this.root.querySelector('[data-act="cinematic-timeline-zoom-in"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond + 20, 80, 260);
-            const input = this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
-            if (input) input.value = String(this.cinematicTimelinePixelsPerSecond);
-            this.renderCinematicTimeline();
+        this.root.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest('[data-act="cinematic-timeline-zoom-in"]')) {
+                this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond + 5, 10, 100);
+                const input = this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
+                if (input) input.value = String(this.cinematicTimelinePixelsPerSecond);
+                this.renderCinematicTimeline();
+            } else if (target.closest('[data-act="cinematic-timeline-zoom-out"]')) {
+                this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond - 5, 10, 100);
+                const input = this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
+                if (input) input.value = String(this.cinematicTimelinePixelsPerSecond);
+                this.renderCinematicTimeline();
+            }
         });
-        (this.root.querySelector('[data-act="cinematic-timeline-zoom-out"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.cinematicTimelinePixelsPerSecond = clamp(this.cinematicTimelinePixelsPerSecond - 20, 80, 260);
-            const input = this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement | null;
-            if (input) input.value = String(this.cinematicTimelinePixelsPerSecond);
-            this.renderCinematicTimeline();
-        });
-        (this.root.querySelector('[data-role="cinematic-timeline-zoom"]') as HTMLInputElement).addEventListener('input', (event) => {
-            this.cinematicTimelinePixelsPerSecond = clamp(Number((event.target as HTMLInputElement).value) || this.cinematicTimelinePixelsPerSecond, 80, 260);
-            this.renderCinematicTimeline();
+        this.root.addEventListener('input', (event) => {
+            const target = event.target as HTMLInputElement;
+            if (target?.dataset?.role === 'cinematic-timeline-zoom' || target?.getAttribute('data-role') === 'cinematic-timeline-zoom') {
+                this.cinematicTimelinePixelsPerSecond = clamp(Number(target.value) || this.cinematicTimelinePixelsPerSecond, 10, 100);
+                this.renderCinematicTimeline();
+            }
         });
         this.cinematicWorkspaceModal.addEventListener('click', (event) => {
             if (event.target === this.cinematicWorkspaceModal) {
@@ -12082,12 +9152,6 @@ class TourLoaderPanel implements TourLoaderController {
             if (event.target === this.cinematicBgmModal) this.closeCinematicBgmModal();
         });
         (this.root.querySelector('[data-act="cinematic-bgm-close"]') as HTMLButtonElement).addEventListener('click', () => this.closeCinematicBgmModal());
-        (this.root.querySelector('[data-act="cinematic-bgm-browse-folder"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.cinematicBgmFolderInput.click();
-        });
-        (this.root.querySelector('[data-act="cinematic-bgm-browse-files"]') as HTMLButtonElement).addEventListener('click', () => {
-            this.cinematicBgmFileInput.click();
-        });
         this.cinematicBgmSearchInput.addEventListener('input', () => {
             this.cinematicBgmFilter = this.cinematicBgmSearchInput.value;
             this.cinematicBgmRenderLibrary();
@@ -12098,9 +9162,10 @@ class TourLoaderPanel implements TourLoaderController {
             if (!itemBtn) return;
             const audioPath = String(itemBtn.getAttribute('data-audio-path') || '').trim();
             if (!audioPath) return;
-            const item = this.cinematicBgmLibrary.find((row) => row.audioPath === audioPath) || null;
+            const sourceKey = String(itemBtn.getAttribute('data-source-key') || '').trim();
+            const item = this.cinematicBgmLibrary.find((row) => row.audioPath === audioPath && (!sourceKey || row.sourceKey === sourceKey)) || null;
             if (!item) return;
-            void this.cinematicBgmLoadAudio(item.audioPath, item.name, 'draft').catch((error) => {
+            void this.cinematicBgmLoadAudio(item.audioPath, item.name, 'draft', item).catch((error) => {
                 this.setCinematicStatus(`Load BGM failed: ${String(error)}`);
             });
         });
@@ -12119,7 +9184,9 @@ class TourLoaderPanel implements TourLoaderController {
                     name: file.name,
                     audioPath,
                     audioUrl,
-                    source
+                    source,
+                    sourceType: 'legacy',
+                    audioRelativePath: audioPath
                 };
             });
             const map = new Map<string, CinematicBgmLibraryItem>();
@@ -12130,7 +9197,26 @@ class TourLoaderPanel implements TourLoaderController {
             this.cinematicBgmRenderLibrary();
             const first = newItems[0];
             if (first) {
-                void this.cinematicBgmLoadAudio(first.audioPath, first.name, 'draft').catch((error) => {
+                void this.cinematicBgmLoadAudio(first.audioPath, first.name, 'draft', first).catch((error) => {
+                    this.setCinematicStatus(`Load BGM failed: ${String(error)}`);
+                });
+            }
+        };
+        const absorbBgmItems = (newItems: CinematicBgmLibraryItem[]) => {
+            if (newItems.length < 1) {
+                this.setCinematicStatus('No audio files found');
+                return;
+            }
+            const map = new Map<string, CinematicBgmLibraryItem>();
+            [...newItems, ...this.cinematicBgmLibrary].forEach((item) => {
+                const key = `${item.sourceKey || 'legacy'}::${item.audioPath}`;
+                if (!map.has(key)) map.set(key, item);
+            });
+            this.cinematicBgmLibrary = Array.from(map.values());
+            this.cinematicBgmRenderLibrary();
+            const first = newItems[0];
+            if (first) {
+                void this.cinematicBgmLoadAudio(first.audioPath, first.name, 'draft', first).catch((error) => {
                     this.setCinematicStatus(`Load BGM failed: ${String(error)}`);
                 });
             }
@@ -12140,8 +9226,38 @@ class TourLoaderPanel implements TourLoaderController {
             this.cinematicBgmFolderInput.value = '';
         });
         this.cinematicBgmFileInput.addEventListener('change', () => {
-            absorbBgmFiles(Array.from(this.cinematicBgmFileInput.files || []), 'folder');
+            absorbBgmFiles(Array.from(this.cinematicBgmFileInput.files || []), 'path');
             this.cinematicBgmFileInput.value = '';
+        });
+        (this.root.querySelector('[data-act="cinematic-bgm-browse-folder"]') as HTMLButtonElement).addEventListener('click', async () => {
+            const picker = (window as Window & { showDirectoryPicker?: () => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+            if (typeof picker !== 'function') {
+                this.cinematicBgmFolderInput.click();
+                return;
+            }
+            try {
+                const dirHandle = await picker();
+                const items = await this.cinematicBgmAbsorbDirectoryHandle(dirHandle);
+                absorbBgmItems(items);
+            } catch (error) {
+                if (String(error).includes('AbortError')) return;
+                this.setCinematicStatus(`Load BGM folder failed: ${String(error)}`);
+            }
+        });
+        (this.root.querySelector('[data-act="cinematic-bgm-browse-files"]') as HTMLButtonElement).addEventListener('click', async () => {
+            const picker = (window as Window & { showOpenFilePicker?: (options?: unknown) => Promise<FileSystemFileHandle[]> }).showOpenFilePicker;
+            if (typeof picker !== 'function') {
+                this.cinematicBgmFileInput.click();
+                return;
+            }
+            try {
+                const handles = await picker({ multiple: true, types: [{ description: 'Audio Files', accept: { 'audio/*': ['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'] } }] });
+                const items = await this.cinematicBgmAbsorbFileHandles(handles);
+                absorbBgmItems(items);
+            } catch (error) {
+                if (String(error).includes('AbortError')) return;
+                this.setCinematicStatus(`Load BGM files failed: ${String(error)}`);
+            }
         });
         this.cinematicMediaFileInput.addEventListener('change', () => {
             const file = this.cinematicMediaFileInput.files?.[0];
@@ -12380,10 +9496,40 @@ class TourLoaderPanel implements TourLoaderController {
             void this.saveCinematicVersion(true).then(() => this.closeCinematicPromptModal('complex')).catch((error) => this.setCinematicStatus(`Save version failed: ${String(error)}`));
         });
         const bindCinematicCanvas = (canvas: HTMLCanvasElement, mode: 'top' | 'front') => {
-            const centerHitRadius = 14;
-            const handleHitRadius = 14;
+            const centerHitRadius = mode === 'front' ? 120 : 24;
+            const handleHitRadius = mode === 'front' ? 120 : 22;
+            const findNearestCinematicMapTarget = (p: { x: number; y: number }) => {
+                if (!this.cinematicPlan?.shots?.length) return null;
+                let best: null | {
+                    shotId: string;
+                    keyframeId: string;
+                    centerDistance: number;
+                    handleDistance: number;
+                    center: { x: number; y: number };
+                    handle: { x: number; y: number };
+                } = null;
+                this.cinematicPlan.shots.forEach((shot) => {
+                    shot.keyframes.forEach((kf) => {
+                        const center = mode === 'top'
+                            ? this.projectTopForCanvas(canvas, kf.x, kf.z)
+                            : this.projectFrontForCanvas(canvas, kf.x, kf.y + this.eyeHeightM);
+                        const angle = mode === 'top' ? degToRad(kf.yaw) : degToRad(kf.pitch);
+                        const handle = mode === 'top'
+                            ? { x: center.x + Math.sin(angle) * 18, y: center.y + Math.cos(angle) * 18 }
+                            : { x: center.x + Math.cos(angle) * 18, y: center.y - Math.sin(angle) * 18 };
+                        const centerDistance = Math.hypot(center.x - p.x, center.y - p.y);
+                        const handleDistance = Math.hypot(handle.x - p.x, handle.y - p.y);
+                        const score = Math.min(centerDistance, handleDistance);
+                        if (!best || score < Math.min(best.centerDistance, best.handleDistance)) {
+                            best = { shotId: shot.shotId, keyframeId: kf.keyframeId, centerDistance, handleDistance, center, handle };
+                        }
+                    });
+                });
+                return best;
+            };
             canvas.addEventListener('contextmenu', (event) => event.preventDefault());
             canvas.addEventListener('pointerdown', (event) => {
+                event.stopPropagation();
                 if (!this.cinematicWorkspaceOpen()) return;
                 const p = mapPointer(canvas, event);
                 if (event.button === 2) {
@@ -12394,33 +9540,36 @@ class TourLoaderPanel implements TourLoaderController {
                 if (event.button !== 0) return;
                 const keyframe = this.selectedCinematicKeyframe();
                 if (!keyframe) return;
-                if (mode === 'top') {
-                    const c = this.projectTopForCanvas(canvas, keyframe.x, keyframe.z);
-                    const yawR = degToRad(keyframe.yaw);
-                    const hx = c.x + Math.sin(yawR) * 18;
-                    const hy = c.y + Math.cos(yawR) * 18;
-                    if (Math.hypot(hx - p.x, hy - p.y) < handleHitRadius) {
-                        this.drag = { active: true, pointerId: event.pointerId, mode: 'top-yaw', startX: p.x, startY: p.y };
-                        canvas.setPointerCapture(event.pointerId);
-                        return;
-                    }
-                    if (Math.hypot(c.x - p.x, c.y - p.y) >= centerHitRadius) return;
-                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
+                const nearest = findNearestCinematicMapTarget(p);
+                const currentCenter = mode === 'top'
+                    ? this.projectTopForCanvas(canvas, keyframe.x, keyframe.z)
+                    : this.projectFrontForCanvas(canvas, keyframe.x, keyframe.y + this.eyeHeightM);
+                const currentAngle = mode === 'top' ? degToRad(keyframe.yaw) : degToRad(keyframe.pitch);
+                const currentHandle = mode === 'top'
+                    ? { x: currentCenter.x + Math.sin(currentAngle) * 18, y: currentCenter.y + Math.cos(currentAngle) * 18 }
+                    : { x: currentCenter.x + Math.cos(currentAngle) * 18, y: currentCenter.y - Math.sin(currentAngle) * 18 };
+                this.logDebug(`cine.map.${mode}.pointerdown`, `p=(${p.x.toFixed(1)},${p.y.toFixed(1)}) selected=${keyframe.keyframeId} center=(${currentCenter.x.toFixed(1)},${currentCenter.y.toFixed(1)}) handle=(${currentHandle.x.toFixed(1)},${currentHandle.y.toFixed(1)}) nearest=${nearest ? `${nearest.keyframeId} cd=${nearest.centerDistance.toFixed(1)} hd=${nearest.handleDistance.toFixed(1)}` : 'none'}`);
+                if (nearest && (nearest.centerDistance <= centerHitRadius || nearest.handleDistance <= handleHitRadius)) {
+                    this.selectedCinematicShotId = nearest.shotId;
+                    this.selectedCinematicKeyframeId = nearest.keyframeId;
+                    this.syncCinematicTimelineState();
+                    this.renderCinematicKeyframeList();
+                    this.renderCinematicMap();
+                    const centerHit = nearest.centerDistance <= centerHitRadius;
+                    const handleHit = nearest.handleDistance <= handleHitRadius;
+                    const useHandle = handleHit && (!centerHit || nearest.handleDistance < nearest.centerDistance);
+                    this.drag = {
+                        active: true,
+                        pointerId: event.pointerId,
+                        mode: mode === 'top' ? (useHandle ? 'top-yaw' : 'top-move') : (useHandle ? 'front-pitch' : 'front-move'),
+                        startX: p.x,
+                        startY: p.y
+                    };
+                    this.logDebug(`cine.map.${mode}.drag-start`, `keyframe=${nearest.keyframeId} shot=${nearest.shotId} mode=${this.drag.mode} center=(${nearest.center.x.toFixed(1)},${nearest.center.y.toFixed(1)}) handle=(${nearest.handle.x.toFixed(1)},${nearest.handle.y.toFixed(1)}) centerHit=${centerHit} handleHit=${handleHit}`);
                     canvas.setPointerCapture(event.pointerId);
-                } else {
-                    const c = this.projectFrontForCanvas(canvas, keyframe.x, keyframe.y + this.eyeHeightM);
-                    const pitchR = degToRad(keyframe.pitch);
-                    const hx = c.x + Math.cos(pitchR) * 18;
-                    const hy = c.y - Math.sin(pitchR) * 18;
-                    if (Math.hypot(hx - p.x, hy - p.y) < handleHitRadius) {
-                        this.drag = { active: true, pointerId: event.pointerId, mode: 'front-pitch', startX: p.x, startY: p.y };
-                        canvas.setPointerCapture(event.pointerId);
-                        return;
-                    }
-                    if (Math.hypot(c.x - p.x, c.y - p.y) >= centerHitRadius) return;
-                    this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
-                    canvas.setPointerCapture(event.pointerId);
+                    return;
                 }
+                this.logDebug(`cine.map.${mode}.pointerdown`, 'miss');
             });
             canvas.addEventListener('pointermove', (event) => {
                 if (!this.drag.active || event.pointerId !== this.drag.pointerId) return;
@@ -12433,6 +9582,12 @@ class TourLoaderPanel implements TourLoaderController {
                     this.frontView.offsetX += p.x - this.drag.startX;
                     this.frontView.offsetY += p.y - this.drag.startY;
                     this.drag.startX = p.x; this.drag.startY = p.y;
+                } else if (this.drag.mode === 'top-move' && mode === 'top') {
+                    const keyframe = this.selectedCinematicKeyframe();
+                    if (!keyframe) return;
+                    const world = this.unprojectTopForCanvas(canvas, p.x, p.y);
+                    keyframe.x = world.x;
+                    keyframe.z = world.z;
                 } else {
                     const keyframe = this.selectedCinematicKeyframe();
                     if (!keyframe) return;
@@ -12442,22 +9597,21 @@ class TourLoaderPanel implements TourLoaderController {
                     } else if (this.drag.mode === 'front-pitch') {
                         const c = this.projectFrontForCanvas(canvas, keyframe.x, keyframe.y + this.eyeHeightM);
                         keyframe.pitch = Math.atan2(-(p.y - c.y), p.x - c.x) * 180 / Math.PI;
-                    } else if (this.drag.mode === 'front-move' && mode === 'top') {
-                        const world = this.unprojectTopForCanvas(canvas, p.x, p.y);
-                        keyframe.x = world.x;
-                        keyframe.z = world.z;
                     } else if (this.drag.mode === 'front-move' && mode === 'front') {
                         const world = this.unprojectFrontForCanvas(canvas, p.x, p.y);
                         keyframe.x = world.x;
                         keyframe.y = world.y - this.eyeHeightM;
                     }
+                    this.logDebug(`cine.map.${mode}.drag-move`, `mode=${this.drag.mode} keyframe=${keyframe.keyframeId} x=${keyframe.x.toFixed(3)} y=${keyframe.y.toFixed(3)} z=${keyframe.z.toFixed(3)} yaw=${keyframe.yaw.toFixed(2)} pitch=${keyframe.pitch.toFixed(2)}`);
                 }
                 this.renderCinematicMap();
                 this.renderCinematicKeyframeList();
             });
             const end = (event: PointerEvent) => {
                 if (!this.drag.active || event.pointerId !== this.drag.pointerId) return;
+                this.logDebug(`cine.map.${mode}.drag-end`, `mode=${this.drag.mode}`);
                 this.drag.active = false;
+                this.drag.mode = null;
                 if (canvas.hasPointerCapture(event.pointerId)) canvas.releasePointerCapture(event.pointerId);
                 this.renderCinematicMap();
             };
@@ -12565,6 +9719,10 @@ class TourLoaderPanel implements TourLoaderController {
             }
             if (act === 'delete-image' && poiId) {
                 void this.clearPoiScreenshot(poiId);
+                return;
+            }
+            if (act === 'edit-hotspots' && poiId) {
+                void this.hotspotController.openEditorForPoi(poiId);
                 return;
             }
             if (act === 'delete-poi-inline' && poiId) {
@@ -12707,6 +9865,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (nearest && nd <= 10) {
                 this.selectedPoiId = nearest.poiId;
                 this.refreshPoiControls();
+                this.hotspotController.activatePoi(this.selectedPoiId);
                 return;
             }
             const world = this.unprojectTop(p.x, p.y);
@@ -12714,6 +9873,7 @@ class TourLoaderPanel implements TourLoaderController {
             this.pois.push(poi);
             this.selectedPoiId = poi.poiId;
             this.refreshPoiControls();
+            this.hotspotController.activatePoi(this.selectedPoiId);
             this.debounceSave('poi-add-topview');
         });
 
@@ -12833,6 +9993,7 @@ class TourLoaderPanel implements TourLoaderController {
             if (nearest && nd <= 10) {
                 this.selectedPoiId = nearest.poiId;
                 this.refreshPoiControls();
+                this.hotspotController.activatePoi(this.selectedPoiId);
                 this.drag = { active: true, pointerId: event.pointerId, mode: 'front-move', startX: p.x, startY: p.y };
                 this.frontCanvas.setPointerCapture(event.pointerId);
             }
@@ -12926,17 +10087,32 @@ class TourLoaderPanel implements TourLoaderController {
     }
 }
 
-const mountOTTourLoaderPanel = (options: TourLoaderOptions): TourLoaderController => {
-    return new TourLoaderPanel(options);
+const mountOTCinematicWorkspacePanel = (options: CinematicWorkspaceOptions): CinematicWorkspaceController => {
+    const panel = new CinematicWorkspacePanel(options);
+    ;(window as Window & { __otCinematicWorkspacePanel?: unknown }).__otCinematicWorkspacePanel = panel;
+    return {
+        open: () => {
+            void panel.openCinematicWorkspace();
+        },
+        close: () => {
+            panel.closeCinematicWorkspace();
+        },
+        toggle: () => {
+            if ((panel as unknown as { cinematicWorkspaceOpen: () => boolean }).cinematicWorkspaceOpen()) panel.closeCinematicWorkspace();
+            else void panel.openCinematicWorkspace();
+        },
+        openCinematicWorkspace: () => panel.openCinematicWorkspace(),
+        closeCinematicWorkspace: () => panel.closeCinematicWorkspace()
+    };
 };
 
 export {
-    mountOTTourLoaderPanel,
-    type TourLoaderController,
-    type TourLoaderOptions
+    mountOTCinematicWorkspacePanel,
+    type CinematicWorkspaceController,
+    type CinematicWorkspaceOptions
 };
 
-export const OT_TOUR_LOADER_TEST_EXPORT = {
+export const OT_CINEMATIC_WORKSPACE_TEST_EXPORT = {
     OT_TOUR_CSV_HEADERS,
     OT_TOUR_CSV_VERSION,
     escapeCsv

@@ -1323,7 +1323,7 @@ const server = createServer(async (req, res) => {
     }
 });
 
-const port = Number(process.env.OT_TOUR_PRODUCER_PORT || process.env.PORT || 3034);
+const port = Number(process.env.OT_TOUR_PRODUCER_PORT || process.env.PORT || 3035);
 server.listen(port, () => {
     process.stdout.write(`[ot-tour-producer] listening on http://localhost:${port}\n`);
 });

@@ -455,7 +455,7 @@ class RtcRecordingModule implements RtcRecordingModuleController {
     }
 
     private transcodeApiBase() {
-        return this.options.transcodeApiBaseUrl || 'http://localhost:3032/api/ot-tour-player';
+        return this.options.transcodeApiBaseUrl || 'http://localhost:3033/api/ot-tour-player';
     }
 
     private setStatus(text: string) {

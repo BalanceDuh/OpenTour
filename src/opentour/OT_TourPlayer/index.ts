@@ -21,6 +21,7 @@ type QueueDispatchTask = {
     content: { text: string; audio_url: string | null };
     execution_mode: QueueBehavior;
     move_speed_mps?: number | null;
+    segment_duration_ms?: number | null;
     dwell_ms?: number | null;
     tts_lang?: string | null;
     tts_voice?: string | null;
@@ -1282,7 +1283,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
     close() { this.root.classList.add('hidden'); }
     toggle() { this.root.classList.toggle('hidden'); }
 
-    private apiBase() { return this.options.apiBaseUrl || 'http://localhost:3032/api/ot-tour-player'; }
+    private apiBase() { return this.options.apiBaseUrl || 'http://localhost:3033/api/ot-tour-player'; }
 
     private setStatus(text: string) { this.statusTextEl.textContent = text; }
 
@@ -1782,7 +1783,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
         const live = this.options.getLiveCameraPose?.();
         const eye = live?.pose.eye || { x: 0, y: 1.65, z: 0 };
         const lines: string[] = [];
-        lines.push(['version', 'seq', 'action', 'audio_mode', 'poi_id', 'poi_name', 'target_x', 'target_y', 'target_z', 'target_yaw', 'target_pitch', 'move_speed_mps', 'dwell_ms', 'content', 'audio_url', 'tts_lang', 'model_filename', 'eye_height_m'].join(','));
+        lines.push(['version', 'seq', 'action', 'audio_mode', 'poi_id', 'poi_name', 'target_x', 'target_y', 'target_z', 'target_yaw', 'target_pitch', 'move_speed_mps', 'segment_duration_ms', 'dwell_ms', 'content', 'audio_url', 'tts_lang', 'model_filename', 'eye_height_m'].join(','));
         const pois = [
             { id: 'poi_lobby', name: 'Lobby', x: eye.x, y: eye.y - 1.65, z: eye.z, yaw: 0, pitch: 0, content: '欢迎来到 OpenTour 巡游起点。' },
             { id: 'poi_hall', name: 'Hall', x: eye.x + 1.6, y: eye.y - 1.65, z: eye.z + 0.8, yaw: 35, pitch: -2, content: '现在来到主厅区域。' },
@@ -1790,8 +1791,8 @@ class TourPlayerPanel implements TourPlayerPanelController {
         ];
         let seq = 1;
         pois.forEach((poi) => {
-            lines.push(['v2', seq++, 'MOVE', 'INTERRUPTIBLE', poi.id, poi.name, poi.x.toFixed(3), poi.y.toFixed(3), poi.z.toFixed(3), poi.yaw.toFixed(2), poi.pitch.toFixed(2), '0.85', '900', '', '', 'zh-CN', modelFilename, '1.65'].map(csvEscape).join(','));
-            lines.push(['v2', seq++, 'SPEAK', 'BLOCKING', poi.id, poi.name, poi.x.toFixed(3), poi.y.toFixed(3), poi.z.toFixed(3), poi.yaw.toFixed(2), poi.pitch.toFixed(2), '0.85', '1200', poi.content, '', 'zh-CN', modelFilename, '1.65'].map(csvEscape).join(','));
+            lines.push(['v2', seq++, 'MOVE', 'INTERRUPTIBLE', poi.id, poi.name, poi.x.toFixed(3), poi.y.toFixed(3), poi.z.toFixed(3), poi.yaw.toFixed(2), poi.pitch.toFixed(2), '0.85', '900', '900', '', '', 'zh-CN', modelFilename, '1.65'].map(csvEscape).join(','));
+            lines.push(['v2', seq++, 'SPEAK', 'BLOCKING', poi.id, poi.name, poi.x.toFixed(3), poi.y.toFixed(3), poi.z.toFixed(3), poi.yaw.toFixed(2), poi.pitch.toFixed(2), '0.85', '0', '1200', poi.content, '', 'zh-CN', modelFilename, '1.65'].map(csvEscape).join(','));
         });
         return lines.join('\n');
     }
@@ -2914,7 +2915,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
     private async registerMp4ToTourProducer(name: string, blob: Blob) {
         if (String(blob.type || '').toLowerCase() !== 'video/mp4') return;
         try {
-            const healthy = await fetch('http://localhost:3034/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
             if (!healthy) {
                 this.logDebug('record.producer.register.error', {
                     name,
@@ -2928,7 +2929,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 bytes: blob.size,
                 modelFilename
             });
-            const response = await fetch('http://localhost:3034/api/ot-tour-producer/videos/register', {
+            const response = await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
                 method: 'POST',
                 headers: {
                     'X-OT-Name': name,
@@ -2975,7 +2976,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.backfillSyncInProgress = true;
         this.recordingSyncToModelDbBtn.disabled = true;
         try {
-            const healthy = await fetch('http://localhost:3034/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
             if (!healthy) {
                 this.setRecordingModalStatus('Sync failed: ot-tour-producer backend is offline (3034).');
                 this.logDebug('record.backfill.done', { total: 0, uploaded: 0, skipped: 0, failed: 0, reason: 'producer-offline' });
@@ -3016,7 +3017,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 });
 
                 try {
-                    const response = await fetch('http://localhost:3034/api/ot-tour-producer/videos/register', {
+                    const response = await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
                         method: 'POST',
                         headers: {
                             'X-OT-Name': syncName,
@@ -3562,16 +3563,66 @@ class TourPlayerPanel implements TourPlayerPanelController {
         if (!this.options.setLiveCameraPose) return;
         const live = this.options.getLiveCameraPose?.();
         const to = this.cameraPoseFromTask(task);
+        const dwellMs = Math.max(0, Number(task.dwell_ms ?? 0));
         if (!live) {
             await this.options.setLiveCameraPose(to, clampFov(task.target_fov, DEFAULT_CAMERA_FOV));
+            if (dwellMs > 0) await sleep(dwellMs);
             return;
         }
         const from = live.pose;
         const fromFov = clampFov(live.fovDeg, DEFAULT_CAMERA_FOV);
         const toFov = clampFov(task.target_fov, fromFov);
         const distance = Math.hypot(to.eye.x - from.eye.x, to.eye.y - from.eye.y, to.eye.z - from.eye.z);
-        const speed = Math.max(0.2, Number(task.move_speed_mps ?? 0.8));
-        const duration = Math.max(260, (distance / speed) * 1000);
+        const forwardDistance = Math.hypot(
+            to.forward.x - from.forward.x,
+            to.forward.y - from.forward.y,
+            to.forward.z - from.forward.z
+        );
+        const fovDelta = Math.abs(toFov - fromFov);
+        const explicitDurationMs = Math.max(0, Number(task.segment_duration_ms ?? 0));
+        this.logDebug('task.move.debug', {
+            taskId: task.task_id,
+            poiId: task.poi_id,
+            type: task.type,
+            from: {
+                x: Number(from.eye.x.toFixed(3)),
+                y: Number(from.eye.y.toFixed(3)),
+                z: Number(from.eye.z.toFixed(3)),
+                fov: Number(fromFov.toFixed(3))
+            },
+            to: {
+                x: Number(to.eye.x.toFixed(3)),
+                y: Number(to.eye.y.toFixed(3)),
+                z: Number(to.eye.z.toFixed(3)),
+                fov: Number(toFov.toFixed(3))
+            },
+            distance: Number(distance.toFixed(4)),
+            forwardDistance: Number(forwardDistance.toFixed(4)),
+            fovDelta: Number(fovDelta.toFixed(4)),
+            csvMoveSpeedMps: Number(Number(task.move_speed_mps ?? 0).toFixed(4)),
+            csvSegmentDurationMs: explicitDurationMs,
+            dwellMs
+        });
+        if (distance <= 0.0001 && forwardDistance <= 0.0001 && fovDelta <= 0.001) {
+            await this.options.setLiveCameraPose(to, toFov);
+            if (dwellMs > 0) await sleep(dwellMs);
+            return;
+        }
+        const speed = Math.max(0.001, Number(task.move_speed_mps ?? 0.8));
+        const duration = explicitDurationMs > 0
+            ? explicitDurationMs
+            : Math.max(260, (distance / speed) * 1000);
+        this.logDebug('task.move.duration', {
+            taskId: task.task_id,
+            poiId: task.poi_id,
+            distance: Number(distance.toFixed(4)),
+            forwardDistance: Number(forwardDistance.toFixed(4)),
+            fovDelta: Number(fovDelta.toFixed(4)),
+            speed: Number(speed.toFixed(4)),
+            csvSegmentDurationMs: explicitDurationMs,
+            durationSource: explicitDurationMs > 0 ? 'segment_duration_ms' : 'distance/speed',
+            computedDurationMs: Number(duration.toFixed(2))
+        });
         const startAt = performance.now();
         while (true) {
             if (this.stopRequested || token !== this.playbackToken) return;
@@ -3587,7 +3638,6 @@ class TourPlayerPanel implements TourPlayerPanelController {
             if (t >= 1) break;
             await sleep(16);
         }
-        const dwellMs = Math.max(0, Number(task.dwell_ms ?? 0));
         if (dwellMs > 0) await sleep(dwellMs);
     }
 

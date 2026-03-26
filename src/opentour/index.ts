@@ -39,8 +39,6 @@ type OTModelLoaderModule = {
 
 type OTTourLoaderPanelController = {
     toggle: () => void;
-    openCinematicWorkspace: () => Promise<void>;
-    closeCinematicWorkspace: () => void;
 };
 
 type OTTourLoaderModule = {
@@ -67,6 +65,40 @@ type OTTourLoaderModule = {
         apiBaseUrl?: string;
         onModelLoaded?: (callback: (modelFilename: string | null) => void) => (() => void);
     }) => OTTourLoaderPanelController;
+};
+
+type OTCinematicWorkspacePanelController = {
+    open: () => void;
+    close: () => void;
+    toggle: () => void;
+    openCinematicWorkspace: () => Promise<void>;
+    closeCinematicWorkspace: () => void;
+};
+
+type OTCinematicWorkspaceModule = {
+    mountOTCinematicWorkspacePanel: (options: {
+        launcherButton?: HTMLButtonElement;
+        getModelFilename: () => string | null;
+        getWorldSamplePoints?: () => Array<{ x: number; y: number; z: number; opacity: number }>;
+        getLiveCameraPose?: () => { pose: { eye: { x: number; y: number; z: number }; forward: { x: number; y: number; z: number } }; fovDeg: number } | null;
+        setLiveCameraPose?: (pose: { eye: { x: number; y: number; z: number }; forward: { x: number; y: number; z: number } }, fovDeg: number) => Promise<void> | void;
+        getCaptureCanvas?: () => HTMLCanvasElement | null;
+        requestCaptureRender?: () => void;
+        captureScreenshotPng?: () => Promise<string>;
+        pickWorldPointAtScreen?: (x: number, y: number) => Promise<{ x: number; y: number; z: number } | null>;
+        projectWorldToScreen?: (point: { x: number; y: number; z: number }) => { x: number; y: number; visible: boolean } | null;
+        showEmbeddedMedia?: (spec: {
+            mode: 'media-plane' | 'media-object';
+            kind: 'image' | 'video';
+            src: string;
+            title?: string;
+            caption?: string;
+            anchorWorld: { x: number; y: number; z: number };
+        } | null) => void;
+        resolveAssetUrl?: (value: string) => string;
+        apiBaseUrl?: string;
+        onModelLoaded?: (callback: (modelFilename: string | null) => void) => (() => void);
+    }) => OTCinematicWorkspacePanelController;
 };
 
 type OTTourPlayerPanelController = {
@@ -221,17 +253,19 @@ const bootstrapUI = () => {
         'M10 9l5 3-5 3z'
     ]));
 
-    const cinematicButton = document.createElement('button');
-    cinematicButton.className = 'opentour-tool';
-    cinematicButton.type = 'button';
-    cinematicButton.setAttribute('aria-label', 'Open OT Cinematic');
-    cinematicButton.title = 'Complete TL setup first';
-    cinematicButton.appendChild(createToolIcon([
+    const cinematicWorkspaceButton = document.createElement('button');
+    cinematicWorkspaceButton.className = 'opentour-tool';
+    cinematicWorkspaceButton.type = 'button';
+    cinematicWorkspaceButton.setAttribute('aria-label', 'Open OT Cinematic Workspace');
+    cinematicWorkspaceButton.title = 'Complete TL setup first';
+    cinematicWorkspaceButton.appendChild(createToolIcon([
         'M4 6h16v12H4z',
         'M7 9h4v6H7z',
         'M13 9h4v6h-4z',
         'M10 4v2',
-        'M14 4v2'
+        'M14 4v2',
+        'M12 19v1',
+        'M9 21h6'
     ]));
 
     const tourDownloadButton = document.createElement('button');
@@ -304,7 +338,7 @@ const bootstrapUI = () => {
     status.id = 'opentour-status';
     status.textContent = 'OpenTour ready';
 
-    toolbar.append(modelLoaderButton, tourLoaderButton, cinematicButton, tourPlayerButton, tourDownloadButton, tourProducerButton, step3Button, gridToggleButton);
+    toolbar.append(modelLoaderButton, tourLoaderButton, cinematicWorkspaceButton, tourPlayerButton, tourDownloadButton, tourProducerButton, step3Button, gridToggleButton);
     panel.append(panelTitle, openButton, fileInput, hint, status);
     hud.append(axisMount, toolbar, panel);
     canvasContainer.append(canvas, hud, spinnerOverlay);
@@ -328,7 +362,7 @@ const bootstrapUI = () => {
         step3Button,
         modelLoaderButton,
         tourLoaderButton,
-        cinematicButton,
+        cinematicWorkspaceButton,
         tourPlayerButton,
         tourDownloadButton,
         tourProducerButton,
@@ -374,10 +408,10 @@ const main = async () => {
             ? 'Open OT Tour Player'
             : 'Load a model first to enable Tour Player';
         const cinematicEnabled = Boolean(currentModelFilename) && (cinematicModelReady || otTourLoaderReady);
-        ui.cinematicButton.disabled = !cinematicEnabled;
-        ui.cinematicButton.title = cinematicEnabled
-            ? 'Open OT Cinematic'
-            : (currentModelFilename ? 'Model needs POIs in database to enable Cinematic' : 'Load a model and finish TL setup first');
+        ui.cinematicWorkspaceButton.disabled = !cinematicEnabled;
+        ui.cinematicWorkspaceButton.title = cinematicEnabled
+            ? 'Open OT Cinematic Workspace'
+            : (currentModelFilename ? 'Model needs POIs in database to enable Cinematic Workspace' : 'Load a model and finish TL setup first');
     };
     syncTourLoaderButtonState();
 
@@ -840,6 +874,8 @@ const main = async () => {
     let otModelLoaderPanel: OTModelLoaderPanelController | null = null;
     let otTourLoaderModulePromise: Promise<OTTourLoaderModule> | null = null;
     let otTourLoaderPanel: OTTourLoaderPanelController | null = null;
+    let otCinematicWorkspaceModulePromise: Promise<OTCinematicWorkspaceModule> | null = null;
+    let otCinematicWorkspacePanel: OTCinematicWorkspacePanelController | null = null;
     let otTourPlayerModulePromise: Promise<OTTourPlayerModule> | null = null;
     let otTourPlayerPanel: OTTourPlayerPanelController | null = null;
     let otTourDownloadModulePromise: Promise<OTTourDownloadModule> | null = null;
@@ -941,6 +977,14 @@ const main = async () => {
             otTourLoaderModulePromise = import(moduleUrl) as Promise<OTTourLoaderModule>;
         }
         return otTourLoaderModulePromise;
+    };
+
+    const loadOTCinematicWorkspaceModule = () => {
+        if (!otCinematicWorkspaceModulePromise) {
+            const moduleUrl = new URL('./modules/ot-cinematic-workspace.js', import.meta.url).toString();
+            otCinematicWorkspaceModulePromise = import(moduleUrl) as Promise<OTCinematicWorkspaceModule>;
+        }
+        return otCinematicWorkspaceModulePromise;
     };
 
     const loadOTTourPlayerModule = () => {
@@ -1151,22 +1195,6 @@ const main = async () => {
                             return direct;
                         }
                     },
-                    pickWorldPointAtScreen: async (x, y) => {
-                        const hit = await scene.camera.intersect(x, y);
-                        return hit ? { x: hit.position.x, y: hit.position.y, z: hit.position.z } : null;
-                    },
-                    projectWorldToScreen: (point) => {
-                        const container = document.getElementById('canvas-container');
-                        if (!container) return null;
-                        const projected = new Vec3();
-                        scene.camera.worldToScreen(new Vec3(point.x, point.y, point.z), projected);
-                        return {
-                            x: projected.x * container.clientWidth,
-                            y: projected.y * container.clientHeight,
-                            visible: projected.z >= -1 && projected.z <= 1 && projected.x >= 0 && projected.x <= 1 && projected.y >= 0 && projected.y <= 1
-                        };
-                    },
-                    showEmbeddedMedia,
                     resolveAssetUrl: (value) => `http://localhost:3031/api/ot-tour-loader/local-file?path=${encodeURIComponent(value)}`,
                     apiBaseUrl: 'http://localhost:3031/api/ot-tour-loader',
                     onModelLoaded: (callback) => {
@@ -1212,29 +1240,137 @@ const main = async () => {
         void toggleOTTourLoader(event);
     });
 
-    let cinematicToggleAt = 0;
-    const toggleOTCinematic = async (event: Event) => {
-        const now = performance.now();
-        if (now - cinematicToggleAt < 120) return;
-        cinematicToggleAt = now;
-        event.stopPropagation();
-        if (event.cancelable) event.preventDefault();
-        if (ui.cinematicButton.disabled) return;
-        if (!otTourLoaderPanel) {
-            await ensureTourLoaderPanel();
-        }
+    let cinematicWorkspaceToggleAt = 0;
+    const ensureOTCinematicWorkspacePanel = async () => {
+        if (otCinematicWorkspacePanel || !currentModelFilename) return;
+        setButtonBusy(ui.cinematicWorkspaceButton, true);
         try {
-            await otTourLoaderPanel.openCinematicWorkspace();
-        } catch (error) {
-            const message = error instanceof Error ? error.message : `${error}`;
-            ui.status.textContent = `OT_Cinematic unavailable: ${message}`;
+            const otCinematicWorkspaceModule = await loadOTCinematicWorkspaceModule();
+            otCinematicWorkspacePanel = otCinematicWorkspaceModule.mountOTCinematicWorkspacePanel({
+                launcherButton: ui.cinematicWorkspaceButton,
+                getModelFilename: () => currentModelFilename,
+                getWorldSamplePoints: () => extractWorldSamplePoints(),
+                getLiveCameraPose: () => {
+                    const eye = scene.camera.mainCamera.getLocalPosition();
+                    const forward = scene.camera.mainCamera.forward;
+                    return {
+                        pose: {
+                            eye: { x: eye.x, y: eye.y, z: eye.z },
+                            forward: { x: forward.x, y: forward.y, z: forward.z }
+                        },
+                        fovDeg: scene.camera.fov
+                    };
+                },
+                setLiveCameraPose: async (pose, fovDeg) => {
+                    const eye = new Vec3(pose.eye.x, pose.eye.y, pose.eye.z);
+                    const forward = new Vec3(pose.forward.x, pose.forward.y, pose.forward.z);
+                    const target = eye.clone().add(forward.mulScalar(2.4));
+                    scene.camera.fov = Math.max(20, Math.min(120, fovDeg));
+                    scene.camera.controlMode = 'fly';
+                    scene.camera.setPose(eye, target, 0);
+                },
+                getCaptureCanvas: () => ui.canvas,
+                requestCaptureRender: () => {
+                    scene.forceRender = true;
+                },
+                captureScreenshotPng: async () => {
+                    const canvas = scene.app?.graphicsDevice?.canvas as HTMLCanvasElement | undefined;
+                    if (!canvas) return '';
+                    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+                    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+                    const direct = canvas.toDataURL('image/png');
+                    try {
+                        const cam = scene.camera as unknown as {
+                            mainTarget?: unknown;
+                            workTarget?: {
+                                colorBuffer?: {
+                                    read: (x: number, y: number, w: number, h: number, opts: { renderTarget: unknown; data: Uint8Array }) => Promise<void>;
+                                };
+                            };
+                        };
+                        const dataProcessor = (scene as unknown as { dataProcessor?: { copyRt: (src: unknown, dst: unknown) => void } }).dataProcessor;
+                        const mainTarget = cam.mainTarget;
+                        const workTarget = cam.workTarget;
+                        if (!mainTarget || !workTarget?.colorBuffer?.read || !dataProcessor?.copyRt) return direct;
+                        const width = canvas.width;
+                        const height = canvas.height;
+                        const rgba = new Uint8Array(width * height * 4);
+                        dataProcessor.copyRt(mainTarget, workTarget);
+                        await workTarget.colorBuffer.read(0, 0, width, height, { renderTarget: workTarget, data: rgba });
+                        const rowBytes = width * 4;
+                        const temp = new Uint8Array(rowBytes);
+                        for (let y = 0; y < height / 2; y += 1) {
+                            const top = y * rowBytes;
+                            const bottom = (height - y - 1) * rowBytes;
+                            temp.set(rgba.subarray(top, top + rowBytes));
+                            rgba.copyWithin(top, bottom, bottom + rowBytes);
+                            rgba.set(temp, bottom);
+                        }
+                        const out = document.createElement('canvas');
+                        out.width = width;
+                        out.height = height;
+                        const ctx = out.getContext('2d');
+                        if (!ctx) return direct;
+                        ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer), width, height), 0, 0);
+                        return out.toDataURL('image/png');
+                    } catch {
+                        return direct;
+                    }
+                },
+                pickWorldPointAtScreen: async (x, y) => {
+                    const hit = await scene.camera.intersect(x, y);
+                    return hit ? { x: hit.position.x, y: hit.position.y, z: hit.position.z } : null;
+                },
+                projectWorldToScreen: (point) => {
+                    const container = document.getElementById('canvas-container');
+                    if (!container) return null;
+                    const projected = new Vec3();
+                    scene.camera.worldToScreen(new Vec3(point.x, point.y, point.z), projected);
+                    return {
+                        x: projected.x * container.clientWidth,
+                        y: projected.y * container.clientHeight,
+                        visible: projected.z >= -1 && projected.z <= 1 && projected.x >= 0 && projected.x <= 1 && projected.y >= 0 && projected.y <= 1
+                    };
+                },
+                showEmbeddedMedia,
+                resolveAssetUrl: (value) => `http://localhost:3032/api/ot-cinematic-workspace/local-file?path=${encodeURIComponent(value)}`,
+                apiBaseUrl: 'http://localhost:3032/api/ot-cinematic-workspace',
+                onModelLoaded: (callback) => {
+                    const handler = (name: string | null) => callback(name);
+                    events.on('opentour.model.loaded', handler);
+                    return () => {
+                        events.off('opentour.model.loaded', handler);
+                    };
+                }
+            });
+        } finally {
+            setButtonBusy(ui.cinematicWorkspaceButton, false);
         }
     };
-    ui.cinematicButton.addEventListener('pointerdown', (event) => {
-        void toggleOTCinematic(event);
+    const toggleOTCinematicWorkspace = async (event: Event) => {
+        const now = performance.now();
+        if (now - cinematicWorkspaceToggleAt < 120) return;
+        cinematicWorkspaceToggleAt = now;
+        event.stopPropagation();
+        if (event.cancelable) event.preventDefault();
+        if (ui.cinematicWorkspaceButton.disabled) return;
+        if (!currentModelFilename) {
+            ui.status.textContent = 'Load a model before opening Cinematic Workspace.';
+            return;
+        }
+        try {
+            await ensureOTCinematicWorkspacePanel();
+            otCinematicWorkspacePanel?.toggle();
+        } catch (error) {
+            const message = error instanceof Error ? error.message : `${error}`;
+            ui.status.textContent = `OT_CinematicWorkspace unavailable: ${message}`;
+        }
+    };
+    ui.cinematicWorkspaceButton.addEventListener('pointerdown', (event) => {
+        void toggleOTCinematicWorkspace(event);
     });
-    ui.cinematicButton.addEventListener('click', (event) => {
-        void toggleOTCinematic(event);
+    ui.cinematicWorkspaceButton.addEventListener('click', (event) => {
+        void toggleOTCinematicWorkspace(event);
     });
 
     let tourPlayerToggleAt = 0;
@@ -1280,7 +1416,7 @@ const main = async () => {
                         scene.camera.controlMode = 'fly';
                         scene.camera.setPose(eye, target, 0);
                     },
-                    apiBaseUrl: 'http://localhost:3032/api/ot-tour-player',
+                    apiBaseUrl: 'http://localhost:3033/api/ot-tour-player',
                     onModelLoaded: (callback) => {
                         const handler = (name: string | null) => callback(name);
                         events.on('opentour.model.loaded', handler);
@@ -1356,7 +1492,7 @@ const main = async () => {
                 const module = await loadOTTourProducerModule();
                 otTourProducerPanel = module.mountOTTourProducerPanel({
                     launcherButton: ui.tourProducerButton,
-                    apiBaseUrl: 'http://localhost:3034/api/ot-tour-producer',
+                    apiBaseUrl: 'http://localhost:3035/api/ot-tour-producer',
                     getModelFilename: () => currentModelFilename
                 });
             } catch (error) {

@@ -146,8 +146,8 @@ type TpTtsConfigPayload = {
 
 type TpTtsConfigResponse = { ok: true; tts: TpTtsConfigPayload };
 
-const TP_API = 'http://localhost:3032/api/ot-tour-player';
-const LIVE_API = 'http://localhost:3035/api/ot-live-stream';
+const TP_API = 'http://localhost:3033/api/ot-tour-player';
+const LIVE_API = 'http://localhost:3036/api/ot-live-stream';
 const DEFAULT_SERVER_PATH = '/Users/duheng/Development/OpenCode/OpenTour/Live';
 const MODEL_EXTENSIONS = ['.ply', '.splat', '.ksplat', '.spz', '.sog', '.lcc'];
 const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
@@ -718,7 +718,7 @@ class LiveStreamApp {
     }
 
     private normalizeServerManifest(session: ServerSessionPayload): LiveManifest {
-        const withOrigin = (url: string) => url.startsWith('http') ? url : `http://localhost:3035${url}`;
+        const withOrigin = (url: string) => url.startsWith('http') ? url : `http://localhost:3036${url}`;
         return {
             source: 'server',
             sessionId: session.sessionId,
@@ -880,7 +880,7 @@ class LiveStreamApp {
             this.setStatus(`TP TTS loaded: ${this.ttsConfig.model}/${this.ttsConfig.voice}`);
         } catch (error) {
             this.logDebug('tp.tts.config.load.error', { error: error instanceof Error ? error.message : String(error) });
-            this.setStatus('Load TP TTS config failed. Ensure OT Tour Player backend is running on 3032.');
+            this.setStatus('Load TP TTS config failed. Ensure OT Tour Player backend is running on 3033.');
         }
     }
 
