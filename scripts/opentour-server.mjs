@@ -227,32 +227,41 @@ const managedBackends = [
         env: { OT_TOUR_LOADER_PORT: '3031' }
     },
     {
-        name: 'ot-tour-player',
+        name: 'ot-cinematic-workspace',
         port: 3032,
+        script: join(repoRoot, 'src/opentour/OT_CinematicWorkspace/backend/server.mjs'),
+        env: {
+            OT_CINEMATIC_WORKSPACE_PORT: '3032',
+            OT_TL_API_BASE: 'http://localhost:3031/api/ot-tour-loader'
+        }
+    },
+    {
+        name: 'ot-tour-player',
+        port: 3033,
         script: join(repoRoot, 'src/opentour/OT_TourPlayer/backend/server.mjs'),
-        env: { OT_TOUR_PLAYER_PORT: '3032' }
+        env: { OT_TOUR_PLAYER_PORT: '3033' }
     },
     {
         name: 'ot-tour-download',
-        port: 3033,
+        port: 3034,
         script: join(repoRoot, 'src/opentour/OT_TourDownload/backend/server.mjs'),
-        env: { PORT: '3033' }
+        env: { PORT: '3034' }
     },
     {
         name: 'ot-tour-producer',
-        port: 3034,
+        port: 3035,
         script: join(repoRoot, 'src/opentour/OT_TourProducer/backend/server.mjs'),
         env: {
-            OT_TOUR_PRODUCER_PORT: '3034',
+            OT_TOUR_PRODUCER_PORT: '3035',
             FFMPEG_PATH: join(repoRoot, '../tools/bin/ffmpeg'),
             FFPROBE_PATH: join(repoRoot, '../tools/bin/ffprobe')
         }
     },
     {
         name: 'ot-live-stream',
-        port: 3035,
+        port: 3036,
         script: join(repoRoot, 'src/opentour/OT_LiveStream/backend/server.mjs'),
-        env: { OT_LIVE_STREAM_PORT: '3035' }
+        env: { OT_LIVE_STREAM_PORT: '3036' }
     }
 ];
 const spawnedBackends = [];

@@ -15,7 +15,7 @@ const repoRoot = normalize(join(__dirname, '..'));
 const workspaceRoot = normalize(join(repoRoot, '..'));
 const distDir = join(repoRoot, 'dist-openmesh');
 const resourceDir = join(workspaceRoot, 'Resource');
-const port = Number(process.env.OPENMESH_PORT || 3040);
+const port = Number(process.env.OPENMESH_PORT || 3037);
 const proxyUrl = String(process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '').trim();
 const remoteScriptCache = new Map();
 
