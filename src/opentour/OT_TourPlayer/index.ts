@@ -1283,7 +1283,9 @@ class TourPlayerPanel implements TourPlayerPanelController {
     close() { this.root.classList.add('hidden'); }
     toggle() { this.root.classList.toggle('hidden'); }
 
-    private apiBase() { return this.options.apiBaseUrl || 'http://localhost:3033/api/ot-tour-player'; }
+    private apiBase() { return this.options.apiBaseUrl || '/api/ot-tour-player'; }
+
+    private producerApiBase() { return '/api/ot-tour-producer'; }
 
     private setStatus(text: string) { this.statusTextEl.textContent = text; }
 
@@ -2915,7 +2917,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
     private async registerMp4ToTourProducer(name: string, blob: Blob) {
         if (String(blob.type || '').toLowerCase() !== 'video/mp4') return;
         try {
-            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch(`${this.producerApiBase()}/health`).then((res) => res.ok).catch(() => false);
             if (!healthy) {
                 this.logDebug('record.producer.register.error', {
                     name,
@@ -2929,7 +2931,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 bytes: blob.size,
                 modelFilename
             });
-            const response = await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
+            const response = await fetch(`${this.producerApiBase()}/videos/register`, {
                 method: 'POST',
                 headers: {
                     'X-OT-Name': name,
@@ -2976,9 +2978,9 @@ class TourPlayerPanel implements TourPlayerPanelController {
         this.backfillSyncInProgress = true;
         this.recordingSyncToModelDbBtn.disabled = true;
         try {
-            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch(`${this.producerApiBase()}/health`).then((res) => res.ok).catch(() => false);
             if (!healthy) {
-                this.setRecordingModalStatus('Sync failed: ot-tour-producer backend is offline (3034).');
+                this.setRecordingModalStatus('Sync failed: ot-tour-producer backend is offline (3035).');
                 this.logDebug('record.backfill.done', { total: 0, uploaded: 0, skipped: 0, failed: 0, reason: 'producer-offline' });
                 return;
             }
@@ -3017,7 +3019,7 @@ class TourPlayerPanel implements TourPlayerPanelController {
                 });
 
                 try {
-                    const response = await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
+                    const response = await fetch(`${this.producerApiBase()}/videos/register`, {
                         method: 'POST',
                         headers: {
                             'X-OT-Name': syncName,

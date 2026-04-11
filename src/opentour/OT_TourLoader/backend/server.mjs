@@ -5,7 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { Agent as UndiciAgent, ProxyAgent as UndiciProxyAgent } from 'undici';
 
-import Database from 'better-sqlite3';
+import { createTourLoaderRepository } from '../../../server/db/repositories/tour-loader-repository.mjs';
+import { getTtsConfig } from '../../../server/db/repositories/shared-config-repository.mjs';
+import { resolveGlobalLlmConfig } from '../../../shared/llm/global-config.mjs';
 import WebSocket from 'ws';
 
 const DEFAULT_PROMPT_TEMPLATE = '你是世界级的，正在描述你的视角给观众讲解，不要旁白和画外音。content 只允许使用：中文、英文、数字、空格，以及中文标点 `，。；：！？（）`禁止使用任何英文 CSV 控制字符，尤其是 `,` 和 `"`，绝对不要让 content 出现真实换行，不包含：\\r \\n \\t ，整体文字少于100字。';
@@ -36,6 +38,7 @@ Rules:
 Output format:
 {"moves":[{"seq":1,"content":"我们从起点前往大厅，向前移动约6米。"}]}`;
 const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
+const DEFAULT_QWEN_MODEL = 'qwen3.6-plus';
 const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
 const DEFAULT_TTS_VOICE = 'longyuan_v3';
 const DEFAULT_TTS_FORMAT = 'mp3';
@@ -83,14 +86,37 @@ const resolveProxyUrl = () => {
     return '';
 };
 const LLM_PROXY_URL = resolveProxyUrl();
+const llmDirectDispatcher = new UndiciAgent({
+    connect: { timeout: LLM_CONNECT_TIMEOUT_MS }
+});
 const llmFetchDispatcher = LLM_PROXY_URL
     ? new UndiciProxyAgent({
         uri: LLM_PROXY_URL,
         connect: { timeout: LLM_CONNECT_TIMEOUT_MS }
     })
-    : new UndiciAgent({
-        connect: { timeout: LLM_CONNECT_TIMEOUT_MS }
-    });
+    : llmDirectDispatcher;
+
+const shouldRetryDirectWithoutProxy = (error) => {
+    if (!LLM_PROXY_URL) return false;
+    const code = String(error?.code || error?.cause?.code || '').trim().toUpperCase();
+    return code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EHOSTUNREACH' || code === 'ETIMEDOUT';
+};
+
+const fetchWithLlmDispatcher = async (url, init = {}) => {
+    try {
+        return await fetch(url, {
+            ...init,
+            dispatcher: llmFetchDispatcher
+        });
+    } catch (error) {
+        if (!shouldRetryDirectWithoutProxy(error)) throw error;
+        console.warn(`[ot-tour-loader] llm proxy unavailable, retry direct: ${String(error?.message || error)}`);
+        return fetch(url, {
+            ...init,
+            dispatcher: llmDirectDispatcher
+        });
+    }
+};
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -99,689 +125,17 @@ const dataDir = join(repoRoot, 'data');
 const cinematicMediaDir = join(dataDir, 'cinematic-media');
 mkdirSync(dataDir, { recursive: true });
 mkdirSync(cinematicMediaDir, { recursive: true });
-const db = new Database(join(dataDir, 'ot-tour-loader.db'));
-
-db.exec(`
-CREATE TABLE IF NOT EXISTS model_poi_profiles (
-    model_filename TEXT PRIMARY KEY,
-    eye_height_m REAL NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_pois (
-    model_filename TEXT NOT NULL,
-    poi_id TEXT NOT NULL,
-    poi_name TEXT NOT NULL,
-    sort_order INTEGER NOT NULL,
-    target_x REAL NOT NULL,
-    target_y REAL NOT NULL,
-    target_z REAL NOT NULL,
-    target_yaw REAL NOT NULL,
-    target_pitch REAL NOT NULL,
-    target_fov REAL NOT NULL DEFAULT 60,
-    move_speed_mps REAL NOT NULL,
-    dwell_ms INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    tts_lang TEXT NOT NULL,
-    prompt_template TEXT,
-    screenshot_data_url TEXT,
-    screenshot_blob BLOB,
-    screenshot_blob_mime TEXT,
-    screenshot_updated_at TEXT,
-    content_updated_at TEXT,
-    prompt_updated_at TEXT,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (model_filename, poi_id)
-);
-
-CREATE TABLE IF NOT EXISTS model_poi_hotspots (
-    model_filename TEXT NOT NULL,
-    poi_id TEXT NOT NULL,
-    hotspot_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    sort_order INTEGER NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    trigger_mode TEXT NOT NULL,
-    delay_ms INTEGER NOT NULL DEFAULT 0,
-    payload_type TEXT NOT NULL,
-    display_mode TEXT NOT NULL,
-    region_x REAL NOT NULL,
-    region_y REAL NOT NULL,
-    region_width REAL NOT NULL,
-    region_height REAL NOT NULL,
-    media_src TEXT,
-    caption TEXT,
-    tts_text TEXT,
-    confirm_message TEXT,
-    confirm_confirm_text TEXT,
-    confirm_cancel_text TEXT,
-    anchor_world_x REAL,
-    anchor_world_y REAL,
-    anchor_world_z REAL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (model_filename, poi_id, hotspot_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_model_poi_hotspots_model_poi_sort
-ON model_poi_hotspots (model_filename, poi_id, sort_order);
-
-CREATE TABLE IF NOT EXISTS model_llm_configs (
-    model_filename TEXT PRIMARY KEY,
-    llm_model_name TEXT NOT NULL,
-    llm_api_key TEXT NOT NULL,
-    selected_provider TEXT,
-    gemini_model_name TEXT,
-    gemini_api_key TEXT,
-    qwen_model_name TEXT,
-    qwen_api_key TEXT,
-    prompt_template TEXT,
-    csv_prompt_template TEXT,
-    move_prompt_template TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_prompt_configs (
-    model_filename TEXT PRIMARY KEY,
-    prompt_template TEXT,
-    csv_prompt_template TEXT,
-    move_prompt_template TEXT,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_csv_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_filename TEXT NOT NULL,
-    version_no INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    source TEXT NOT NULL,
-    csv_text TEXT NOT NULL,
-    llm_model TEXT,
-    csv_prompt_template TEXT,
-    move_prompt_template TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    confirmed_at TEXT,
-    UNIQUE(model_filename, version_no)
-);
-
-CREATE INDEX IF NOT EXISTS idx_model_csv_versions_model_updated
-ON model_csv_versions (model_filename, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS model_cinematic_versions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    model_filename TEXT NOT NULL,
-    version_no INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    source TEXT NOT NULL,
-    simple_prompt TEXT,
-    planner_prompt TEXT,
-    scene_description TEXT,
-    story_background TEXT,
-    style_text TEXT,
-    target_duration_sec REAL,
-    selected_poi_ids_json TEXT,
-    plan_json TEXT,
-    csv_text TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    confirmed_at TEXT,
-    UNIQUE(model_filename, version_no)
-);
-
-CREATE INDEX IF NOT EXISTS idx_model_cinematic_versions_model_updated
-ON model_cinematic_versions (model_filename, updated_at DESC);
-
-CREATE TABLE IF NOT EXISTS global_tts_configs (
-    config_key TEXT PRIMARY KEY,
-    provider TEXT NOT NULL,
-    tts_model TEXT NOT NULL,
-    tts_voice TEXT NOT NULL,
-    api_key TEXT NOT NULL,
-    audio_format TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-`);
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN prompt_template TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN csv_prompt_template TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN move_prompt_template TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_pois ADD COLUMN target_fov REAL NOT NULL DEFAULT 60');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_pois ADD COLUMN prompt_template TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_pois ADD COLUMN prompt_updated_at TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN selected_provider TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN gemini_model_name TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN gemini_api_key TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN qwen_model_name TEXT');
-} catch {
-    // already exists
-}
-
-try {
-    db.exec('ALTER TABLE model_llm_configs ADD COLUMN qwen_api_key TEXT');
-} catch {
-    // already exists
-}
-
-const upsertProfileStmt = db.prepare(`
-INSERT INTO model_poi_profiles (model_filename, eye_height_m, updated_at)
-VALUES (@model_filename, @eye_height_m, @updated_at)
-ON CONFLICT(model_filename) DO UPDATE SET
-    eye_height_m = excluded.eye_height_m,
-    updated_at = excluded.updated_at
-`);
-
-const upsertPoiStmt = db.prepare(`
-INSERT INTO model_pois (
-    model_filename, poi_id, poi_name, sort_order,
-    target_x, target_y, target_z,
-    target_yaw, target_pitch, target_fov,
-    move_speed_mps, dwell_ms,
-    content, tts_lang, prompt_template,
-    screenshot_data_url, screenshot_blob, screenshot_blob_mime,
-    screenshot_updated_at, content_updated_at, prompt_updated_at, updated_at
-) VALUES (
-    @model_filename, @poi_id, @poi_name, @sort_order,
-    @target_x, @target_y, @target_z,
-    @target_yaw, @target_pitch, @target_fov,
-    @move_speed_mps, @dwell_ms,
-    @content, @tts_lang, @prompt_template,
-    @screenshot_data_url, @screenshot_blob, @screenshot_blob_mime,
-    @screenshot_updated_at, @content_updated_at, @prompt_updated_at, @updated_at
-)
-ON CONFLICT(model_filename, poi_id) DO UPDATE SET
-    poi_name = excluded.poi_name,
-    sort_order = excluded.sort_order,
-    target_x = excluded.target_x,
-    target_y = excluded.target_y,
-    target_z = excluded.target_z,
-    target_yaw = excluded.target_yaw,
-    target_pitch = excluded.target_pitch,
-    target_fov = excluded.target_fov,
-    move_speed_mps = excluded.move_speed_mps,
-    dwell_ms = excluded.dwell_ms,
-    content = excluded.content,
-    tts_lang = excluded.tts_lang,
-    prompt_template = excluded.prompt_template,
-    screenshot_data_url = excluded.screenshot_data_url,
-    screenshot_blob = excluded.screenshot_blob,
-    screenshot_blob_mime = excluded.screenshot_blob_mime,
-    screenshot_updated_at = excluded.screenshot_updated_at,
-    content_updated_at = excluded.content_updated_at,
-    prompt_updated_at = excluded.prompt_updated_at,
-    updated_at = excluded.updated_at
-`);
-
-const getProfileStmt = db.prepare('SELECT model_filename, eye_height_m, updated_at FROM model_poi_profiles WHERE model_filename = ?');
-const getPoisStmt = db.prepare(`
-SELECT
-    model_filename, poi_id, poi_name, sort_order,
-    target_x, target_y, target_z,
-    target_yaw, target_pitch, target_fov,
-    move_speed_mps, dwell_ms,
-    content, tts_lang, prompt_template,
-    screenshot_data_url, screenshot_blob, screenshot_blob_mime,
-    screenshot_updated_at, content_updated_at, prompt_updated_at, updated_at
-FROM model_pois
-WHERE model_filename = ?
-ORDER BY sort_order ASC, poi_id ASC
-`);
-const getHotspotsStmt = db.prepare(`
-SELECT
-    model_filename, poi_id, hotspot_id, title, sort_order, enabled,
-    trigger_mode, delay_ms, payload_type, display_mode,
-    region_x, region_y, region_width, region_height,
-    media_src, caption, tts_text,
-    confirm_message, confirm_confirm_text, confirm_cancel_text,
-    anchor_world_x, anchor_world_y, anchor_world_z,
-    created_at, updated_at
-FROM model_poi_hotspots
-WHERE model_filename = ?
-ORDER BY poi_id ASC, sort_order ASC, hotspot_id ASC
-`);
-const clearModelHotspotsStmt = db.prepare('DELETE FROM model_poi_hotspots WHERE model_filename = ?');
-const clearPoiHotspotsStmt = db.prepare('DELETE FROM model_poi_hotspots WHERE model_filename = ? AND poi_id = ?');
-const upsertHotspotStmt = db.prepare(`
-INSERT INTO model_poi_hotspots (
-    model_filename, poi_id, hotspot_id, title, sort_order, enabled,
-    trigger_mode, delay_ms, payload_type, display_mode,
-    region_x, region_y, region_width, region_height,
-    media_src, caption, tts_text,
-    confirm_message, confirm_confirm_text, confirm_cancel_text,
-    anchor_world_x, anchor_world_y, anchor_world_z,
-    created_at, updated_at
-) VALUES (
-    @model_filename, @poi_id, @hotspot_id, @title, @sort_order, @enabled,
-    @trigger_mode, @delay_ms, @payload_type, @display_mode,
-    @region_x, @region_y, @region_width, @region_height,
-    @media_src, @caption, @tts_text,
-    @confirm_message, @confirm_confirm_text, @confirm_cancel_text,
-    @anchor_world_x, @anchor_world_y, @anchor_world_z,
-    @created_at, @updated_at
-)
-ON CONFLICT(model_filename, poi_id, hotspot_id) DO UPDATE SET
-    title = excluded.title,
-    sort_order = excluded.sort_order,
-    enabled = excluded.enabled,
-    trigger_mode = excluded.trigger_mode,
-    delay_ms = excluded.delay_ms,
-    payload_type = excluded.payload_type,
-    display_mode = excluded.display_mode,
-    region_x = excluded.region_x,
-    region_y = excluded.region_y,
-    region_width = excluded.region_width,
-    region_height = excluded.region_height,
-    media_src = excluded.media_src,
-    caption = excluded.caption,
-    tts_text = excluded.tts_text,
-    confirm_message = excluded.confirm_message,
-    confirm_confirm_text = excluded.confirm_confirm_text,
-    confirm_cancel_text = excluded.confirm_cancel_text,
-    anchor_world_x = excluded.anchor_world_x,
-    anchor_world_y = excluded.anchor_world_y,
-    anchor_world_z = excluded.anchor_world_z,
-    updated_at = excluded.updated_at
-`);
-const deletePoiStmt = db.prepare('DELETE FROM model_pois WHERE model_filename = ? AND poi_id = ?');
-const clearModelPoisStmt = db.prepare('DELETE FROM model_pois WHERE model_filename = ?');
-const getPoiByIdStmt = db.prepare('SELECT * FROM model_pois WHERE model_filename = ? AND poi_id = ?');
-const upsertLlmConfigStmt = db.prepare(`
-INSERT INTO model_llm_configs (
-    model_filename,
-    llm_model_name,
-    llm_api_key,
-    selected_provider,
-    gemini_model_name,
-    gemini_api_key,
-    qwen_model_name,
-    qwen_api_key,
-    prompt_template,
-    csv_prompt_template,
-    move_prompt_template,
-    updated_at
-)
-VALUES (
-    @model_filename,
-    @llm_model_name,
-    @llm_api_key,
-    @selected_provider,
-    @gemini_model_name,
-    @gemini_api_key,
-    @qwen_model_name,
-    @qwen_api_key,
-    @prompt_template,
-    @csv_prompt_template,
-    @move_prompt_template,
-    @updated_at
-)
-ON CONFLICT(model_filename) DO UPDATE SET
-    llm_model_name = excluded.llm_model_name,
-    llm_api_key = excluded.llm_api_key,
-    selected_provider = excluded.selected_provider,
-    gemini_model_name = excluded.gemini_model_name,
-    gemini_api_key = excluded.gemini_api_key,
-    qwen_model_name = excluded.qwen_model_name,
-    qwen_api_key = excluded.qwen_api_key,
-    prompt_template = excluded.prompt_template,
-    csv_prompt_template = excluded.csv_prompt_template,
-    move_prompt_template = excluded.move_prompt_template,
-    updated_at = excluded.updated_at
-`);
-const getLlmConfigStmt = db.prepare(`
-SELECT model_filename, llm_model_name, llm_api_key, selected_provider, gemini_model_name, gemini_api_key, qwen_model_name, qwen_api_key, prompt_template, csv_prompt_template, move_prompt_template, updated_at
-FROM model_llm_configs
-WHERE model_filename = ?
-`);
-const getLatestLlmConfigStmt = db.prepare(`
-SELECT model_filename, llm_model_name, llm_api_key, selected_provider, gemini_model_name, gemini_api_key, qwen_model_name, qwen_api_key, prompt_template, csv_prompt_template, move_prompt_template, updated_at
-FROM model_llm_configs
-ORDER BY updated_at DESC
-LIMIT 1
-`);
-const upsertGlobalLlmConfigStmt = db.prepare(`
-INSERT INTO model_llm_configs (
-    model_filename,
-    llm_model_name,
-    llm_api_key,
-    selected_provider,
-    gemini_model_name,
-    gemini_api_key,
-    qwen_model_name,
-    qwen_api_key,
-    prompt_template,
-    csv_prompt_template,
-    move_prompt_template,
-    updated_at
-) VALUES (
-    @model_filename,
-    @llm_model_name,
-    @llm_api_key,
-    @selected_provider,
-    @gemini_model_name,
-    @gemini_api_key,
-    @qwen_model_name,
-    @qwen_api_key,
-    @prompt_template,
-    @csv_prompt_template,
-    @move_prompt_template,
-    @updated_at
-)
-ON CONFLICT(model_filename) DO UPDATE SET
-    llm_model_name = excluded.llm_model_name,
-    llm_api_key = excluded.llm_api_key,
-    selected_provider = excluded.selected_provider,
-    gemini_model_name = excluded.gemini_model_name,
-    gemini_api_key = excluded.gemini_api_key,
-    qwen_model_name = excluded.qwen_model_name,
-    qwen_api_key = excluded.qwen_api_key,
-    updated_at = excluded.updated_at
-`);
-const deleteNonGlobalLlmConfigsStmt = db.prepare('DELETE FROM model_llm_configs WHERE model_filename <> ?');
-const getGlobalTtsConfigStmt = db.prepare(`
-SELECT config_key, provider, tts_model, tts_voice, api_key, audio_format, updated_at
-FROM global_tts_configs
-WHERE config_key = 'aliyun'
-`);
-const upsertGlobalTtsConfigStmt = db.prepare(`
-INSERT INTO global_tts_configs (
-    config_key,
-    provider,
-    tts_model,
-    tts_voice,
-    api_key,
-    audio_format,
-    updated_at
-) VALUES (
-    'aliyun',
-    'aliyun',
-    @tts_model,
-    @tts_voice,
-    @api_key,
-    @audio_format,
-    @updated_at
-)
-ON CONFLICT(config_key) DO UPDATE SET
-    provider = excluded.provider,
-    tts_model = excluded.tts_model,
-    tts_voice = excluded.tts_voice,
-    api_key = excluded.api_key,
-    audio_format = excluded.audio_format,
-    updated_at = excluded.updated_at
-`);
-
-if (!getGlobalTtsConfigStmt.get()) {
-    upsertGlobalTtsConfigStmt.run({
-        tts_model: DEFAULT_TTS_MODEL,
-        tts_voice: DEFAULT_TTS_VOICE,
-        api_key: '',
-        audio_format: DEFAULT_TTS_FORMAT,
-        updated_at: new Date().toISOString()
-    });
-}
-
-const upsertPromptConfigStmt = db.prepare(`
-INSERT INTO model_prompt_configs (
-    model_filename,
-    prompt_template,
-    csv_prompt_template,
-    move_prompt_template,
-    updated_at
-) VALUES (
-    @model_filename,
-    @prompt_template,
-    @csv_prompt_template,
-    @move_prompt_template,
-    @updated_at
-)
-ON CONFLICT(model_filename) DO UPDATE SET
-    prompt_template = excluded.prompt_template,
-    csv_prompt_template = excluded.csv_prompt_template,
-    move_prompt_template = excluded.move_prompt_template,
-    updated_at = excluded.updated_at
-`);
-const getPromptConfigStmt = db.prepare(`
-SELECT model_filename, prompt_template, csv_prompt_template, move_prompt_template, updated_at
-FROM model_prompt_configs
-WHERE model_filename = ?
-`);
-const getCsvVersionMaxNoStmt = db.prepare(`
-SELECT COALESCE(MAX(version_no), 0) + 1 AS next_version_no
-FROM model_csv_versions
-WHERE model_filename = ?
-`);
-const insertCsvVersionStmt = db.prepare(`
-INSERT INTO model_csv_versions (
-    model_filename,
-    version_no,
-    status,
-    source,
-    csv_text,
-    llm_model,
-    csv_prompt_template,
-    move_prompt_template,
-    created_at,
-    updated_at,
-    confirmed_at
-) VALUES (
-    @model_filename,
-    @version_no,
-    @status,
-    @source,
-    @csv_text,
-    @llm_model,
-    @csv_prompt_template,
-    @move_prompt_template,
-    @created_at,
-    @updated_at,
-    @confirmed_at
-)
-`);
-const getCsvVersionListStmt = db.prepare(`
-SELECT
-    id,
-    model_filename,
-    version_no,
-    status,
-    source,
-    llm_model,
-    created_at,
-    updated_at,
-    confirmed_at,
-    LENGTH(csv_text) AS csv_chars
-FROM model_csv_versions
-WHERE model_filename = ?
-ORDER BY version_no DESC, id DESC
-`);
-const getCsvVersionByIdStmt = db.prepare(`
-SELECT
-    id,
-    model_filename,
-    version_no,
-    status,
-    source,
-    csv_text,
-    llm_model,
-    csv_prompt_template,
-    move_prompt_template,
-    created_at,
-    updated_at,
-    confirmed_at
-FROM model_csv_versions
-WHERE id = ? AND model_filename = ?
-`);
-const updateCsvVersionStmt = db.prepare(`
-UPDATE model_csv_versions
-SET csv_text = @csv_text,
-    updated_at = @updated_at,
-    llm_model = COALESCE(@llm_model, llm_model),
-    csv_prompt_template = COALESCE(@csv_prompt_template, csv_prompt_template),
-    move_prompt_template = COALESCE(@move_prompt_template, move_prompt_template)
-WHERE id = @id AND model_filename = @model_filename
-`);
-const confirmCsvVersionStmt = db.prepare(`
-UPDATE model_csv_versions
-SET status = 'confirmed',
-    confirmed_at = @confirmed_at,
-    updated_at = @updated_at,
-    csv_text = @csv_text
-WHERE id = @id AND model_filename = @model_filename
-`);
-const deleteCsvVersionStmt = db.prepare('DELETE FROM model_csv_versions WHERE id = ? AND model_filename = ?');
-
-const getCinematicVersionMaxNoStmt = db.prepare(`
-SELECT COALESCE(MAX(version_no), 0) + 1 AS next_version_no
-FROM model_cinematic_versions
-WHERE model_filename = ?
-`);
-const insertCinematicVersionStmt = db.prepare(`
-INSERT INTO model_cinematic_versions (
-    model_filename,
-    version_no,
-    status,
-    source,
-    simple_prompt,
-    planner_prompt,
-    scene_description,
-    story_background,
-    style_text,
-    target_duration_sec,
-    selected_poi_ids_json,
-    plan_json,
-    csv_text,
-    created_at,
-    updated_at,
-    confirmed_at
-) VALUES (
-    @model_filename,
-    @version_no,
-    @status,
-    @source,
-    @simple_prompt,
-    @planner_prompt,
-    @scene_description,
-    @story_background,
-    @style_text,
-    @target_duration_sec,
-    @selected_poi_ids_json,
-    @plan_json,
-    @csv_text,
-    @created_at,
-    @updated_at,
-    @confirmed_at
-)
-`);
-const getCinematicVersionListStmt = db.prepare(`
-SELECT
-    id,
-    model_filename,
-    version_no,
-    status,
-    source,
-    created_at,
-    updated_at,
-    confirmed_at,
-    LENGTH(plan_json) AS plan_chars
-FROM model_cinematic_versions
-WHERE model_filename = ?
-ORDER BY version_no DESC, id DESC
-`);
-const getCinematicVersionByIdStmt = db.prepare(`
-SELECT
-    id,
-    model_filename,
-    version_no,
-    status,
-    source,
-    simple_prompt,
-    planner_prompt,
-    scene_description,
-    story_background,
-    style_text,
-    target_duration_sec,
-    selected_poi_ids_json,
-    plan_json,
-    csv_text,
-    created_at,
-    updated_at,
-    confirmed_at
-FROM model_cinematic_versions
-WHERE id = ? AND model_filename = ?
-`);
-const updateCinematicVersionStmt = db.prepare(`
-UPDATE model_cinematic_versions
-SET status = @status,
-    source = @source,
-    simple_prompt = @simple_prompt,
-    planner_prompt = @planner_prompt,
-    scene_description = @scene_description,
-    story_background = @story_background,
-    style_text = @style_text,
-    target_duration_sec = @target_duration_sec,
-    selected_poi_ids_json = @selected_poi_ids_json,
-    plan_json = @plan_json,
-    csv_text = @csv_text,
-    updated_at = @updated_at,
-    confirmed_at = @confirmed_at
-WHERE id = @id AND model_filename = @model_filename
-`);
-const deleteCinematicVersionStmt = db.prepare('DELETE FROM model_cinematic_versions WHERE id = ? AND model_filename = ?');
-
+const tourLoaderRepo = createTourLoaderRepository('ot-tour-loader');
+const runRepo = (name, ...args) => tourLoaderRepo.run(name, ...args);
+const getRepo = (name, ...args) => tourLoaderRepo.get(name, ...args);
+const allRepo = (name, ...args) => tourLoaderRepo.all(name, ...args);
+const transactionRepo = (name, fn) => tourLoaderRepo.transaction(name, fn);
 const migrateLlmConfigStorage = () => {
     const now = new Date().toISOString();
-    const legacyRows = db.prepare(`
-        SELECT model_filename, prompt_template, csv_prompt_template, move_prompt_template, updated_at
-        FROM model_llm_configs
-        WHERE model_filename <> ?
-    `).all(GLOBAL_LLM_CONFIG_KEY);
+    const legacyRows = allRepo('listLegacyLlmPromptRows', GLOBAL_LLM_CONFIG_KEY);
 
     legacyRows.forEach((row) => {
-        upsertPromptConfigStmt.run({
+        runRepo('upsertPromptConfig', {
             model_filename: String(row.model_filename || '').trim(),
             prompt_template: String(row.prompt_template || DEFAULT_PROMPT_TEMPLATE),
             csv_prompt_template: String(row.csv_prompt_template || DEFAULT_CSV_PROMPT_TEMPLATE),
@@ -790,17 +144,17 @@ const migrateLlmConfigStorage = () => {
         });
     });
 
-    const globalRow = getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY);
+    const globalRow = getRepo('getLlmConfig', GLOBAL_LLM_CONFIG_KEY);
     if (!globalRow) {
-        const seed = getLatestLlmConfigStmt.get();
-        upsertGlobalLlmConfigStmt.run({
+        const seed = getRepo('getLatestLlmConfig');
+        runRepo('upsertGlobalLlmConfig', {
             model_filename: GLOBAL_LLM_CONFIG_KEY,
             llm_model_name: String(seed?.llm_model_name || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL,
             llm_api_key: String(seed?.llm_api_key || '').trim(),
             selected_provider: String(seed?.selected_provider || 'gemini').trim() || 'gemini',
             gemini_model_name: String(seed?.gemini_model_name || seed?.llm_model_name || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL,
             gemini_api_key: String(seed?.gemini_api_key || seed?.llm_api_key || '').trim(),
-            qwen_model_name: String(seed?.qwen_model_name || 'qwen3.5-plus').trim() || 'qwen3.5-plus',
+            qwen_model_name: String(seed?.qwen_model_name || DEFAULT_QWEN_MODEL).trim() || DEFAULT_QWEN_MODEL,
             qwen_api_key: String(seed?.qwen_api_key || '').trim(),
             prompt_template: null,
             csv_prompt_template: null,
@@ -809,34 +163,15 @@ const migrateLlmConfigStorage = () => {
         });
     }
 
-    deleteNonGlobalLlmConfigsStmt.run(GLOBAL_LLM_CONFIG_KEY);
+    runRepo('deleteNonGlobalLlmConfigs', GLOBAL_LLM_CONFIG_KEY);
 };
 
 migrateLlmConfigStorage();
 
-const resolveGlobalLlmConfig = (row) => {
-    const selectedProvider = String(row?.selected_provider || (guessProvider(row?.llm_model_name) === 'qwen' ? 'qwen' : 'gemini')).trim() === 'qwen'
-        ? 'qwen'
-        : 'gemini';
-    const geminiModelName = String(row?.gemini_model_name || (guessProvider(row?.llm_model_name) === 'gemini' ? row?.llm_model_name : DEFAULT_LLM_MODEL) || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL;
-    const qwenModelName = String(row?.qwen_model_name || (guessProvider(row?.llm_model_name) === 'qwen' ? row?.llm_model_name : 'qwen3.5-plus') || 'qwen3.5-plus').trim() || 'qwen3.5-plus';
-    const geminiApiKey = String(row?.gemini_api_key || (selectedProvider === 'gemini' ? row?.llm_api_key : '') || '').trim();
-    const qwenApiKey = String(row?.qwen_api_key || (selectedProvider === 'qwen' ? row?.llm_api_key : '') || '').trim();
-    return {
-        selectedProvider,
-        gemini: {
-            modelName: geminiModelName,
-            apiKey: geminiApiKey
-        },
-        qwen: {
-            modelName: qwenModelName,
-            apiKey: qwenApiKey
-        },
-        activeModel: selectedProvider === 'qwen' ? qwenModelName : geminiModelName,
-        activeApiKey: selectedProvider === 'qwen' ? qwenApiKey : geminiApiKey,
-        updatedAt: row?.updated_at || null
-    };
-};
+const getGlobalLlmConfig = () => resolveGlobalLlmConfig(getRepo('getLlmConfig', GLOBAL_LLM_CONFIG_KEY), {
+    defaultGeminiModel: DEFAULT_LLM_MODEL,
+    defaultQwenModel: DEFAULT_QWEN_MODEL
+});
 
 const json = (res, status, body) => {
     const payload = JSON.stringify(body);
@@ -1134,9 +469,9 @@ const createCsvVersion = ({
     confirmedAt = null
 }) => {
     const now = new Date().toISOString();
-    const nextNoRow = getCsvVersionMaxNoStmt.get(modelFilename);
+    const nextNoRow = getRepo('getCsvVersionMaxNo', modelFilename);
     const versionNo = Math.max(1, Number(nextNoRow?.next_version_no || 1));
-    const result = insertCsvVersionStmt.run({
+    const result = runRepo('insertCsvVersion', {
         model_filename: modelFilename,
         version_no: versionNo,
         status,
@@ -1149,7 +484,7 @@ const createCsvVersion = ({
         updated_at: now,
         confirmed_at: confirmedAt ? String(confirmedAt) : null
     });
-    const row = getCsvVersionByIdStmt.get(Number(result.lastInsertRowid), modelFilename);
+    const row = getRepo('getCsvVersionById', Number(result.lastInsertRowid), modelFilename);
     return row ? mapCsvVersionRow(row, true) : null;
 };
 
@@ -1169,9 +504,9 @@ const createCinematicVersion = ({
     confirmedAt = null
 }) => {
     const now = new Date().toISOString();
-    const nextNoRow = getCinematicVersionMaxNoStmt.get(modelFilename);
+    const nextNoRow = getRepo('getCinematicVersionMaxNo', modelFilename);
     const versionNo = Math.max(1, Number(nextNoRow?.next_version_no || 1));
-    const result = insertCinematicVersionStmt.run({
+    const result = runRepo('insertCinematicVersion', {
         model_filename: modelFilename,
         version_no: versionNo,
         status,
@@ -1189,20 +524,20 @@ const createCinematicVersion = ({
         updated_at: now,
         confirmed_at: confirmedAt ? String(confirmedAt) : null
     });
-    const row = getCinematicVersionByIdStmt.get(Number(result.lastInsertRowid), modelFilename);
+    const row = getRepo('getCinematicVersionById', Number(result.lastInsertRowid), modelFilename);
     return row ? mapCinematicVersionRow(row, true) : null;
 };
 
-const saveState = db.transaction((modelFilename, profile, pois) => {
+const saveState = transactionRepo('saveState', (modelFilename, profile, pois) => {
     const now = new Date().toISOString();
-    upsertProfileStmt.run({ model_filename: modelFilename, eye_height_m: toNum(profile?.eyeHeightM, 1.65), updated_at: now });
-    clearModelPoisStmt.run(modelFilename);
-    clearModelHotspotsStmt.run(modelFilename);
+    runRepo('upsertProfile', { model_filename: modelFilename, eye_height_m: toNum(profile?.eyeHeightM, 1.65), updated_at: now });
+    runRepo('clearModelPois', modelFilename);
+    runRepo('clearModelHotspots', modelFilename);
     pois.forEach((poi, idx) => {
         const poiId = String(poi.poiId || `poi_${Date.now().toString(36)}_${idx}`).trim();
         const shot = String(poi.screenshotDataUrl || '').trim();
         const shotBlob = decodeDataUrl(shot);
-        upsertPoiStmt.run({
+        runRepo('upsertPoi', {
             model_filename: modelFilename,
             poi_id: poiId,
             poi_name: String(poi.poiName || poiId),
@@ -1231,7 +566,7 @@ const saveState = db.transaction((modelFilename, profile, pois) => {
         const hotspots = Array.isArray(poi.hotspots) ? poi.hotspots : [];
         hotspots.forEach((hotspot, hotspotIdx) => {
             const anchor = hotspot?.anchorWorld || null;
-            upsertHotspotStmt.run({
+            runRepo('upsertHotspot', {
                 model_filename: modelFilename,
                 poi_id: poiId,
                 hotspot_id: String(hotspot?.hotspotId || `hotspot_${Date.now().toString(36)}_${hotspotIdx}`),
@@ -1294,12 +629,28 @@ const guessProvider = (model) => {
     return 'openai';
 };
 
-const endpointForModel = (model) => {
-    const provider = guessProvider(model);
-    if (provider === 'gemini') {
+const normalizeLlmProvider = (provider) => {
+    const normalized = String(provider || '').trim().toLowerCase();
+    if (normalized === 'qwen') return 'qwen';
+    if (normalized === 'gemini') return 'gemini';
+    return '';
+};
+
+const resolveLlmProvider = ({ provider, model }) => {
+    const explicitProvider = normalizeLlmProvider(provider);
+    if (explicitProvider) return explicitProvider;
+    const guessedProvider = guessProvider(model);
+    if (guessedProvider === 'qwen') return 'qwen';
+    if (guessedProvider === 'gemini') return 'gemini';
+    return 'gemini';
+};
+
+const endpointForModel = (model, provider) => {
+    const resolvedProvider = resolveLlmProvider({ provider, model });
+    if (resolvedProvider === 'gemini') {
         return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent`;
     }
-    if (provider === 'qwen') {
+    if (resolvedProvider === 'qwen') {
         return 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
     }
     return 'https://api.openai.com/v1/chat/completions';
@@ -1373,18 +724,6 @@ const normalizeVoiceConfig = (rawConfig) => {
         fixedVoice,
         voicePool,
         resolvedPool: enabled ? voicePool : [fixedVoice]
-    };
-};
-
-const getGlobalTtsConfig = () => {
-    const row = getGlobalTtsConfigStmt.get() || null;
-    return {
-        provider: 'aliyun',
-        model: String(row?.tts_model || DEFAULT_TTS_MODEL).trim() || DEFAULT_TTS_MODEL,
-        voice: String(row?.tts_voice || DEFAULT_TTS_VOICE).trim() || DEFAULT_TTS_VOICE,
-        apiKey: String(row?.api_key || '').trim(),
-        format: String(row?.audio_format || DEFAULT_TTS_FORMAT).trim() || DEFAULT_TTS_FORMAT,
-        updatedAt: row?.updated_at ? String(row.updated_at) : null
     };
 };
 
@@ -1981,13 +1320,12 @@ const callOpenAI = async ({
     }
     let response;
     try {
-        response = await fetch(endpoint, {
+        response = await fetchWithLlmDispatcher(endpoint, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 Authorization: `Bearer ${apiKey}`
             },
-            dispatcher: llmFetchDispatcher,
             body: JSON.stringify(requestBody)
         });
     } catch (fetchError) {
@@ -2092,13 +1430,12 @@ const callGemini = async ({
     }
     let response;
     try {
-        response = await fetch(requestUrl, {
+        response = await fetchWithLlmDispatcher(requestUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 Accept: 'text/event-stream'
             },
-            dispatcher: llmFetchDispatcher,
             body: JSON.stringify(requestBody)
         });
     } catch (fetchError) {
@@ -2202,6 +1539,7 @@ const callQwen = async ({
 };
 
 const callRealLlm = async ({
+    provider,
     model,
     apiKey,
     prompt,
@@ -2214,8 +1552,8 @@ const callRealLlm = async ({
     appendLanguageInstruction = true,
     systemInstruction
 }) => {
-    const provider = guessProvider(model);
-    if (provider === 'gemini') {
+    const resolvedProvider = resolveLlmProvider({ provider, model });
+    if (resolvedProvider === 'gemini') {
         return callGemini({
             model,
             apiKey,
@@ -2229,7 +1567,7 @@ const callRealLlm = async ({
             appendLanguageInstruction
         });
     }
-    if (provider === 'qwen') {
+    if (resolvedProvider === 'qwen') {
         return callQwen({
             model,
             apiKey,
@@ -2359,10 +1697,9 @@ const callGeminiMultimodal = async ({
     }
     let response;
     try {
-        response = await fetch(requestUrl, {
+        response = await fetchWithLlmDispatcher(requestUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-            dispatcher: llmFetchDispatcher,
             body: JSON.stringify(requestBody)
         });
     } catch (fetchError) {
@@ -2409,6 +1746,7 @@ const callGeminiMultimodal = async ({
 };
 
 const callRealLlmMultimodal = async ({
+    provider,
     model,
     apiKey,
     prompt,
@@ -2419,11 +1757,11 @@ const callRealLlmMultimodal = async ({
     responseMimeType,
     systemInstruction
 }) => {
-    const provider = guessProvider(model);
-    if (provider === 'gemini') {
+    const resolvedProvider = resolveLlmProvider({ provider, model });
+    if (resolvedProvider === 'gemini') {
         return callGeminiMultimodal({ model, apiKey, prompt, imageDataUrls, onChunk, onRequestPayload, onRawFrame, responseMimeType, systemInstruction });
     }
-    if (provider === 'qwen') {
+    if (resolvedProvider === 'qwen') {
         return callOpenAIMultimodal({ model, apiKey, prompt, imageDataUrls, onChunk, onRequestPayload, onRawFrame, systemInstruction, providerName: 'qwen', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions' });
     }
     return callOpenAIMultimodal({ model, apiKey, prompt, imageDataUrls, onChunk, onRequestPayload, onRawFrame, systemInstruction, providerName: 'openai', endpoint: 'https://api.openai.com/v1/chat/completions' });
@@ -2722,6 +2060,7 @@ const normalizeCinematicPlan = ({ payload, modelFilename, selectedPoiIds, sceneD
 
 const createCsvExportJob = ({
     modelFilename,
+    llmProvider,
     llmModel,
     llmApiKey,
     csvPromptTemplate,
@@ -2733,6 +2072,7 @@ const createCsvExportJob = ({
     csvExportJobStore.set(jobId, {
         jobId,
         modelFilename,
+        llmProvider,
         llmModel,
         llmApiKey,
         csvPromptTemplate,
@@ -3008,13 +2348,13 @@ const runCsvExportJob = async (jobId) => {
         jobId,
         modelFilename: job.modelFilename,
         llmModel: job.llmModel,
-        apiEndpoint: endpointForModel(job.llmModel),
+        apiEndpoint: endpointForModel(job.llmModel, job.llmProvider),
         ts: new Date().toISOString()
     });
 
     try {
-        const profile = getProfileStmt.get(job.modelFilename);
-        const allRows = getPoisStmt.all(job.modelFilename);
+        const profile = getRepo('getProfile', job.modelFilename);
+        const allRows = allRepo('getPois', job.modelFilename);
         if (allRows.length < 1) {
             throw new Error('no POI records found for current model');
         }
@@ -3054,13 +2394,14 @@ const runCsvExportJob = async (jobId) => {
         sendCsvExportSse(jobId, 'export.api.call', {
             jobId,
             llmModel: job.llmModel,
-            apiEndpoint: endpointForModel(job.llmModel),
+            apiEndpoint: endpointForModel(job.llmModel, job.llmProvider),
             hasApiKey: Boolean(job.llmApiKey),
             promptChars: prompt.length,
             ts: new Date().toISOString()
         });
 
         const llmResult = await callRealLlm({
+            provider: job.llmProvider,
             model: job.llmModel,
             apiKey: job.llmApiKey,
             prompt,
@@ -3095,8 +2436,8 @@ const runCsvExportJob = async (jobId) => {
         const missingPoiCount = Math.max(0, orderedPoiIds.length - plannedUniquePoiCount);
         sendCsvExportSse(jobId, 'export.plan.done', {
             jobId,
-            provider: llmResult?.provider || guessProvider(job.llmModel),
-            apiEndpoint: llmResult?.endpoint || endpointForModel(job.llmModel),
+            provider: llmResult?.provider || job.llmProvider,
+            apiEndpoint: llmResult?.endpoint || endpointForModel(job.llmModel, job.llmProvider),
             status: llmResult?.status || 200,
             requestId: llmResult?.requestId || null,
             chunkCount: llmResult?.chunkCount || 0,
@@ -3174,6 +2515,7 @@ const runCsvExportJob = async (jobId) => {
             });
             try {
                 const moveLlmResult = await callRealLlm({
+                    provider: job.llmProvider,
                     model: job.llmModel,
                     apiKey: job.llmApiKey,
                     prompt: movePrompt,
@@ -3199,8 +2541,8 @@ const runCsvExportJob = async (jobId) => {
                 moveMap.forEach((content, seq) => moveContents.set(seq, content));
                 sendCsvExportSse(jobId, 'export.move.done', {
                     jobId,
-                    provider: moveLlmResult?.provider || guessProvider(job.llmModel),
-                    apiEndpoint: moveLlmResult?.endpoint || endpointForModel(job.llmModel),
+                    provider: moveLlmResult?.provider || job.llmProvider,
+                    apiEndpoint: moveLlmResult?.endpoint || endpointForModel(job.llmModel, job.llmProvider),
                     status: moveLlmResult?.status || 200,
                     requestId: moveLlmResult?.requestId || null,
                     chunkCount: moveLlmResult?.chunkCount || 0,
@@ -3268,7 +2610,7 @@ const runCsvExportJob = async (jobId) => {
                 audioMode: step.audioMode,
                 ts: new Date().toISOString()
             });
-            const poiRow = getPoiByIdStmt.get(job.modelFilename, step.poiId);
+            const poiRow = getRepo('getPoiById', job.modelFilename, step.poiId);
             if (!poiRow) {
                 throw new Error(`poi_id='${step.poiId}' not found while composing CSV`);
             }
@@ -3332,8 +2674,8 @@ const computeCsvTimingSummary = async ({
     timingConfig
 }) => {
     const normalizedTiming = normalizeTimingConfig(timingConfig);
-    const profile = getProfileStmt.get(modelFilename);
-    const allRows = getPoisStmt.all(modelFilename);
+    const profile = getRepo('getProfile', modelFilename);
+    const allRows = allRepo('getPois', modelFilename);
     if (allRows.length < 1) throw new Error('no POI records found for current model');
     if (!llmApiKey) throw new Error('LLM API key is empty');
 
@@ -3353,6 +2695,7 @@ const computeCsvTimingSummary = async ({
         : '';
     const prompt = `${csvPromptTemplate || DEFAULT_CSV_PROMPT_TEMPLATE}${timingPromptNote}\n\nPOI_DATA_JSON:\n${JSON.stringify(plannerInput, null, 2)}`;
     const llmResult = await callRealLlm({
+        provider: llmProvider,
         model: llmModel,
         apiKey: llmApiKey,
         prompt,
@@ -3418,6 +2761,7 @@ const computeCsvTimingSummary = async ({
         }, null, 2)}`;
         try {
             const moveLlmResult = await callRealLlm({
+                provider: llmProvider,
                 model: llmModel,
                 apiKey: llmApiKey,
                 prompt: movePrompt,
@@ -3459,13 +2803,13 @@ const runCinematicJob = async (jobId) => {
         kind: job.kind,
         modelFilename: job.modelFilename,
         llmModel: job.llmModel,
-        llmProvider: guessProvider(job.llmModel),
-        apiEndpoint: endpointForModel(job.llmModel),
+        llmProvider: job.llmProvider,
+        apiEndpoint: endpointForModel(job.llmModel, job.llmProvider),
         ts: new Date().toISOString()
     });
     try {
         if (!job.llmApiKey) throw new Error('LLM API key is empty');
-        const apiEndpoint = endpointForModel(job.llmModel);
+        const apiEndpoint = endpointForModel(job.llmModel, job.llmProvider);
         const callStartedAt = Date.now();
         heartbeatTimer = setInterval(() => {
             sendCinematicSse(jobId, 'heartbeat', {
@@ -3482,7 +2826,7 @@ const runCinematicJob = async (jobId) => {
                     jobId,
                     kind: job.kind,
                     llmModel: job.llmModel,
-                    provider: reqPayload?.provider || guessProvider(job.llmModel),
+                    provider: reqPayload?.provider || job.llmProvider,
                     apiEndpoint: reqPayload?.endpoint || apiEndpoint,
                     requestJson: reqPayload?.requestBody || null,
                     imageCount: Number(reqPayload?.imageCount || reqPayload?.imageMetas?.length || 0),
@@ -3497,7 +2841,7 @@ const runCinematicJob = async (jobId) => {
                     kind: job.kind,
                     frameIndex: rawFrameIndex,
                     llmModel: job.llmModel,
-                    provider: guessProvider(job.llmModel),
+                    provider: job.llmProvider,
                     apiEndpoint,
                     rawJson: String(rawFrame || ''),
                     ts: new Date().toISOString()
@@ -3538,6 +2882,7 @@ const runCinematicJob = async (jobId) => {
                 ts: new Date().toISOString()
             });
             llmResult = await callRealLlm({
+                provider: job.llmProvider,
                 model: job.llmModel,
                 apiKey: job.llmApiKey,
                 prompt,
@@ -3555,7 +2900,7 @@ const runCinematicJob = async (jobId) => {
                 kind: 'prompt',
                 ok: true,
                 llmModel: job.llmModel,
-                provider: llmResult?.provider || guessProvider(job.llmModel),
+                provider: llmResult?.provider || job.llmProvider,
                 apiEndpoint: llmResult?.endpoint || apiEndpoint,
                 status: llmResult?.status || 200,
                 requestId: llmResult?.requestId || null,
@@ -3644,6 +2989,7 @@ const runCinematicJob = async (jobId) => {
             ts: new Date().toISOString()
         });
         llmResult = await callRealLlmMultimodal({
+            provider: job.llmProvider,
             model: job.llmModel,
             apiKey: job.llmApiKey,
             prompt,
@@ -3660,7 +3006,7 @@ const runCinematicJob = async (jobId) => {
             kind: 'timeline',
             ok: true,
             llmModel: job.llmModel,
-            provider: llmResult?.provider || guessProvider(job.llmModel),
+            provider: llmResult?.provider || job.llmProvider,
             apiEndpoint: llmResult?.endpoint || apiEndpoint,
             status: llmResult?.status || 200,
             requestId: llmResult?.requestId || null,
@@ -3721,8 +3067,8 @@ const runCinematicJob = async (jobId) => {
         sendCinematicSse(jobId, 'api.error', {
             jobId,
             kind: job?.kind || 'unknown',
-            provider: error?.provider || guessProvider(job?.llmModel),
-            apiEndpoint: error?.endpoint || endpointForModel(job?.llmModel),
+            provider: error?.provider || job?.llmProvider || resolveLlmProvider({ model: job?.llmModel }),
+            apiEndpoint: error?.endpoint || endpointForModel(job?.llmModel, job?.llmProvider),
             status: error?.status || null,
             requestId: error?.requestId || null,
             finishReason: error?.finishReason || null,
@@ -3756,7 +3102,7 @@ const runJob = async (jobId) => {
         jobId,
         llmModel: job.llmModel,
         llmProvider: job.llmProvider,
-        apiEndpoint: endpointForModel(job.llmModel),
+        apiEndpoint: endpointForModel(job.llmModel, job.llmProvider),
         ts: new Date().toISOString()
     });
     while (job.index < job.poiIds.length) {
@@ -3767,7 +3113,7 @@ const runJob = async (jobId) => {
             return;
         }
         const poiId = job.poiIds[job.index];
-        const row = getPoiByIdStmt.get(job.modelFilename, poiId);
+        const row = getRepo('getPoiById', job.modelFilename, poiId);
         if (!row) {
             sendSse(jobId, 'poi.failed', { jobId, poiId, error: 'poi not found', index: job.index + 1, total: job.poiIds.length });
             job.index += 1;
@@ -3776,7 +3122,7 @@ const runJob = async (jobId) => {
         const prompt = `${job.promptTemplate}\nPOI: ${row.poi_name}\nPOI_ID: ${row.poi_id}`;
         const screenshotDataUrl = row.screenshot_data_url || encodeDataUrl(row.screenshot_blob, row.screenshot_blob_mime) || '';
         const imgInfo = imageDigest(screenshotDataUrl);
-        const apiEndpoint = endpointForModel(job.llmModel);
+        const apiEndpoint = endpointForModel(job.llmModel, job.llmProvider);
         sendSse(jobId, 'job.prompt', { jobId, poiId, prompt, index: job.index + 1, total: job.poiIds.length, ts: new Date().toISOString() });
         sendSse(jobId, 'api.call', {
             jobId,
@@ -3825,6 +3171,7 @@ const runJob = async (jobId) => {
         }, 2500);
         try {
             const result = await callRealLlm({
+                provider: job.llmProvider,
                 model: job.llmModel,
                 apiKey: job.llmApiKey,
                 prompt,
@@ -3835,7 +3182,7 @@ const runJob = async (jobId) => {
                         jobId,
                         poiId,
                         llmModel: job.llmModel,
-                        provider: reqPayload?.provider || guessProvider(job.llmModel),
+                        provider: reqPayload?.provider || job.llmProvider,
                         apiEndpoint: reqPayload?.endpoint || apiEndpoint,
                         hasApiKey: Boolean(job.llmApiKey),
                         hasImage: Boolean(reqPayload?.hasImage),
@@ -3855,7 +3202,7 @@ const runJob = async (jobId) => {
                         jobId,
                         poiId,
                         llmModel: job.llmModel,
-                        provider: guessProvider(job.llmModel),
+                        provider: job.llmProvider,
                         apiEndpoint,
                         frameIndex: rawFrameIndex,
                         rawJson: String(rawFrame || ''),
@@ -3903,7 +3250,7 @@ const runJob = async (jobId) => {
                 poiId,
                 llmModel: job.llmModel,
                 apiEndpoint: errObj.endpoint || apiEndpoint,
-                provider: errObj.provider || guessProvider(job.llmModel),
+                provider: errObj.provider || job.llmProvider,
                 status: errObj.status || null,
                 requestId: errObj.requestId || null,
                 finishReason: errObj.finishReason || null,
@@ -3921,7 +3268,7 @@ const runJob = async (jobId) => {
                     jobId,
                     poiId,
                     llmModel: job.llmModel,
-                    provider: errObj.provider || guessProvider(job.llmModel),
+                    provider: errObj.provider || job.llmProvider,
                     apiEndpoint: errObj.endpoint || apiEndpoint,
                     frameIndex: rawFrameIndex,
                     rawJson: String(errObj.rawResponse),
@@ -3942,7 +3289,7 @@ const runJob = async (jobId) => {
                 poiId,
                 ok: false,
                 llmModel: job.llmModel,
-                provider: errObj.provider || guessProvider(job.llmModel),
+                provider: errObj.provider || job.llmProvider,
                 apiEndpoint: errObj.endpoint || apiEndpoint,
                 status: errObj.status || null,
                 requestId: errObj.requestId || null,
@@ -3966,7 +3313,7 @@ const runJob = async (jobId) => {
                 poiId,
                 ok: false,
                 llmModel: job.llmModel,
-                provider: meta?.provider || guessProvider(job.llmModel),
+                provider: meta?.provider || job.llmProvider,
                 apiEndpoint: meta?.endpoint || apiEndpoint,
                 status: meta?.status || 200,
                 requestId: meta?.requestId || null,
@@ -3981,7 +3328,7 @@ const runJob = async (jobId) => {
             continue;
         }
         const now = new Date().toISOString();
-        upsertPoiStmt.run({
+        runRepo('upsertPoi', {
             model_filename: job.modelFilename,
             poi_id: row.poi_id,
             poi_name: row.poi_name,
@@ -4019,7 +3366,7 @@ const runJob = async (jobId) => {
             poiId,
             ok: true,
             llmModel: job.llmModel,
-            provider: meta?.provider || guessProvider(job.llmModel),
+            provider: meta?.provider || job.llmProvider,
             apiEndpoint: meta?.endpoint || apiEndpoint,
             status: meta?.status || 200,
             requestId: meta?.requestId || null,
@@ -4036,7 +3383,7 @@ const runJob = async (jobId) => {
                 jobId,
                 poiId,
                 llmModel: job.llmModel,
-                provider: meta?.provider || guessProvider(job.llmModel),
+                provider: meta?.provider || job.llmProvider,
                 message: 'Model output reached MAX_TOKENS; consider higher token limit or shorter prompt.',
                 contentChars: text.length,
                 ts: now
@@ -4088,7 +3435,7 @@ const server = createServer(async (req, res) => {
             json(res, 200, {
                 ok: true,
                 fileName: stored.fileName,
-                mediaUrl: `http://localhost:${port}/api/ot-tour-loader/cinematic/media/${encodeURIComponent(stored.storedName)}`
+                mediaUrl: `/api/ot-tour-loader/cinematic/media/${encodeURIComponent(stored.storedName)}`
             });
             return;
         }
@@ -4102,9 +3449,9 @@ const server = createServer(async (req, res) => {
         if (path === '/api/ot-tour-loader/state' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const profile = getProfileStmt.get(modelFilename);
-            const rows = getPoisStmt.all(modelFilename);
-            const hotspotRows = getHotspotsStmt.all(modelFilename);
+            const profile = getRepo('getProfile', modelFilename);
+            const rows = allRepo('getPois', modelFilename);
+            const hotspotRows = allRepo('getHotspots', modelFilename);
             const hotspotMap = new Map();
             hotspotRows.forEach((row) => {
                 const poiId = String(row.poi_id || '');
@@ -4137,9 +3484,8 @@ const server = createServer(async (req, res) => {
         if (path === '/api/ot-tour-loader/llm-config' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const globalRow = getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY);
-            const promptRow = getPromptConfigStmt.get(modelFilename);
-            const globalCfg = resolveGlobalLlmConfig(globalRow);
+            const promptRow = getRepo('getPromptConfig', modelFilename);
+            const globalCfg = getGlobalLlmConfig();
             json(res, 200, {
                 ok: true,
                 modelFilename,
@@ -4166,11 +3512,11 @@ const server = createServer(async (req, res) => {
             const selectedProvider = String(body?.llm?.selectedProvider || 'gemini').trim() === 'qwen' ? 'qwen' : 'gemini';
             const geminiModelName = String(body?.llm?.gemini?.modelName || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL;
             const geminiApiKey = String(body?.llm?.gemini?.apiKey || '').trim();
-            const qwenModelName = String(body?.llm?.qwen?.modelName || 'qwen3.5-plus').trim() || 'qwen3.5-plus';
+            const qwenModelName = String(body?.llm?.qwen?.modelName || DEFAULT_QWEN_MODEL).trim() || DEFAULT_QWEN_MODEL;
             const qwenApiKey = String(body?.llm?.qwen?.apiKey || '').trim();
             const activeModel = selectedProvider === 'qwen' ? qwenModelName : geminiModelName;
             const activeApiKey = selectedProvider === 'qwen' ? qwenApiKey : geminiApiKey;
-            upsertGlobalLlmConfigStmt.run({
+            runRepo('upsertGlobalLlmConfig', {
                 model_filename: GLOBAL_LLM_CONFIG_KEY,
                 llm_model_name: activeModel,
                 llm_api_key: activeApiKey,
@@ -4184,7 +3530,7 @@ const server = createServer(async (req, res) => {
                 move_prompt_template: null,
                 updated_at: now
             });
-            upsertPromptConfigStmt.run({
+            runRepo('upsertPromptConfig', {
                 model_filename: modelFilename,
                 prompt_template: String(body?.llm?.promptTemplate || DEFAULT_PROMPT_TEMPLATE),
                 csv_prompt_template: String(body?.llm?.csvPromptTemplate || DEFAULT_CSV_PROMPT_TEMPLATE),
@@ -4202,8 +3548,7 @@ const server = createServer(async (req, res) => {
             const prompt = String(body.prompt || `${DEFAULT_PROMPT_TEMPLATE}\nPOI: ${poiName}`).trim();
             let apiKey = String(body.apiKey || '').trim();
             if (!apiKey) {
-                const cfg = getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY);
-                apiKey = String(cfg?.llm_api_key || '').trim();
+                apiKey = getGlobalLlmConfig().activeApiKey;
             }
             if (!apiKey) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'apiKey required (or save global key in LLM config)');
 
@@ -4214,8 +3559,10 @@ const server = createServer(async (req, res) => {
             const imgInfo = imageDigest(screenshotDataUrl);
             const chunks = [];
             const start = Date.now();
+            const resolvedProvider = resolveLlmProvider({ provider: body?.provider || body?.llm?.provider, model });
             try {
                 const result = await callRealLlm({
+                    provider: resolvedProvider,
                     model,
                     apiKey,
                     prompt,
@@ -4230,9 +3577,9 @@ const server = createServer(async (req, res) => {
                 });
                 json(res, 200, {
                     ok: true,
-                    provider: result?.provider || guessProvider(model),
+                    provider: result?.provider || resolvedProvider,
                     llmModel: model,
-                    apiEndpoint: result?.endpoint || endpointForModel(model),
+                    apiEndpoint: result?.endpoint || endpointForModel(model, resolvedProvider),
                     status: result?.status || 200,
                     requestId: result?.requestId || null,
                     chunkCount: Number(result?.chunkCount || chunks.length || 0),
@@ -4251,9 +3598,9 @@ const server = createServer(async (req, res) => {
             } catch (error) {
                 const errObj = error || {};
                 fail(res, 502, 'OT_TL_LLM_CALL_FAILED', String(errObj.message || errObj), {
-                    provider: errObj.provider || guessProvider(model),
+                    provider: errObj.provider || resolvedProvider,
                     llmModel: model,
-                    apiEndpoint: errObj.endpoint || endpointForModel(model),
+                    apiEndpoint: errObj.endpoint || endpointForModel(model, resolvedProvider),
                     status: errObj.status || null,
                     requestId: errObj.requestId || null,
                     finishReason: errObj.finishReason || null,
@@ -4279,7 +3626,7 @@ const server = createServer(async (req, res) => {
             const promptTemplate = p.promptTemplate === undefined || p.promptTemplate === null
                 ? DEFAULT_PROMPT_TEMPLATE
                 : String(p.promptTemplate || '');
-            upsertPoiStmt.run({
+            runRepo('upsertPoi', {
                 model_filename: modelFilename,
                 poi_id: poiId,
                 poi_name: String(p.poiName || poiId),
@@ -4312,11 +3659,11 @@ const server = createServer(async (req, res) => {
             const body = JSON.parse(await readBody(req) || '{}');
             const modelFilename = String(body.modelFilename || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const row = getPoiByIdStmt.get(modelFilename, patchMatch.poiId);
+            const row = getRepo('getPoiById', modelFilename, patchMatch.poiId);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'poi not found');
             const patch = body.patch || {};
             const now = new Date().toISOString();
-            upsertPoiStmt.run({
+            runRepo('upsertPoi', {
                 model_filename: modelFilename,
                 poi_id: row.poi_id,
                 poi_name: patch.poiName !== undefined ? String(patch.poiName || row.poi_name) : row.poi_name,
@@ -4347,8 +3694,8 @@ const server = createServer(async (req, res) => {
         if (patchMatch && req.method === 'DELETE') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            clearPoiHotspotsStmt.run(modelFilename, patchMatch.poiId);
-            deletePoiStmt.run(modelFilename, patchMatch.poiId);
+            runRepo('clearPoiHotspots', modelFilename, patchMatch.poiId);
+            runRepo('deletePoi', modelFilename, patchMatch.poiId);
             json(res, 200, { ok: true, modelFilename, poiId: patchMatch.poiId });
             return;
         }
@@ -4358,13 +3705,13 @@ const server = createServer(async (req, res) => {
             const body = JSON.parse(await readBody(req) || '{}');
             const modelFilename = String(body.modelFilename || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const row = getPoiByIdStmt.get(modelFilename, shotMatch.poiId);
+            const row = getRepo('getPoiById', modelFilename, shotMatch.poiId);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'poi not found');
             const shot = String(body.screenshotDataUrl || '').trim();
             const mime = String(body.imageMime || 'image/png');
             const decoded = decodeDataUrl(shot);
             const now = new Date().toISOString();
-            upsertPoiStmt.run({
+            runRepo('upsertPoi', {
                 model_filename: modelFilename,
                 poi_id: row.poi_id,
                 poi_name: row.poi_name,
@@ -4396,8 +3743,9 @@ const server = createServer(async (req, res) => {
             const body = JSON.parse(await readBody(req) || '{}');
             const modelFilename = String(body.modelFilename || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const globalLlmCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
-            const promptCfg = getPromptConfigStmt.get(modelFilename);
+            const globalLlmCfg = getGlobalLlmConfig();
+            const promptCfg = getRepo('getPromptConfig', modelFilename);
+            const llmProvider = resolveLlmProvider({ provider: body?.llm?.provider || globalLlmCfg.selectedProvider, model: body?.llm?.model || globalLlmCfg.activeModel });
             const llmModel = String(body?.llm?.model || globalLlmCfg.activeModel || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL;
             const llmApiKey = String(body?.llm?.apiKey || globalLlmCfg.activeApiKey || '').trim();
             const csvPromptTemplate = String(body?.llm?.csvPromptTemplate || promptCfg?.csv_prompt_template || DEFAULT_CSV_PROMPT_TEMPLATE).trim() || DEFAULT_CSV_PROMPT_TEMPLATE;
@@ -4406,6 +3754,7 @@ const server = createServer(async (req, res) => {
             const timingConfig = normalizeTimingConfig(body?.timingConfig || {});
             const jobId = createCsvExportJob({
                 modelFilename,
+                llmProvider,
                 llmModel,
                 llmApiKey,
                 csvPromptTemplate,
@@ -4421,7 +3770,7 @@ const server = createServer(async (req, res) => {
         if (path === '/api/ot-tour-loader/csv/versions' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const rows = getCsvVersionListStmt.all(modelFilename).map((row) => mapCsvVersionRow(row));
+            const rows = allRepo('getCsvVersionList', modelFilename).map((row) => mapCsvVersionRow(row));
             json(res, 200, { ok: true, modelFilename, versions: rows });
             return;
         }
@@ -4440,7 +3789,7 @@ const server = createServer(async (req, res) => {
         if (path === '/api/ot-tour-loader/cinematic/versions' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const rows = getCinematicVersionListStmt.all(modelFilename).map((row) => mapCinematicVersionRow(row));
+            const rows = allRepo('getCinematicVersionList', modelFilename).map((row) => mapCinematicVersionRow(row));
             json(res, 200, { ok: true, modelFilename, versions: rows });
             return;
         }
@@ -4471,8 +3820,9 @@ const server = createServer(async (req, res) => {
             const body = JSON.parse(await readBody(req) || '{}');
             const modelFilename = String(body.modelFilename || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const globalLlmCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
-            const promptCfg = getPromptConfigStmt.get(modelFilename);
+            const globalLlmCfg = getGlobalLlmConfig();
+            const promptCfg = getRepo('getPromptConfig', modelFilename);
+            const llmProvider = resolveLlmProvider({ provider: body?.llm?.provider || globalLlmCfg.selectedProvider, model: body?.llm?.model || globalLlmCfg.activeModel });
             const llmModel = String(body?.llm?.model || globalLlmCfg.activeModel || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL;
             const llmApiKey = String(body?.llm?.apiKey || globalLlmCfg.activeApiKey || '').trim();
             const csvPromptTemplate = String(body?.llm?.csvPromptTemplate || promptCfg?.csv_prompt_template || DEFAULT_CSV_PROMPT_TEMPLATE).trim() || DEFAULT_CSV_PROMPT_TEMPLATE;
@@ -4482,6 +3832,7 @@ const server = createServer(async (req, res) => {
 
             const jobId = createCsvExportJob({
                 modelFilename,
+                llmProvider,
                 llmModel,
                 llmApiKey,
                 csvPromptTemplate,
@@ -4513,8 +3864,8 @@ const server = createServer(async (req, res) => {
             const body = JSON.parse(await readBody(req) || '{}');
             const modelFilename = String(body?.modelFilename || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_MODEL_REQUIRED', 'modelFilename is required');
-            const globalLlmCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
-            const promptCfg = getPromptConfigStmt.get(modelFilename);
+            const globalLlmCfg = getGlobalLlmConfig();
+            const promptCfg = getRepo('getPromptConfig', modelFilename);
             const llmModel = String(body?.llm?.model || globalLlmCfg.activeModel || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL;
             const llmApiKey = String(body?.llm?.apiKey || globalLlmCfg.activeApiKey || '').trim();
             const csvPromptTemplate = String(body?.llm?.csvPromptTemplate || promptCfg?.csv_prompt_template || DEFAULT_CSV_PROMPT_TEMPLATE).trim() || DEFAULT_CSV_PROMPT_TEMPLATE;
@@ -4577,7 +3928,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const versionId = Math.floor(toNum(csvVersionMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            const row = getCsvVersionByIdStmt.get(versionId, modelFilename);
+            const row = getRepo('getCsvVersionById', versionId, modelFilename);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'csv version not found');
             json(res, 200, { ok: true, modelFilename, version: mapCsvVersionRow(row, true) });
             return;
@@ -4588,7 +3939,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const versionId = Math.floor(toNum(cinematicVersionMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            const row = getCinematicVersionByIdStmt.get(versionId, modelFilename);
+            const row = getRepo('getCinematicVersionById', versionId, modelFilename);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'cinematic version not found');
             json(res, 200, { ok: true, modelFilename, version: mapCinematicVersionRow(row, true) });
             return;
@@ -4600,7 +3951,7 @@ const server = createServer(async (req, res) => {
             const versionId = Math.floor(toNum(cinematicVersionMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
             const now = new Date().toISOString();
-            updateCinematicVersionStmt.run({
+            runRepo('updateCinematicVersion', {
                 id: versionId,
                 model_filename: modelFilename,
                 status: String(body.status || 'draft') || 'draft',
@@ -4617,7 +3968,7 @@ const server = createServer(async (req, res) => {
                 updated_at: now,
                 confirmed_at: body.status === 'confirmed' ? now : null
             });
-            const row = getCinematicVersionByIdStmt.get(versionId, modelFilename);
+            const row = getRepo('getCinematicVersionById', versionId, modelFilename);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'cinematic version not found');
             json(res, 200, { ok: true, modelFilename, version: mapCinematicVersionRow(row, true) });
             return;
@@ -4627,7 +3978,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const versionId = Math.floor(toNum(cinematicVersionMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            deleteCinematicVersionStmt.run(versionId, modelFilename);
+            runRepo('deleteCinematicVersion', versionId, modelFilename);
             json(res, 200, { ok: true, modelFilename, versionId });
             return;
         }
@@ -4640,7 +3991,7 @@ const server = createServer(async (req, res) => {
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
             if (!csvText.trim()) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'csvText required');
             const now = new Date().toISOString();
-            const result = updateCsvVersionStmt.run({
+            const result = runRepo('updateCsvVersion', {
                 id: versionId,
                 model_filename: modelFilename,
                 csv_text: csvText,
@@ -4650,7 +4001,7 @@ const server = createServer(async (req, res) => {
                 move_prompt_template: body.movePromptTemplate ? String(body.movePromptTemplate) : null
             });
             if (!result.changes) return fail(res, 404, 'OT_TL_NOT_FOUND', 'csv version not found');
-            const row = getCsvVersionByIdStmt.get(versionId, modelFilename);
+            const row = getRepo('getCsvVersionById', versionId, modelFilename);
             json(res, 200, { ok: true, modelFilename, version: row ? mapCsvVersionRow(row, true) : null });
             return;
         }
@@ -4659,7 +4010,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const versionId = Math.floor(toNum(csvVersionMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            const result = deleteCsvVersionStmt.run(versionId, modelFilename);
+            const result = runRepo('deleteCsvVersion', versionId, modelFilename);
             if (!result.changes) return fail(res, 404, 'OT_TL_NOT_FOUND', 'csv version not found');
             json(res, 200, { ok: true, modelFilename, versionId });
             return;
@@ -4671,7 +4022,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(body.modelFilename || '').trim();
             const sourceVersionId = Math.floor(toNum(csvVersionSaveAsNewMatch.versionId, 0));
             if (!modelFilename || sourceVersionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            const sourceRow = getCsvVersionByIdStmt.get(sourceVersionId, modelFilename);
+            const sourceRow = getRepo('getCsvVersionById', sourceVersionId, modelFilename);
             if (!sourceRow) return fail(res, 404, 'OT_TL_NOT_FOUND', 'source csv version not found');
             const csvText = String(body.csvText || sourceRow.csv_text || '');
             if (!csvText.trim()) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'csvText required');
@@ -4695,19 +4046,19 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(body.modelFilename || '').trim();
             const versionId = Math.floor(toNum(csvVersionConfirmMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            const row = getCsvVersionByIdStmt.get(versionId, modelFilename);
+            const row = getRepo('getCsvVersionById', versionId, modelFilename);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'csv version not found');
             const csvText = String(body.csvText || row.csv_text || '');
             if (!csvText.trim()) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'csvText required');
             const now = new Date().toISOString();
-            confirmCsvVersionStmt.run({
+            runRepo('confirmCsvVersion', {
                 id: versionId,
                 model_filename: modelFilename,
                 csv_text: csvText,
                 confirmed_at: now,
                 updated_at: now
             });
-            const next = getCsvVersionByIdStmt.get(versionId, modelFilename);
+            const next = getRepo('getCsvVersionById', versionId, modelFilename);
             json(res, 200, { ok: true, modelFilename, version: next ? mapCsvVersionRow(next, true) : null });
             return;
         }
@@ -4717,7 +4068,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const versionId = Math.floor(toNum(csvVersionDownloadMatch.versionId, 0));
             if (!modelFilename || versionId <= 0) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and valid versionId required');
-            const row = getCsvVersionByIdStmt.get(versionId, modelFilename);
+            const row = getRepo('getCsvVersionById', versionId, modelFilename);
             if (!row) return fail(res, 404, 'OT_TL_NOT_FOUND', 'csv version not found');
             const filename = `ot-tour-loader-${modelFilename.replace(/[^a-zA-Z0-9_.-]/g, '_')}-v${Number(row.version_no || 0)}.csv`;
             csvResponse(res, String(row.csv_text || ''), filename);
@@ -4727,8 +4078,8 @@ const server = createServer(async (req, res) => {
         if (path === '/api/ot-tour-loader/csv/export' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             if (!modelFilename) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename required');
-            const profile = getProfileStmt.get(modelFilename);
-            const rows = getPoisStmt.all(modelFilename);
+            const profile = getRepo('getProfile', modelFilename);
+            const rows = allRepo('getPois', modelFilename);
             const header = [
                 'version','seq','action','audio_mode','poi_id','poi_name','target_x','target_y','target_z','target_yaw','target_pitch','target_fov','move_speed_mps','dwell_ms','content','tts_lang','tts_voice','model_filename','eye_height_m'
             ];
@@ -4860,7 +4211,7 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(body.modelFilename || '').trim();
             const poiIds = Array.isArray(body.poiIds) ? body.poiIds.map((x) => String(x)) : [];
             if (!modelFilename || poiIds.length < 1) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and poiIds required');
-            const globalCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
+            const globalCfg = getGlobalLlmConfig();
             const jobId = `job_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
             const promptMode = String(body?.llm?.promptMode || 'global');
             const promptTemplate = typeof body?.llm?.promptTemplate === 'string'
@@ -4879,7 +4230,7 @@ const server = createServer(async (req, res) => {
                 stopRequested: false,
                 promptTemplate,
                 llmModel: String(body?.llm?.model || globalCfg.activeModel || DEFAULT_LLM_MODEL),
-                llmProvider: String(body?.llm?.provider || globalCfg.selectedProvider || guessProvider(globalCfg.activeModel)),
+                llmProvider: resolveLlmProvider({ provider: body?.llm?.provider || globalCfg.selectedProvider, model: body?.llm?.model || globalCfg.activeModel }),
                 llmApiKey: String(body?.llm?.apiKey || globalCfg.activeApiKey || ''),
                 promptMode,
                 apiEndpoint: String(body?.llm?.apiEndpoint || '/mock/llm/content')
@@ -4894,13 +4245,14 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(body.modelFilename || '').trim();
             const simplePrompt = String(body.simplePrompt || '').trim();
             if (!modelFilename || !simplePrompt) return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename and simplePrompt required');
-            const globalCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
+            const globalCfg = getGlobalLlmConfig();
             const jobId = `cinejob_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
             cinematicJobStore.set(jobId, {
                 jobId,
                 kind: 'prompt',
                 modelFilename,
                 simplePrompt,
+                llmProvider: resolveLlmProvider({ provider: body?.llm?.provider || globalCfg.selectedProvider, model: body?.llm?.model || globalCfg.activeModel }),
                 llmModel: String(body?.llm?.model || globalCfg.activeModel || DEFAULT_LLM_MODEL),
                 llmApiKey: String(body?.llm?.apiKey || globalCfg.activeApiKey || ''),
                 status: 'running',
@@ -4921,7 +4273,7 @@ const server = createServer(async (req, res) => {
             if (!modelFilename || !shotId || !text) {
                 return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename, shotId, and text required');
             }
-            const globalTts = getGlobalTtsConfig();
+            const globalTts = getTtsConfig();
             if (!globalTts.apiKey) {
                 return fail(res, 400, 'OT_TL_TTS_CONFIG_ERROR', 'Global TTS API key is empty');
             }
@@ -4982,7 +4334,7 @@ const server = createServer(async (req, res) => {
             if (!modelFilename || !plannerPrompt || pois.length < 2) {
                 return fail(res, 400, 'OT_TL_VALIDATION_ERROR', 'modelFilename, plannerPrompt, and at least 2 pois required');
             }
-            const globalCfg = resolveGlobalLlmConfig(getLlmConfigStmt.get(GLOBAL_LLM_CONFIG_KEY));
+            const globalCfg = getGlobalLlmConfig();
             const jobId = `cinejob_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
             cinematicJobStore.set(jobId, {
                 jobId,
@@ -4991,6 +4343,7 @@ const server = createServer(async (req, res) => {
                 plannerPrompt,
                 targetDurationSec,
                 pois,
+                llmProvider: resolveLlmProvider({ provider: body?.llm?.provider || globalCfg.selectedProvider, model: body?.llm?.model || globalCfg.activeModel }),
                 llmModel: String(body?.llm?.model || globalCfg.activeModel || DEFAULT_LLM_MODEL),
                 llmApiKey: String(body?.llm?.apiKey || globalCfg.activeApiKey || ''),
                 status: 'running',

@@ -692,7 +692,7 @@ class OTTourDownloadPanel {
     }
 
     private getApiBaseUrl() {
-        return this.options.apiBaseUrl || 'http://localhost:3034/api/ot-tour-download';
+        return this.options.apiBaseUrl || '/api/ot-tour-download';
     }
 
     private logDebug(action: string, detail?: unknown) {

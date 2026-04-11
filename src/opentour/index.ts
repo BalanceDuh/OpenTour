@@ -388,7 +388,7 @@ const main = async () => {
             return;
         }
         try {
-            const response = await fetch(`http://localhost:3031/api/ot-tour-loader/state?modelFilename=${encodeURIComponent(currentModelFilename)}`);
+            const response = await fetch(`/api/ot-tour-loader/state?modelFilename=${encodeURIComponent(currentModelFilename)}`);
             const data = await response.json().catch(() => ({}));
             cinematicModelReady = Boolean(response.ok && data?.ok && Array.isArray(data?.pois) && data.pois.length > 0);
         } catch {
@@ -1195,8 +1195,8 @@ const main = async () => {
                             return direct;
                         }
                     },
-                    resolveAssetUrl: (value) => `http://localhost:3031/api/ot-tour-loader/local-file?path=${encodeURIComponent(value)}`,
-                    apiBaseUrl: 'http://localhost:3031/api/ot-tour-loader',
+                    resolveAssetUrl: (value) => `/api/ot-tour-loader/local-file?path=${encodeURIComponent(value)}`,
+                    apiBaseUrl: '/api/ot-tour-loader',
                     onModelLoaded: (callback) => {
                         const handler = (name: string | null) => callback(name);
                         events.on('opentour.model.loaded', handler);
@@ -1333,8 +1333,8 @@ const main = async () => {
                     };
                 },
                 showEmbeddedMedia,
-                resolveAssetUrl: (value) => `http://localhost:3032/api/ot-cinematic-workspace/local-file?path=${encodeURIComponent(value)}`,
-                apiBaseUrl: 'http://localhost:3032/api/ot-cinematic-workspace',
+                resolveAssetUrl: (value) => `/api/ot-cinematic-workspace/local-file?path=${encodeURIComponent(value)}`,
+                apiBaseUrl: '/api/ot-cinematic-workspace',
                 onModelLoaded: (callback) => {
                     const handler = (name: string | null) => callback(name);
                     events.on('opentour.model.loaded', handler);
@@ -1416,7 +1416,7 @@ const main = async () => {
                         scene.camera.controlMode = 'fly';
                         scene.camera.setPose(eye, target, 0);
                     },
-                    apiBaseUrl: 'http://localhost:3033/api/ot-tour-player',
+                    apiBaseUrl: '/api/ot-tour-player',
                     onModelLoaded: (callback) => {
                         const handler = (name: string | null) => callback(name);
                         events.on('opentour.model.loaded', handler);
@@ -1458,7 +1458,7 @@ const main = async () => {
                 const otTourDownloadModule = await loadOTTourDownloadModule();
                 otTourDownloadPanel = otTourDownloadModule.mountOTTourDownloadPanel({
                     launcherButton: ui.tourDownloadButton,
-                    apiBaseUrl: 'http://localhost:3033/api/ot-tour-download'
+                    apiBaseUrl: '/api/ot-tour-download'
                 });
             } catch (error) {
                 const message = error instanceof Error ? error.message : `${error}`;
@@ -1492,7 +1492,7 @@ const main = async () => {
                 const module = await loadOTTourProducerModule();
                 otTourProducerPanel = module.mountOTTourProducerPanel({
                     launcherButton: ui.tourProducerButton,
-                    apiBaseUrl: 'http://localhost:3035/api/ot-tour-producer',
+                    apiBaseUrl: '/api/ot-tour-producer',
                     getModelFilename: () => currentModelFilename
                 });
             } catch (error) {

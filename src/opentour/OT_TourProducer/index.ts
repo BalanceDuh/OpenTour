@@ -504,7 +504,7 @@ class TourProducerPanel implements ProducerPanelController {
     }
 
     private apiBase() {
-        return this.options.apiBaseUrl || 'http://localhost:3035/api/ot-tour-producer';
+        return this.options.apiBaseUrl || '/api/ot-tour-producer';
     }
 
     private currentModelFilenameOrNull() {

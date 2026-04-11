@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 
-import Database from 'better-sqlite3';
+import { getGeminiConfig } from '../../../openmesh/backend/db-config.mjs';
+import { createProducerRepository } from '../../../server/db/repositories/producer-repository.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -15,222 +16,7 @@ const repoRoot = normalize(join(__dirname, '../../../../..'));
 const dataDir = join(repoRoot, 'data');
 mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(join(dataDir, 'ot-tour-producer.db'));
-
-db.exec(`
-CREATE TABLE IF NOT EXISTS producer_videos (
-    id TEXT PRIMARY KEY,
-    model_filename TEXT,
-    name TEXT NOT NULL,
-    mime_type TEXT NOT NULL,
-    width INTEGER,
-    height INTEGER,
-    duration_sec REAL,
-    size_bytes INTEGER NOT NULL,
-    sha256 TEXT,
-    thumbnail_jpeg BLOB,
-    data BLOB NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS producer_video_snapshots (
-    id TEXT PRIMARY KEY,
-    video_id TEXT NOT NULL,
-    sort_order INTEGER NOT NULL,
-    timestamp_sec REAL NOT NULL,
-    mime_type TEXT NOT NULL,
-    data BLOB NOT NULL,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY(video_id) REFERENCES producer_videos(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS producer_assets (
-    id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    name TEXT,
-    mime_type TEXT NOT NULL,
-    width INTEGER,
-    height INTEGER,
-    duration_sec REAL,
-    size_bytes INTEGER NOT NULL,
-    data BLOB NOT NULL,
-    meta_json TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS producer_output_records (
-    id TEXT PRIMARY KEY,
-    model_filename TEXT,
-    asset_id TEXT NOT NULL,
-    name TEXT,
-    saved INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(asset_id) REFERENCES producer_assets(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_producer_videos_updated
-ON producer_videos(updated_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_producer_video_snapshots_video
-ON producer_video_snapshots(video_id, sort_order ASC);
-
-CREATE INDEX IF NOT EXISTS idx_producer_assets_kind_updated
-ON producer_assets(kind, updated_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_producer_outputs_model_saved_updated
-ON producer_output_records(model_filename, saved, updated_at DESC);
-`);
-
-const ensureColumn = (tableName, columnDef) => {
-    try {
-        db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDef}`);
-    } catch (error) {
-        const message = String(error?.message || error || '');
-        if (!/duplicate column name/i.test(message)) throw error;
-    }
-};
-
-ensureColumn('producer_videos', 'model_filename TEXT');
-ensureColumn('producer_videos', 'sha256 TEXT');
-db.exec('CREATE INDEX IF NOT EXISTS idx_producer_videos_model_updated ON producer_videos(model_filename, updated_at DESC)');
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_producer_videos_model_sha256 ON producer_videos(model_filename, sha256)');
-
-const upsertVideoStmt = db.prepare(`
-INSERT INTO producer_videos (
-    id, model_filename, name, mime_type, width, height, duration_sec, size_bytes, sha256, thumbnail_jpeg, data, created_at, updated_at
-) VALUES (
-    @id, @model_filename, @name, @mime_type, @width, @height, @duration_sec, @size_bytes, @sha256, @thumbnail_jpeg, @data, @created_at, @updated_at
-)
-ON CONFLICT(id) DO UPDATE SET
-    model_filename = excluded.model_filename,
-    name = excluded.name,
-    mime_type = excluded.mime_type,
-    width = excluded.width,
-    height = excluded.height,
-    duration_sec = excluded.duration_sec,
-    size_bytes = excluded.size_bytes,
-    sha256 = excluded.sha256,
-    thumbnail_jpeg = excluded.thumbnail_jpeg,
-    data = excluded.data,
-    updated_at = excluded.updated_at
-`);
-
-const listVideosStmt = db.prepare(`
-SELECT id, model_filename, name, mime_type, width, height, duration_sec, size_bytes, sha256, created_at, updated_at
-FROM producer_videos
-ORDER BY updated_at DESC, created_at DESC
-`);
-
-const listVideosByModelStmt = db.prepare(`
-SELECT id, model_filename, name, mime_type, width, height, duration_sec, size_bytes, sha256, created_at, updated_at
-FROM producer_videos
-WHERE model_filename = ?
-ORDER BY updated_at DESC, created_at DESC
-`);
-
-const getVideoByIdStmt = db.prepare(`
-SELECT id, model_filename, name, mime_type, width, height, duration_sec, size_bytes, sha256, thumbnail_jpeg, data, created_at, updated_at
-FROM producer_videos
-WHERE id = ?
-`);
-
-const getVideoByModelAndShaStmt = db.prepare(`
-SELECT id, model_filename, name, mime_type, width, height, duration_sec, size_bytes, sha256, created_at, updated_at
-FROM producer_videos
-WHERE model_filename = ? AND sha256 = ?
-LIMIT 1
-`);
-
-const deleteVideoSnapshotsByVideoStmt = db.prepare('DELETE FROM producer_video_snapshots WHERE video_id = ?');
-
-const insertVideoSnapshotStmt = db.prepare(`
-INSERT INTO producer_video_snapshots (
-    id, video_id, sort_order, timestamp_sec, mime_type, data, created_at
-) VALUES (
-    @id, @video_id, @sort_order, @timestamp_sec, @mime_type, @data, @created_at
-)
-`);
-
-const listVideoSnapshotsByVideoStmt = db.prepare(`
-SELECT id, video_id, sort_order, timestamp_sec, mime_type, created_at
-FROM producer_video_snapshots
-WHERE video_id = ?
-ORDER BY sort_order ASC
-`);
-
-const getVideoSnapshotByIdStmt = db.prepare(`
-SELECT id, video_id, sort_order, timestamp_sec, mime_type, data, created_at
-FROM producer_video_snapshots
-WHERE id = ?
-`);
-
-const insertAssetStmt = db.prepare(`
-INSERT INTO producer_assets (
-    id, kind, name, mime_type, width, height, duration_sec, size_bytes, data, meta_json, created_at, updated_at
-) VALUES (
-    @id, @kind, @name, @mime_type, @width, @height, @duration_sec, @size_bytes, @data, @meta_json, @created_at, @updated_at
-)
-`);
-
-const getAssetByIdStmt = db.prepare(`
-SELECT id, kind, name, mime_type, width, height, duration_sec, size_bytes, data, meta_json, created_at, updated_at
-FROM producer_assets
-WHERE id = ?
-`);
-
-const listAssetsByKindStmt = db.prepare(`
-SELECT id, kind, name, mime_type, width, height, duration_sec, size_bytes, created_at, updated_at
-FROM producer_assets
-WHERE kind = ?
-ORDER BY updated_at DESC
-`);
-
-const deleteAssetByIdStmt = db.prepare('DELETE FROM producer_assets WHERE id = ?');
-
-const insertOutputRecordStmt = db.prepare(`
-INSERT INTO producer_output_records (
-    id, model_filename, asset_id, name, saved, created_at, updated_at
-) VALUES (
-    @id, @model_filename, @asset_id, @name, @saved, @created_at, @updated_at
-)
-`);
-
-const getOutputRecordByIdStmt = db.prepare(`
-SELECT r.id, r.model_filename, r.asset_id, r.name, r.saved, r.created_at, r.updated_at,
-       a.mime_type, a.width, a.height, a.duration_sec, a.size_bytes
-FROM producer_output_records r
-JOIN producer_assets a ON a.id = r.asset_id
-WHERE r.id = ?
-LIMIT 1
-`);
-
-const listOutputRecordsStmt = db.prepare(`
-SELECT r.id, r.model_filename, r.asset_id, r.name, r.saved, r.created_at, r.updated_at,
-       a.mime_type, a.width, a.height, a.duration_sec, a.size_bytes
-FROM producer_output_records r
-JOIN producer_assets a ON a.id = r.asset_id
-ORDER BY r.updated_at DESC
-`);
-
-const listOutputRecordsByModelStmt = db.prepare(`
-SELECT r.id, r.model_filename, r.asset_id, r.name, r.saved, r.created_at, r.updated_at,
-       a.mime_type, a.width, a.height, a.duration_sec, a.size_bytes
-FROM producer_output_records r
-JOIN producer_assets a ON a.id = r.asset_id
-WHERE r.model_filename = ?
-ORDER BY r.updated_at DESC
-`);
-
-const updateOutputRecordSaveStmt = db.prepare(`
-UPDATE producer_output_records
-SET saved = @saved, updated_at = @updated_at
-WHERE id = @id
-`);
-
-const deleteOutputRecordByIdStmt = db.prepare('DELETE FROM producer_output_records WHERE id = ?');
+const producerRepo = createProducerRepository('ot-tour-producer');
 
 const json = (res, status, body) => {
     const payload = JSON.stringify(body);
@@ -358,38 +144,10 @@ const extractGeminiImage = (jsonObj) => {
     return null;
 };
 
-const defaultTourLoaderDb = join(repoRoot, 'data', 'ot-tour-loader.db');
-const legacyTourLoaderDb = join(repoRoot, 'supersplat', 'data', 'ot-tour-loader.db');
-const pickReadableDbPath = () => {
-    if (existsSync(defaultTourLoaderDb)) {
-        try {
-            if (statSync(defaultTourLoaderDb).size > 0) return defaultTourLoaderDb;
-        } catch {
-            // fallback
-        }
-    }
-    return legacyTourLoaderDb;
-};
-
-const llmDbPath = process.env.OT_TOUR_LOADER_DB_PATH || pickReadableDbPath();
-let llmDb = null;
-let getGlobalLlmStmt = null;
-try {
-    llmDb = new Database(llmDbPath, { readonly: true });
-    getGlobalLlmStmt = llmDb.prepare(`
-        SELECT selected_provider, gemini_model_name, gemini_api_key, llm_model_name, llm_api_key
-        FROM model_llm_configs
-        WHERE model_filename = '__GLOBAL__'
-    `);
-} catch {
-    llmDb = null;
-    getGlobalLlmStmt = null;
-}
-
 const resolveGeminiConfig = () => {
-    const row = getGlobalLlmStmt?.get?.() || null;
-    const modelName = String(row?.gemini_model_name || row?.llm_model_name || process.env.OT_TOUR_PRODUCER_IMAGE_MODEL || 'gemini-2.5-flash-image').trim();
-    const apiKey = String(row?.gemini_api_key || row?.llm_api_key || process.env.GEMINI_API_KEY || '').trim();
+    const config = getGeminiConfig();
+    const modelName = String(process.env.OT_TOUR_PRODUCER_IMAGE_MODEL || config.model || 'gemini-2.5-flash-image').trim();
+    const apiKey = String(config.apiKey || process.env.GEMINI_API_KEY || '').trim();
     return { modelName, apiKey };
 };
 
@@ -669,7 +427,7 @@ const serializeJob = (job) => ({
 const createAsset = ({ kind, name, mimeType, data, width = null, height = null, durationSec = null, meta = null }) => {
     const id = `${kind}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const now = new Date().toISOString();
-    insertAssetStmt.run({
+    producerRepo.run('insertAsset', {
         id,
         kind,
         name: name || null,
@@ -689,7 +447,7 @@ const createAsset = ({ kind, name, mimeType, data, width = null, height = null, 
 const createOutputRecord = ({ modelFilename, assetId, name, saved = 0 }) => {
     const now = new Date().toISOString();
     const id = `output_rec_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    insertOutputRecordStmt.run({
+    producerRepo.run('insertOutputRecord', {
         id,
         model_filename: String(modelFilename || '__UNSCOPED__').trim() || '__UNSCOPED__',
         asset_id: assetId,
@@ -704,7 +462,7 @@ const createOutputRecord = ({ modelFilename, assetId, name, saved = 0 }) => {
 const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
     const hash = createHash('sha256').update(buffer).digest('hex');
     const modelKey = String(modelFilename || '__UNSCOPED__').trim() || '__UNSCOPED__';
-    const existing = getVideoByModelAndShaStmt.get(modelKey, hash);
+    const existing = producerRepo.get('getVideoByModelAndSha', modelKey, hash);
     if (existing) {
         return {
             video: mapVideoRow(existing),
@@ -724,7 +482,7 @@ const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
 
         const now = new Date().toISOString();
         try {
-            upsertVideoStmt.run({
+            producerRepo.run('upsertVideo', {
                 id: videoId,
                 model_filename: modelKey,
                 name,
@@ -742,7 +500,7 @@ const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
         } catch (error) {
             const message = String(error?.message || error || '');
             if (/unique constraint failed/i.test(message)) {
-                const dup = getVideoByModelAndShaStmt.get(modelKey, hash);
+                const dup = producerRepo.get('getVideoByModelAndSha', modelKey, hash);
                 if (dup) {
                     return {
                         video: mapVideoRow(dup),
@@ -753,7 +511,7 @@ const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
             throw error;
         }
 
-        deleteVideoSnapshotsByVideoStmt.run(videoId);
+        producerRepo.run('deleteVideoSnapshotsByVideo', videoId);
         const baseDuration = Math.max(0.4, Number(info.durationSec) || 4);
         const points = [0.1, 0.35, 0.6, 0.85].map((r) => Math.max(0, Math.min(baseDuration - 0.12, baseDuration * r)));
         for (let i = 0; i < points.length; i += 1) {
@@ -761,7 +519,7 @@ const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
             await extractVideoFrameJpeg({ inputPath, outputPath: snapshotPath, second: points[i] }).catch(() => {});
             if (!existsSync(snapshotPath)) continue;
             const data = await readFile(snapshotPath);
-            insertVideoSnapshotStmt.run({
+            producerRepo.run('insertVideoSnapshot', {
                 id: `${videoId}_snap_${i + 1}`,
                 video_id: videoId,
                 sort_order: i + 1,
@@ -772,7 +530,7 @@ const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
             });
         }
         return {
-            video: mapVideoRow(getVideoByIdStmt.get(videoId)),
+            video: mapVideoRow(producerRepo.get('getVideoById', videoId)),
             existed: false
         };
     } finally {
@@ -782,7 +540,7 @@ const registerVideo = async ({ name, mimeType, modelFilename, buffer }) => {
 
 const runComposeJob = async (job) => {
     const payload = job.payload;
-    const video = getVideoByIdStmt.get(payload.videoId);
+    const video = producerRepo.get('getVideoById', payload.videoId);
     if (!video) {
         throw new Error('video_not_found');
     }
@@ -807,7 +565,7 @@ const runComposeJob = async (job) => {
         job.updatedAt = new Date().toISOString();
 
         if (payload.introEnabled && payload.introAssetId) {
-            const introAsset = getAssetByIdStmt.get(payload.introAssetId);
+            const introAsset = producerRepo.get('getAssetById', payload.introAssetId);
             if (!introAsset || introAsset.kind !== 'intro_video') {
                 throw new Error('intro_asset_not_found');
             }
@@ -846,7 +604,7 @@ const runComposeJob = async (job) => {
         }
 
         if (payload.coverEnabled && payload.coverAssetId) {
-            const coverAsset = getAssetByIdStmt.get(payload.coverAssetId);
+            const coverAsset = producerRepo.get('getAssetById', payload.coverAssetId);
             if (!coverAsset || !String(coverAsset.mime_type || '').startsWith('image/')) {
                 throw new Error('cover_asset_not_found');
             }
@@ -935,15 +693,15 @@ const server = createServer(async (req, res) => {
         if (url.pathname === '/api/ot-tour-producer/videos' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const videos = modelFilename
-                ? listVideosByModelStmt.all(modelFilename).map(mapVideoRow)
-                : listVideosStmt.all().map(mapVideoRow);
+                ? producerRepo.all('listVideosByModel', modelFilename).map(mapVideoRow)
+                : producerRepo.all('listVideos', ).map(mapVideoRow);
             json(res, 200, { ok: true, videos });
             return;
         }
 
         const videoFileMatch = url.pathname.match(/^\/api\/ot-tour-producer\/videos\/([^/]+)\/file$/);
         if (videoFileMatch && req.method === 'GET') {
-            const video = getVideoByIdStmt.get(decodeURIComponent(videoFileMatch[1]));
+            const video = producerRepo.get('getVideoById', decodeURIComponent(videoFileMatch[1]));
             if (!video) {
                 json(res, 404, { ok: false, error: 'video_not_found' });
                 return;
@@ -960,7 +718,7 @@ const server = createServer(async (req, res) => {
 
         const videoThumbMatch = url.pathname.match(/^\/api\/ot-tour-producer\/videos\/([^/]+)\/thumbnail$/);
         if (videoThumbMatch && req.method === 'GET') {
-            const video = getVideoByIdStmt.get(decodeURIComponent(videoThumbMatch[1]));
+            const video = producerRepo.get('getVideoById', decodeURIComponent(videoThumbMatch[1]));
             if (!video || !video.thumbnail_jpeg) {
                 res.writeHead(404, { 'Access-Control-Allow-Origin': '*' });
                 res.end();
@@ -979,7 +737,7 @@ const server = createServer(async (req, res) => {
         const videoSnapshotsMatch = url.pathname.match(/^\/api\/ot-tour-producer\/videos\/([^/]+)\/snapshots$/);
         if (videoSnapshotsMatch && req.method === 'GET') {
             const videoId = decodeURIComponent(videoSnapshotsMatch[1]);
-            const rows = listVideoSnapshotsByVideoStmt.all(videoId);
+            const rows = producerRepo.all('listVideoSnapshotsByVideo', videoId);
             const snapshots = rows.map((row) => ({
                 id: row.id,
                 videoId: row.video_id,
@@ -995,7 +753,7 @@ const server = createServer(async (req, res) => {
 
         const snapshotFileMatch = url.pathname.match(/^\/api\/ot-tour-producer\/snapshots\/([^/]+)\/file$/);
         if (snapshotFileMatch && req.method === 'GET') {
-            const snapshot = getVideoSnapshotByIdStmt.get(decodeURIComponent(snapshotFileMatch[1]));
+            const snapshot = producerRepo.get('getVideoSnapshotById', decodeURIComponent(snapshotFileMatch[1]));
             if (!snapshot) {
                 json(res, 404, { ok: false, error: 'snapshot_not_found' });
                 return;
@@ -1044,7 +802,7 @@ const server = createServer(async (req, res) => {
                     height: meta.height || null,
                     durationSec: meta.durationSec || null
                 });
-                const row = getAssetByIdStmt.get(assetId);
+                const row = producerRepo.get('getAssetById', assetId);
                 json(res, 200, { ok: true, asset: mapAssetRow(row) });
                 return;
             } finally {
@@ -1064,7 +822,7 @@ const server = createServer(async (req, res) => {
                 mimeType: String(req.headers['x-ot-mime-type'] || 'image/png').trim() || 'image/png',
                 data: buffer
             });
-            const row = getAssetByIdStmt.get(assetId);
+            const row = producerRepo.get('getAssetById', assetId);
             json(res, 200, { ok: true, asset: mapAssetRow(row) });
             return;
         }
@@ -1083,7 +841,7 @@ const server = createServer(async (req, res) => {
             const snapshotId = String(body.baseSnapshotId || '').trim();
             const coverAssetId = String(body.baseCoverAssetId || '').trim();
             if (snapshotId) {
-                const row = getVideoSnapshotByIdStmt.get(snapshotId);
+                const row = producerRepo.get('getVideoSnapshotById', snapshotId);
                 if (row) {
                     baseImage = {
                         mimeType: row.mime_type,
@@ -1092,7 +850,7 @@ const server = createServer(async (req, res) => {
                 }
             }
             if (!baseImage && coverAssetId) {
-                const row = getAssetByIdStmt.get(coverAssetId);
+                const row = producerRepo.get('getAssetById', coverAssetId);
                 if (row && String(row.mime_type || '').startsWith('image/')) {
                     baseImage = {
                         mimeType: row.mime_type,
@@ -1132,7 +890,7 @@ const server = createServer(async (req, res) => {
                     source: 'gemini'
                 }
             });
-            const asset = mapAssetRow(getAssetByIdStmt.get(assetId));
+            const asset = mapAssetRow(producerRepo.get('getAssetById', assetId));
             json(res, 200, { ok: true, asset });
             return;
         }
@@ -1143,14 +901,14 @@ const server = createServer(async (req, res) => {
                 json(res, 400, { ok: false, error: 'kind_required' });
                 return;
             }
-            const assets = listAssetsByKindStmt.all(kind).map(mapAssetRow);
+            const assets = producerRepo.all('listAssetsByKind', kind).map(mapAssetRow);
             json(res, 200, { ok: true, assets });
             return;
         }
 
         const assetFileMatch = url.pathname.match(/^\/api\/ot-tour-producer\/assets\/([^/]+)\/file$/);
         if (assetFileMatch && req.method === 'GET') {
-            const row = getAssetByIdStmt.get(decodeURIComponent(assetFileMatch[1]));
+            const row = producerRepo.get('getAssetById', decodeURIComponent(assetFileMatch[1]));
             if (!row) {
                 json(res, 404, { ok: false, error: 'asset_not_found' });
                 return;
@@ -1169,8 +927,8 @@ const server = createServer(async (req, res) => {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
             const savedOnly = String(url.searchParams.get('saved') || '1').trim() !== '0';
             const rows = modelFilename
-                ? listOutputRecordsByModelStmt.all(modelFilename)
-                : listOutputRecordsStmt.all();
+                ? producerRepo.all('listOutputRecordsByModel', modelFilename)
+                : producerRepo.all('listOutputRecords', );
             const outputs = rows
                 .filter((row) => (savedOnly ? Number(row.saved || 0) === 1 : true))
                 .map(mapOutputRecordRow);
@@ -1180,12 +938,12 @@ const server = createServer(async (req, res) => {
 
         const outputFileMatch = url.pathname.match(/^\/api\/ot-tour-producer\/outputs\/([^/]+)\/file$/);
         if (outputFileMatch && req.method === 'GET') {
-            const record = getOutputRecordByIdStmt.get(decodeURIComponent(outputFileMatch[1]));
+            const record = producerRepo.get('getOutputRecordById', decodeURIComponent(outputFileMatch[1]));
             if (!record) {
                 json(res, 404, { ok: false, error: 'output_not_found' });
                 return;
             }
-            const asset = getAssetByIdStmt.get(record.asset_id);
+            const asset = producerRepo.get('getAssetById', record.asset_id);
             if (!asset) {
                 json(res, 404, { ok: false, error: 'output_asset_not_found' });
                 return;
@@ -1203,17 +961,17 @@ const server = createServer(async (req, res) => {
         const outputSaveMatch = url.pathname.match(/^\/api\/ot-tour-producer\/outputs\/([^/]+)\/save$/);
         if (outputSaveMatch && req.method === 'POST') {
             const id = decodeURIComponent(outputSaveMatch[1]);
-            const existing = getOutputRecordByIdStmt.get(id);
+            const existing = producerRepo.get('getOutputRecordById', id);
             if (!existing) {
                 json(res, 404, { ok: false, error: 'output_not_found' });
                 return;
             }
-            updateOutputRecordSaveStmt.run({
+            producerRepo.run('updateOutputRecordSave', {
                 id,
                 saved: 1,
                 updated_at: new Date().toISOString()
             });
-            const updated = getOutputRecordByIdStmt.get(id);
+            const updated = producerRepo.get('getOutputRecordById', id);
             json(res, 200, { ok: true, output: mapOutputRecordRow(updated) });
             return;
         }
@@ -1221,13 +979,13 @@ const server = createServer(async (req, res) => {
         const outputDeleteMatch = url.pathname.match(/^\/api\/ot-tour-producer\/outputs\/([^/]+)$/);
         if (outputDeleteMatch && req.method === 'DELETE') {
             const id = decodeURIComponent(outputDeleteMatch[1]);
-            const existing = getOutputRecordByIdStmt.get(id);
+            const existing = producerRepo.get('getOutputRecordById', id);
             if (!existing) {
                 json(res, 404, { ok: false, error: 'output_not_found' });
                 return;
             }
-            deleteOutputRecordByIdStmt.run(id);
-            deleteAssetByIdStmt.run(existing.asset_id);
+            producerRepo.run('deleteOutputRecordById', id);
+            producerRepo.run('deleteAssetById', existing.asset_id);
             json(res, 200, { ok: true, deleted: id });
             return;
         }
@@ -1302,7 +1060,7 @@ const server = createServer(async (req, res) => {
                 json(res, 409, { ok: false, error: 'compose_job_not_ready', job: serializeJob(job) });
                 return;
             }
-            const asset = getAssetByIdStmt.get(job.outputAssetId);
+            const asset = producerRepo.get('getAssetById', job.outputAssetId);
             if (!asset) {
                 json(res, 404, { ok: false, error: 'output_asset_not_found' });
                 return;

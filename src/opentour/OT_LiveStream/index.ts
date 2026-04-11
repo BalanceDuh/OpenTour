@@ -146,8 +146,8 @@ type TpTtsConfigPayload = {
 
 type TpTtsConfigResponse = { ok: true; tts: TpTtsConfigPayload };
 
-const TP_API = 'http://localhost:3033/api/ot-tour-player';
-const LIVE_API = 'http://localhost:3036/api/ot-live-stream';
+const TP_API = '/api/ot-tour-player';
+const LIVE_API = '/api/ot-live-stream';
 const DEFAULT_SERVER_PATH = '/Users/duheng/Development/OpenCode/OpenTour/Live';
 const MODEL_EXTENSIONS = ['.ply', '.splat', '.ksplat', '.spz', '.sog', '.lcc'];
 const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
@@ -718,7 +718,7 @@ class LiveStreamApp {
     }
 
     private normalizeServerManifest(session: ServerSessionPayload): LiveManifest {
-        const withOrigin = (url: string) => url.startsWith('http') ? url : `http://localhost:3036${url}`;
+        const withOrigin = (url: string) => url.startsWith('http') ? url : new URL(url, window.location.origin).toString();
         return {
             source: 'server',
             sessionId: session.sessionId,

@@ -1,11 +1,11 @@
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
 import { createReadStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import Database from 'better-sqlite3';
+import { createWorkflowRepository } from '../src/server/db/repositories/workflow-repository.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -14,153 +14,7 @@ const distDir = join(repoRoot, 'dist-opentour');
 const dataDir = join(repoRoot, 'data');
 mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(join(dataDir, 'opentour.db'));
-const schemaSql = readFileSync(join(__dirname, 'opentour-db-schema.sql'), 'utf8');
-db.exec(schemaSql);
-
-const ensureColumn = (tableName, columnDef) => {
-    try {
-        db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnDef}`);
-    } catch (error) {
-        const message = String(error?.message || error || '');
-        if (!/duplicate column name/i.test(message)) throw error;
-    }
-};
-
-ensureColumn('ot_model_calibration', 'SourceAxisPresetId TEXT');
-ensureColumn('ot_model_calibration', 'TargetAxisPresetId TEXT');
-ensureColumn('ot_model_calibration', 'CanonicalTopSelectionJson TEXT');
-ensureColumn('ot_model_calibration', 'CanonicalFrontSelectionJson TEXT');
-ensureColumn('ot_model_calibration', 'BestCameraJson TEXT');
-ensureColumn('ot_model_calibration', 'SelectedBestCameraId TEXT');
-ensureColumn('ot_model_calibration', 'ImageMime TEXT');
-
-const upsertSnapshotStmt = db.prepare(`
-INSERT INTO ot_workflow_snapshot (ModelFilename, PayloadJson, UpdatedAt)
-VALUES (@model_filename, @payload_json, @updated_at)
-ON CONFLICT(ModelFilename) DO UPDATE SET
-    PayloadJson = excluded.PayloadJson,
-    UpdatedAt = excluded.UpdatedAt
-`);
-
-const getSnapshotStmt = db.prepare(`
-SELECT ModelFilename, PayloadJson, UpdatedAt
-FROM ot_workflow_snapshot
-WHERE ModelFilename = ?
-`);
-
-const upsertModelStmt = db.prepare(`
-INSERT INTO ot_model (ModelKey, ModelName, FileExt, CreatedAt, UpdatedAt)
-VALUES (@model_key, @model_name, @file_ext, @created_at, @updated_at)
-ON CONFLICT(ModelKey) DO UPDATE SET
-    ModelName = excluded.ModelName,
-    FileExt = excluded.FileExt,
-    UpdatedAt = excluded.UpdatedAt
-`);
-
-const getModelNameByKeyStmt = db.prepare(`
-SELECT ModelName
-FROM ot_model
-WHERE ModelKey = ?
-`);
-
-const upsertCalibrationStmt = db.prepare(`
-INSERT INTO ot_model_calibration (
-    ModelKey,
-    AxisPresetId,
-    ViewRangeJson,
-    VerticalMapImage, FrontViewImage,
-    SourceAxisPresetId,
-    TargetAxisPresetId,
-    CanonicalTopSelectionJson,
-    CanonicalFrontSelectionJson,
-    BestCameraJson,
-    SelectedBestCameraId,
-    ImageMime,
-    UpdatedAt
-) VALUES (
-    @model_key,
-    @axis_preset_id,
-    @view_range_json,
-    @vertical_map_image, @front_view_image,
-    @source_axis_preset_id,
-    @target_axis_preset_id,
-    @canonical_top_selection_json,
-    @canonical_front_selection_json,
-    @best_camera_json,
-    @selected_best_camera_id,
-    @image_mime,
-    @updated_at
-)
-ON CONFLICT(ModelKey) DO UPDATE SET
-    AxisPresetId = excluded.AxisPresetId,
-    ViewRangeJson = excluded.ViewRangeJson,
-    VerticalMapImage = excluded.VerticalMapImage,
-    FrontViewImage = excluded.FrontViewImage,
-    SourceAxisPresetId = excluded.SourceAxisPresetId,
-    TargetAxisPresetId = excluded.TargetAxisPresetId,
-    CanonicalTopSelectionJson = excluded.CanonicalTopSelectionJson,
-    CanonicalFrontSelectionJson = excluded.CanonicalFrontSelectionJson,
-    BestCameraJson = excluded.BestCameraJson,
-    SelectedBestCameraId = excluded.SelectedBestCameraId,
-    ImageMime = excluded.ImageMime,
-    UpdatedAt = excluded.UpdatedAt
-`);
-
-const getCalibrationStmt = db.prepare(`
-SELECT
-    m.ModelName,
-    c.AxisPresetId,
-    c.ViewRangeJson,
-    c.VerticalMapImage, c.FrontViewImage,
-    c.SourceAxisPresetId,
-    c.TargetAxisPresetId,
-    c.CanonicalTopSelectionJson,
-    c.CanonicalFrontSelectionJson,
-    c.BestCameraJson,
-    c.SelectedBestCameraId,
-    c.ImageMime,
-    c.UpdatedAt
-FROM ot_model_calibration c
-JOIN ot_model m ON m.ModelKey = c.ModelKey
-WHERE c.ModelKey = ?
-`);
-
-const getCalibrationAxisStmt = db.prepare(`
-SELECT AxisPresetId, UpdatedAt
-FROM ot_model_calibration
-WHERE ModelKey = ?
-`);
-
-const getCoordinateStmt = db.prepare(`
-SELECT
-    m.ModelName,
-    c.CoordinateSystem,
-    c.UpAxis,
-    c.UpDirection,
-    c.UpdatedAt
-FROM ot_model_coordinate c
-JOIN ot_model m ON m.ModelKey = c.ModelKey
-WHERE c.ModelKey = ?
-`);
-
-const clearAllSnapshotsStmt = db.prepare('DELETE FROM ot_workflow_snapshot');
-const clearAllCalibrationsStmt = db.prepare('DELETE FROM ot_model_calibration');
-const clearAllCoordinatesStmt = db.prepare('DELETE FROM ot_model_coordinate');
-const clearAllModelsStmt = db.prepare('DELETE FROM ot_model');
-
-const clearAllOpentourData = db.transaction(() => {
-    const snapshots = clearAllSnapshotsStmt.run().changes;
-    const calibrations = clearAllCalibrationsStmt.run().changes;
-    const coordinates = clearAllCoordinatesStmt.run().changes;
-    const models = clearAllModelsStmt.run().changes;
-    return {
-        snapshots,
-        calibrations,
-        coordinates,
-        models
-    };
-});
+const workflowRepo = createWorkflowRepository('opentour-gateway');
 
 const json = (res, status, body) => {
     const payload = JSON.stringify(body);
@@ -219,6 +73,79 @@ const readBody = (req) => new Promise((resolve, reject) => {
     req.on('error', reject);
 });
 
+const proxyRoutes = [
+    { prefix: '/api/ot-tour-loader', port: 3031 },
+    { prefix: '/api/ot-cinematic-workspace', port: 3032 },
+    { prefix: '/api/ot-tour-player', port: 3033 },
+    { prefix: '/api/ot-tour-download', port: 3034 },
+    { prefix: '/api/ot-tour-producer', port: 3035 },
+    { prefix: '/api/ot-live-stream', port: 3036 }
+];
+
+const hopByHopHeaders = new Set([
+    'connection',
+    'keep-alive',
+    'proxy-authenticate',
+    'proxy-authorization',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade'
+]);
+
+const sanitizeProxyHeaders = (headers) => {
+    const out = {};
+    for (const [key, value] of Object.entries(headers)) {
+        if (value === undefined) continue;
+        if (hopByHopHeaders.has(key.toLowerCase())) continue;
+        out[key] = value;
+    }
+    return out;
+};
+
+const matchProxyRoute = (pathname) => proxyRoutes.find(({ prefix }) => pathname === prefix || pathname.startsWith(`${prefix}/`)) || null;
+
+const proxyRequest = (req, res, port) => new Promise((resolve) => {
+    const forwardedFor = [req.headers['x-forwarded-for'], req.socket.remoteAddress].filter(Boolean).join(', ');
+    const headers = sanitizeProxyHeaders({
+        ...req.headers,
+        host: `127.0.0.1:${port}`,
+        'x-forwarded-host': req.headers.host || '',
+        'x-forwarded-proto': req.socket.encrypted ? 'https' : 'http',
+        'x-forwarded-for': forwardedFor
+    });
+    const upstream = httpRequest({
+        protocol: 'http:',
+        hostname: '127.0.0.1',
+        port,
+        method: req.method,
+        path: req.url,
+        headers
+    }, (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode || 502, sanitizeProxyHeaders(upstreamRes.headers));
+        upstreamRes.pipe(res);
+        upstreamRes.on('end', resolve);
+        upstreamRes.on('error', () => resolve());
+    });
+
+    upstream.on('error', (error) => {
+        if (!res.headersSent) {
+            json(res, 502, {
+                ok: false,
+                error: `Proxy request failed for backend port ${port}`,
+                detail: String(error?.message || error || '')
+            });
+        } else {
+            res.destroy(error);
+        }
+        resolve();
+    });
+
+    req.on('aborted', () => upstream.destroy());
+    req.on('error', () => upstream.destroy());
+    req.pipe(upstream);
+});
+
 const managedBackends = [
     {
         name: 'ot-tour-loader',
@@ -264,7 +191,9 @@ const managedBackends = [
         env: { OT_LIVE_STREAM_PORT: '3036' }
     }
 ];
-const spawnedBackends = [];
+const spawnedBackends = new Map();
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const isPortOpen = (port) => new Promise((resolve) => {
     const socket = createConnection({ host: '127.0.0.1', port });
@@ -281,7 +210,31 @@ const isPortOpen = (port) => new Promise((resolve) => {
 const ensureManagedBackends = async () => {
     for (const backend of managedBackends) {
         const open = await isPortOpen(backend.port);
-        if (open) continue;
+        if (!open) {
+            const child = spawn(process.execPath, [backend.script], {
+                cwd: repoRoot,
+                stdio: 'ignore',
+                env: {
+                    ...process.env,
+                    ...backend.env
+                }
+            });
+            spawnedBackends.set(backend.port, child);
+        }
+
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            if (await isPortOpen(backend.port)) break;
+            await sleep(250);
+        }
+    }
+};
+
+const ensureManagedBackend = async (port) => {
+    const backend = managedBackends.find((item) => item.port === port);
+    if (!backend) return false;
+    if (await isPortOpen(port)) return true;
+    const existing = spawnedBackends.get(port);
+    if (!existing || existing.exitCode !== null || existing.killed) {
         const child = spawn(process.execPath, [backend.script], {
             cwd: repoRoot,
             stdio: 'ignore',
@@ -290,12 +243,17 @@ const ensureManagedBackends = async () => {
                 ...backend.env
             }
         });
-        spawnedBackends.push(child);
+        spawnedBackends.set(port, child);
     }
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (await isPortOpen(port)) return true;
+        await sleep(250);
+    }
+    return false;
 };
 
 const stopManagedBackends = () => {
-    for (const child of spawnedBackends) {
+    for (const child of spawnedBackends.values()) {
         try {
             child.kill();
         } catch {}
@@ -338,7 +296,7 @@ const splitNameExt = (name) => {
 };
 
 const assertModelFilenameMatchesExistingKey = (modelKey, modelFilename) => {
-    const row = getModelNameByKeyStmt.get(modelKey);
+    const row = workflowRepo.get('getModelNameByKey', modelKey);
     if (!row?.ModelName) return null;
     if (String(row.ModelName) !== String(modelFilename)) {
         return `ModelFileName mismatch: existing='${row.ModelName}' request='${modelFilename}'`;
@@ -347,7 +305,7 @@ const assertModelFilenameMatchesExistingKey = (modelKey, modelFilename) => {
 };
 
 const saveSnapshot = (modelFilename, payload) => {
-    upsertSnapshotStmt.run({
+    workflowRepo.run('upsertSnapshot', {
         model_filename: modelFilename,
         payload_json: JSON.stringify(payload),
         updated_at: new Date().toISOString()
@@ -355,7 +313,7 @@ const saveSnapshot = (modelFilename, payload) => {
 };
 
 const loadSnapshot = (modelFilename) => {
-    const row = getSnapshotStmt.get(modelFilename);
+    const row = workflowRepo.get('getSnapshot', modelFilename);
     if (!row) return null;
     return {
         modelFilename: row.ModelFilename,
@@ -372,6 +330,12 @@ const server = createServer(async (req, res) => {
         }
 
         const url = new URL(req.url, 'http://localhost');
+        const proxyRoute = matchProxyRoute(url.pathname);
+        if (proxyRoute) {
+            await ensureManagedBackend(proxyRoute.port);
+            await proxyRequest(req, res, proxyRoute.port);
+            return;
+        }
 
         if (url.pathname === '/api/workflow/full' && req.method === 'GET') {
             const modelFilename = String(url.searchParams.get('modelFilename') || '').trim();
@@ -496,7 +460,7 @@ const server = createServer(async (req, res) => {
             const now = new Date().toISOString();
             const { ext } = splitNameExt(modelFilename);
 
-            upsertModelStmt.run({
+            workflowRepo.run('upsertModel', {
                 model_key: key,
                 model_name: modelFilename,
                 file_ext: ext || null,
@@ -510,7 +474,7 @@ const server = createServer(async (req, res) => {
                 return Buffer.from(b64, 'base64');
             };
 
-            upsertCalibrationStmt.run({
+            workflowRepo.run('upsertCalibration', {
                 model_key: key,
                 axis_preset_id: axisPresetId,
                 view_range_json: JSON.stringify(viewRange),
@@ -542,7 +506,7 @@ const server = createServer(async (req, res) => {
                 json(res, 400, { ok: false, error: nameMismatchError });
                 return;
             }
-            const row = getCalibrationStmt.get(key);
+            const row = workflowRepo.get('getCalibration', key);
             if (!row) {
                 json(res, 200, { ok: true, found: false });
                 return;
@@ -582,7 +546,7 @@ const server = createServer(async (req, res) => {
                 json(res, 400, { ok: false, error: nameMismatchError });
                 return;
             }
-            const calibrationRow = getCalibrationAxisStmt.get(key);
+            const calibrationRow = workflowRepo.get('getCalibrationAxis', key);
             if (calibrationRow?.AxisPresetId) {
                 json(res, 200, {
                     ok: true,
@@ -597,7 +561,7 @@ const server = createServer(async (req, res) => {
                 return;
             }
 
-            const coordinateRow = getCoordinateStmt.get(key);
+            const coordinateRow = workflowRepo.get('getCoordinate', key);
             if (coordinateRow) {
                 json(res, 200, {
                     ok: true,
@@ -626,7 +590,7 @@ const server = createServer(async (req, res) => {
         }
 
         if (url.pathname === '/api/model/calibration/clear-all' && req.method === 'POST') {
-            const deleted = clearAllOpentourData();
+            const deleted = workflowRepo.clearAllOpentourData();
             json(res, 200, {
                 ok: true,
                 deleted

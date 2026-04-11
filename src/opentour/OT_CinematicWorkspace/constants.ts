@@ -104,12 +104,13 @@ export const GEMINI_MODELS = [
     'gemini-3-flash-preview'
 ];
 export const QWEN_MODELS = [
+    'qwen3.6-plus',
     'qwen3-max',
     'qwen3.5-plus',
     'qwen3.5-flash'
 ];
 export const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
-export const DEFAULT_QWEN_MODEL = 'qwen3.5-plus';
+export const DEFAULT_QWEN_MODEL = 'qwen3.6-plus';
 export const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
 export const DEFAULT_TTS_VOICE = 'longyuan_v3';
 export const DEFAULT_CSV_TARGET_DURATION_SEC = 30;
@@ -146,4 +147,3 @@ export const TTS_VOICE_OPTIONS_BY_MODEL: Record<string, TtsVoiceOption[]> = {
 export const DEFAULT_POI_FOV = 60;
 export const MIN_POI_FOV = 20;
 export const MAX_POI_FOV = 120;
-

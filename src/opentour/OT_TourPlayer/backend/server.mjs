@@ -7,9 +7,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 
-import Database from 'better-sqlite3';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import { getTtsConfig, normalizeTtsSelection } from '../../../openmesh/backend/db-config.mjs';
+import { getModelLlmRow, getTtsConfig, normalizeTtsSelection, upsertTtsConfig } from '../../../openmesh/backend/db-config.mjs';
 import { synthesizeDashscopeSpeechWithFallback } from '../../../shared/tts/dashscope.mjs';
 
 const VALID_ACTIONS = new Set(['MOVE', 'LOOK', 'SPEAK', 'PAUSE', 'EMPHASIZE', 'END']);
@@ -20,39 +19,6 @@ const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = normalize(join(__dirname, '../../../../..'));
-const defaultTourLoaderDb = join(repoRoot, 'data', 'ot-tour-loader.db');
-const legacyTourLoaderDb = join(repoRoot, 'supersplat', 'data', 'ot-tour-loader.db');
-
-const pickReadableDbPath = () => {
-    if (existsSync(defaultTourLoaderDb)) {
-        try {
-            if (statSync(defaultTourLoaderDb).size > 0) return defaultTourLoaderDb;
-        } catch {
-            // continue fallback
-        }
-    }
-    return legacyTourLoaderDb;
-};
-
-const tourLoaderDbPath = process.env.OT_TOUR_LOADER_DB_PATH || pickReadableDbPath();
-let tourLoaderDb = null;
-let getLlmConfigByModelFilenameStmt = null;
-try {
-    mkdirSync(dirname(tourLoaderDbPath), { recursive: true });
-    tourLoaderDb = new Database(tourLoaderDbPath);
-    try {
-        getLlmConfigByModelFilenameStmt = tourLoaderDb.prepare(`
-            SELECT model_filename, llm_model_name, llm_api_key, updated_at
-            FROM model_llm_configs
-            WHERE model_filename = ?
-        `);
-    } catch {
-        getLlmConfigByModelFilenameStmt = null;
-    }
-} catch (error) {
-    console.warn(`[ot-tour-player] failed to open tourloader db: ${String(error)}`);
-}
-
 const sessions = new Map();
 const sseClients = new Set();
 
@@ -293,10 +259,10 @@ const semanticHint = (text) => {
 
 const getLlmConfigByModelFilename = (modelFilename) => {
     const normalized = String(modelFilename || '').trim();
-    if (!normalized || !getLlmConfigByModelFilenameStmt) {
+    if (!normalized) {
         return { modelName: DEFAULT_LLM_MODEL, apiKey: '', source: 'default' };
     }
-    const row = getLlmConfigByModelFilenameStmt.get(normalized);
+    const row = getModelLlmRow(normalized);
     return {
         modelName: String(row?.llm_model_name || DEFAULT_LLM_MODEL).trim() || DEFAULT_LLM_MODEL,
         apiKey: String(row?.llm_api_key || '').trim(),
@@ -448,7 +414,13 @@ const readBodyBuffer = (req) => new Promise((resolve, reject) => {
 
 const bundledFfmpegPath = typeof ffmpegInstaller?.path === 'string' ? ffmpegInstaller.path : '';
 const ffmpegPath = () => process.env.FFMPEG_PATH || bundledFfmpegPath || 'ffmpeg';
+const ffmpegNullOutputTarget = process.platform === 'win32' ? 'NUL' : '/dev/null';
 const transcodeJobs = new Map();
+const pendingTranscodeJobIds = [];
+const TRANSCODE_MAX_CONCURRENCY = 1;
+const TRANSCODE_RESULT_TTL_MS = 10 * 60 * 1000;
+const TRANSCODE_STALL_TIMEOUT_MS = 30 * 1000;
+let activeTranscodeJobCount = 0;
 const MP4_COMPRESSION_PRESETS = {
     original: { mode: 'crf', preset: 'veryfast', crf: 20, audioBitrate: '256k' },
     fast_export: { mode: 'crf', preset: 'ultrafast', crf: 26, audioBitrate: '160k' },
@@ -463,6 +435,28 @@ const MP4_COMPRESSION_PRESETS = {
         frameRate: 24,
         minVideoBitrate: 250000
     }
+};
+
+const dedupe = (values) => Array.from(new Set(values.filter(Boolean)));
+
+const buildTranscodeAttemptPlan = (requestedPreset) => {
+    const preset = String(requestedPreset || 'balanced').trim();
+    if (preset === 'target_10mb') return dedupe(['target_10mb', 'balanced', 'fast_export']);
+    if (preset === 'original') return dedupe(['original', 'balanced', 'fast_export']);
+    if (preset === 'archive_smallest') return dedupe(['archive_smallest', 'balanced', 'fast_export']);
+    if (preset === 'balanced') return dedupe(['balanced', 'fast_export']);
+    return dedupe([preset, 'balanced']);
+};
+
+const scheduleTranscodeJobCleanup = (jobId) => {
+    setTimeout(async () => {
+        const job = transcodeJobs.get(jobId);
+        if (!job) return;
+        transcodeJobs.delete(jobId);
+        if (job.workdir) {
+            await rm(job.workdir, { recursive: true, force: true }).catch(() => {});
+        }
+    }, TRANSCODE_RESULT_TTL_MS).unref?.();
 };
 
 const parseTranscodeMeta = (req) => {
@@ -523,6 +517,7 @@ const probeRecordingDurationSec = (inputPath) => new Promise((resolve, reject) =
 
 const runFfmpegTranscode = async ({ inputPath, outputPath, onProgress, durationSec, compressionPreset }) => {
     const compression = MP4_COMPRESSION_PRESETS[compressionPreset] || MP4_COMPRESSION_PRESETS.balanced;
+    const audioFilter = 'aresample=async=1:min_hard_comp=0.100:first_pts=0';
     const filters = [];
     if (compression.maxWidth) filters.push(`scale='min(${compression.maxWidth}\\,iw)':-2:flags=lanczos`);
     if (compression.frameRate) filters.push(`fps=${compression.frameRate}`);
@@ -564,11 +559,38 @@ const runFfmpegTranscode = async ({ inputPath, outputPath, onProgress, durationS
         const child = spawn(ffmpegPath(), args, { stdio: ['ignore', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
+        let settled = false;
+        let lastProgressAt = Date.now();
+        const hardTimeoutMs = Math.max(90_000, Math.round((Number(durationSec) > 0 ? Number(durationSec) * 8_000 : 0) + 45_000));
+        const clearTimers = () => {
+            if (stallTimer) clearInterval(stallTimer);
+            if (hardTimer) clearTimeout(hardTimer);
+        };
+        const settleReject = (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimers();
+            reject(error);
+        };
+        const stallTimer = setInterval(() => {
+            if (settled) return;
+            if ((Date.now() - lastProgressAt) <= TRANSCODE_STALL_TIMEOUT_MS) return;
+            child.kill('SIGKILL');
+            settleReject(new Error(`ffmpeg stalled during ${phase} for more than ${Math.round(TRANSCODE_STALL_TIMEOUT_MS / 1000)}s`));
+        }, 5_000);
+        stallTimer.unref?.();
+        const hardTimer = setTimeout(() => {
+            if (settled) return;
+            child.kill('SIGKILL');
+            settleReject(new Error(`ffmpeg timeout during ${phase} after ${Math.round(hardTimeoutMs / 1000)}s`));
+        }, hardTimeoutMs);
+        hardTimer.unref?.();
         const applyProgressLine = (line) => {
             const [rawKey, rawValue] = String(line || '').split('=');
             const key = String(rawKey || '').trim();
             const value = String(rawValue || '').trim();
             if (!key) return;
+            lastProgressAt = Date.now();
             if (key === 'out_time_us') progressState.outTimeUs = Math.max(0, Number(value) || 0);
             if (key === 'out_time_ms') progressState.outTimeUs = Math.max(0, Number(value) || 0);
             if (key === 'out_time') progressState.outTimeUs = Math.max(progressState.outTimeUs, parseFfmpegClockToUs(value));
@@ -590,9 +612,15 @@ const runFfmpegTranscode = async ({ inputPath, outputPath, onProgress, durationS
             stdout += text;
             text.split(/\r?\n/).forEach(applyProgressLine);
         });
-        child.stderr.on('data', (chunk) => { stderr += String(chunk); });
-        child.on('error', (error) => reject(new Error(`ffmpeg unavailable: ${String(error.message || error)}`)));
+        child.stderr.on('data', (chunk) => {
+            stderr += String(chunk);
+            lastProgressAt = Date.now();
+        });
+        child.on('error', (error) => settleReject(new Error(`ffmpeg unavailable: ${String(error.message || error)}`)));
         child.on('close', (code) => {
+            if (settled) return;
+            settled = true;
+            clearTimers();
             if (code === 0) {
                 resolve({ stdout, stderr });
                 return;
@@ -624,17 +652,19 @@ const runFfmpegTranscode = async ({ inputPath, outputPath, onProgress, durationS
             '-pass', '1',
             '-passlogfile', passlogfile,
             '-an',
-            '-f', 'mp4',
-            '/dev/null'
+            '-f', 'null',
+            ffmpegNullOutputTarget
         ];
         const pass2Args = [
             '-y',
             '-i', inputPath,
             '-progress', 'pipe:1',
             '-nostats',
+            '-max_muxing_queue_size', '4096',
             '-map', '0:v:0',
             '-map', '0:a?',
             '-vf', videoFilter,
+            '-af', audioFilter,
             '-r', String(compression.frameRate || 24),
             '-c:v', 'libx264',
             '-preset', compression.preset,
@@ -679,9 +709,11 @@ const runFfmpegTranscode = async ({ inputPath, outputPath, onProgress, durationS
         '-i', inputPath,
         '-progress', 'pipe:1',
         '-nostats',
+        '-max_muxing_queue_size', '4096',
         '-map', '0:v:0',
         '-map', '0:a?',
         '-vf', videoFilter,
+        '-af', audioFilter,
         '-c:v', 'libx264',
         '-preset', compression.preset,
         '-crf', String(compression.crf),
@@ -704,6 +736,9 @@ const runFfmpegTranscode = async ({ inputPath, outputPath, onProgress, durationS
 const serializeJob = (job) => ({
     jobId: job.jobId,
     status: job.status,
+    attempt: job.attempt || 0,
+    maxAttempts: job.maxAttempts || 0,
+    queuePosition: job.status === 'pending' ? (pendingTranscodeJobIds.indexOf(job.jobId) + 1) : 0,
     progress: {
         percent: job.progress?.percent ?? 0,
         etaSec: job.progress?.etaSec ?? null,
@@ -722,6 +757,101 @@ const serializeJob = (job) => ({
     mimeType: job.mimeType || 'video/mp4',
     hasResult: Boolean(job.resultBuffer)
 });
+
+const setJobProgressPhase = (job, phase, extra = {}) => {
+    job.progress = {
+        ...job.progress,
+        ...extra,
+        phase,
+        heartbeatAt: new Date().toISOString()
+    };
+    job.updatedAt = new Date().toISOString();
+};
+
+const runQueuedTranscodeJob = async (job) => {
+    activeTranscodeJobCount += 1;
+    try {
+        job.status = 'running';
+        job.startedAt = Date.now();
+        job.updatedAt = new Date().toISOString();
+        setJobProgressPhase(job, 'preparing', { percent: Math.max(1, Number(job.progress?.percent) || 0) });
+        await writeFile(job.inputPath, job.inputBuffer);
+        const attempts = buildTranscodeAttemptPlan(String(job.meta?.compressionPreset || 'balanced'));
+        job.maxAttempts = attempts.length;
+        let lastError = null;
+        for (let index = 0; index < attempts.length; index += 1) {
+            const preset = attempts[index];
+            job.attempt = index + 1;
+            setJobProgressPhase(job, index === 0 ? 'preparing' : `retrying_${preset}`, {
+                percent: index === 0 ? Math.max(1, Number(job.progress?.percent) || 0) : 0,
+                etaSec: null,
+                speed: 0,
+                outTimeUs: 0,
+                targetSize: 0
+            });
+            try {
+                await runFfmpegTranscode({
+                    inputPath: job.inputPath,
+                    outputPath: job.outputPath,
+                    durationSec: Number(job.meta?.durationSec) || 0,
+                    compressionPreset: preset,
+                    onProgress: (progress) => {
+                        job.progress = {
+                            ...job.progress,
+                            ...progress,
+                            phase: index === 0 ? progress.phase : `${progress.phase}_${preset}`,
+                            heartbeatAt: progress.heartbeatAt || new Date().toISOString()
+                        };
+                        job.updatedAt = new Date().toISOString();
+                    }
+                });
+                const mp4Buffer = await readFile(job.outputPath);
+                job.resultBuffer = mp4Buffer;
+                job.targetBytes = mp4Buffer.length;
+                job.status = 'done';
+                job.meta = {
+                    ...job.meta,
+                    effectiveCompressionPreset: preset
+                };
+                setJobProgressPhase(job, 'done', { percent: 100, etaSec: 0 });
+                return;
+            } catch (error) {
+                lastError = error;
+                job.lastAttemptError = String(error instanceof Error ? error.message : error);
+                if (index < attempts.length - 1) {
+                    setJobProgressPhase(job, `fallback_pending_${attempts[index + 1]}`, { percent: 0, etaSec: null, speed: 0 });
+                }
+            }
+        }
+        throw lastError || new Error('transcode_failed');
+    } catch (error) {
+        job.status = 'error';
+        job.error = {
+            code: 'OT_TP_TRANSCODE_ERROR',
+            message: error instanceof Error ? error.message : String(error),
+            ffmpegPath: ffmpegPath(),
+            attempt: job.attempt || 0,
+            maxAttempts: job.maxAttempts || 0,
+            lastAttemptError: job.lastAttemptError || null
+        };
+        setJobProgressPhase(job, 'error');
+    } finally {
+        delete job.inputBuffer;
+        activeTranscodeJobCount = Math.max(0, activeTranscodeJobCount - 1);
+        scheduleTranscodeJobCleanup(job.jobId);
+        void rm(job.workdir, { recursive: true, force: true }).catch(() => {});
+        void processTranscodeQueue();
+    }
+};
+
+const processTranscodeQueue = async () => {
+    while (activeTranscodeJobCount < TRANSCODE_MAX_CONCURRENCY && pendingTranscodeJobIds.length > 0) {
+        const nextJobId = pendingTranscodeJobIds.shift();
+        const job = nextJobId ? transcodeJobs.get(nextJobId) : null;
+        if (!job || job.status !== 'pending') continue;
+        void runQueuedTranscodeJob(job);
+    }
+};
 
 const parseCsvLine = (line) => {
     const out = [];
@@ -963,6 +1093,8 @@ const server = createServer(async (req, res) => {
             const job = {
                 jobId,
                 status: 'pending',
+                attempt: 0,
+                maxAttempts: 0,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 startedAt: Date.now(),
@@ -983,54 +1115,13 @@ const server = createServer(async (req, res) => {
                 workdir,
                 inputPath,
                 outputPath,
-                meta
+                meta,
+                inputBuffer,
+                lastAttemptError: null
             };
             transcodeJobs.set(jobId, job);
-            void (async () => {
-                try {
-                    job.status = 'running';
-                    job.updatedAt = new Date().toISOString();
-                    await writeFile(inputPath, inputBuffer);
-                    await runFfmpegTranscode({
-                        inputPath,
-                        outputPath,
-                        durationSec: Number(meta?.durationSec) || 0,
-                        compressionPreset: String(meta?.compressionPreset || 'balanced'),
-                        onProgress: (progress) => {
-                            job.progress = {
-                                ...job.progress,
-                                ...progress
-                            };
-                            job.updatedAt = new Date().toISOString();
-                        }
-                    });
-                    const mp4Buffer = await readFile(outputPath);
-                    job.resultBuffer = mp4Buffer;
-                    job.targetBytes = mp4Buffer.length;
-                    job.status = 'done';
-                    job.progress = {
-                        ...job.progress,
-                        percent: 100,
-                        etaSec: 0,
-                        phase: 'done',
-                        heartbeatAt: new Date().toISOString()
-                    };
-                    job.updatedAt = new Date().toISOString();
-                } catch (error) {
-                    job.status = 'error';
-                    job.error = {
-                        code: 'OT_TP_TRANSCODE_ERROR',
-                        message: error instanceof Error ? error.message : String(error),
-                        ffmpegPath: ffmpegPath()
-                    };
-                    job.progress = {
-                        ...job.progress,
-                        phase: 'error',
-                        heartbeatAt: new Date().toISOString()
-                    };
-                    job.updatedAt = new Date().toISOString();
-                }
-            })();
+            pendingTranscodeJobIds.push(jobId);
+            void processTranscodeQueue();
             json(res, 202, { ok: true, job: serializeJob(job) });
             return;
         }
@@ -1075,7 +1166,7 @@ const server = createServer(async (req, res) => {
                     width: job.meta?.width || null,
                     height: job.meta?.height || null,
                     frameRate: job.meta?.frameRate || null,
-                    compressionPreset: job.meta?.compressionPreset || 'balanced',
+                    compressionPreset: job.meta?.effectiveCompressionPreset || job.meta?.compressionPreset || 'balanced',
                     sourceBytes: job.sourceBytes,
                     targetBytes: job.resultBuffer.length,
                     progress: job.progress
@@ -1144,9 +1235,34 @@ const server = createServer(async (req, res) => {
                     provider: tts.provider,
                     model: tts.model,
                     voice: tts.voice,
+                    apiKey: tts.apiKey,
                     format: tts.format,
                     updatedAt: tts.updatedAt,
-                    source: 'cinematic-lite'
+                    source: tts.configKey || '__GLOBAL__'
+                }
+            });
+            return;
+        }
+
+        if (url.pathname === '/api/ot-tour-player/tts-config' && req.method === 'PUT') {
+            const body = JSON.parse(await readBody(req) || '{}');
+            const saved = upsertTtsConfig({
+                provider: 'aliyun',
+                model: body?.tts?.model,
+                voice: body?.tts?.voice,
+                apiKey: body?.tts?.apiKey,
+                format: body?.tts?.format
+            });
+            json(res, 200, {
+                ok: true,
+                tts: {
+                    provider: saved.provider,
+                    model: saved.model,
+                    voice: saved.voice,
+                    apiKey: saved.apiKey,
+                    format: saved.format,
+                    updatedAt: saved.updatedAt,
+                    source: saved.configKey || '__GLOBAL__'
                 }
             });
             return;

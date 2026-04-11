@@ -422,12 +422,12 @@ const GEMINI_MODELS = [
     'gemini-3-flash-preview'
 ];
 const QWEN_MODELS = [
+    'qwen3.6-plus',
     'qwen3-max',
-    'qwen3.5-plus',
     'qwen3.5-flash'
 ];
 const DEFAULT_LLM_MODEL = 'gemini-2.5-pro';
-const DEFAULT_QWEN_MODEL = 'qwen3.5-plus';
+const DEFAULT_QWEN_MODEL = 'qwen3.6-plus';
 const DEFAULT_TTS_MODEL = 'cosyvoice-v3-plus';
 const DEFAULT_TTS_VOICE = 'longyuan_v3';
 const DEFAULT_CSV_TARGET_DURATION_SEC = 30;
@@ -4455,7 +4455,7 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private apiBase() {
-        return this.options.apiBaseUrl || 'http://localhost:3031/api/ot-tour-loader';
+        return this.options.apiBaseUrl || '/api/ot-tour-loader';
     }
 
     private resolveAsset(value: string) {
@@ -4473,7 +4473,11 @@ class TourLoaderPanel implements TourLoaderController {
     }
 
     private recordingApiBase() {
-        return 'http://localhost:3033/api/ot-tour-player';
+        return '/api/ot-tour-player';
+    }
+
+    private producerApiBase() {
+        return '/api/ot-tour-producer';
     }
 
     private setStatus(text: string) {
@@ -10373,10 +10377,10 @@ class TourLoaderPanel implements TourLoaderController {
     private async registerCinematicMp4ToTourProducer(name: string, blob: Blob) {
         if (String(blob.type || '').toLowerCase() !== 'video/mp4') return;
         try {
-            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch(`${this.producerApiBase()}/health`).then((res) => res.ok).catch(() => false);
             if (!healthy) return;
             const modelFilename = String(this.modelFilename || '__UNSCOPED__').trim() || '__UNSCOPED__';
-            await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
+            await fetch(`${this.producerApiBase()}/videos/register`, {
                 method: 'POST',
                 headers: {
                     'X-OT-Name': name,
@@ -10395,9 +10399,9 @@ class TourLoaderPanel implements TourLoaderController {
         this.cinematicRecordingBackfillInProgress = true;
         this.cinematicRecordingSyncToModelDbBtn.disabled = true;
         try {
-            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch(`${this.producerApiBase()}/health`).then((res) => res.ok).catch(() => false);
             if (!healthy) {
-                this.setCinematicRecordingStatus('Sync failed: ot-tour-producer backend is offline (3034).');
+                this.setCinematicRecordingStatus('Sync failed: ot-tour-producer backend is offline (3035).');
                 return;
             }
             const ready = this.cinematicRecordingResults.filter((item) => {
@@ -10416,7 +10420,7 @@ class TourLoaderPanel implements TourLoaderController {
                 const item = ready[i];
                 this.setCinematicRecordingStatus(`Sync MP4 to Model DB ${i + 1}/${ready.length}...`);
                 try {
-                    const response = await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
+                    const response = await fetch(`${this.producerApiBase()}/videos/register`, {
                         method: 'POST',
                         headers: {
                             'X-OT-Name': String(item.name || `tour-recording-${item.createdAt}.mp4`),

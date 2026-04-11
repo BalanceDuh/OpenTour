@@ -1509,7 +1509,7 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
     }
 
     private apiBase() {
-        return this.options.apiBaseUrl || 'http://localhost:3032/api/ot-cinematic-workspace';
+        return this.options.apiBaseUrl || '/api/ot-cinematic-workspace';
     }
 
     private resolveAsset(value: string) {
@@ -1527,7 +1527,11 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
     }
 
     private recordingApiBase() {
-        return 'http://localhost:3033/api/ot-tour-player';
+        return '/api/ot-tour-player';
+    }
+
+    private producerApiBase() {
+        return '/api/ot-tour-producer';
     }
 
     private setStatus(text: string) {
@@ -7069,7 +7073,29 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
         const percent = Math.max(0, Math.min(100, Number(entry.transcodePercent) || 0));
         const eta = this.formatCinematicRecordingEta(entry.transcodeEtaSec);
         const heartbeat = this.formatCinematicRecordingHeartbeat(entry.transcodeHeartbeatAt);
-        return `MP4 ${percent.toFixed(0)}% · ETA ${eta} · heartbeat ${heartbeat}`;
+        const phase = this.describeCinematicTranscodePhase(entry.transcodePhase, entry.transcodeHeartbeatAt);
+        return `MP4 ${percent.toFixed(0)}% · ${phase} · ETA ${eta} · heartbeat ${heartbeat}`;
+    }
+
+    private describeCinematicTranscodePhase(phase: string | undefined, heartbeatAt?: number | null) {
+        const normalized = String(phase || '').trim().toLowerCase();
+        const stalled = Number.isFinite(Number(heartbeatAt)) && Number(heartbeatAt) > 0 && (Date.now() - Number(heartbeatAt)) > 20_000;
+        if (stalled && (normalized.startsWith('transcoding') || normalized.startsWith('analysis') || normalized.startsWith('preparing'))) {
+            return 'stalled, auto-recovering';
+        }
+        if (!normalized || normalized === 'queued') return 'queued';
+        if (normalized === 'preparing') return 'preparing';
+        if (normalized === 'analysis') return 'analyzing bitrate';
+        if (normalized === 'analysis_done') return 'analysis done';
+        if (normalized === 'transcoding') return 'transcoding';
+        if (normalized === 'finalizing') return 'finalizing mp4';
+        if (normalized === 'done') return 'done';
+        if (normalized === 'error') return 'error';
+        if (normalized.startsWith('retrying_')) return `retry ${normalized.slice('retrying_'.length)}`;
+        if (normalized.startsWith('fallback_pending_')) return `fallback ${normalized.slice('fallback_pending_'.length)}`;
+        if (normalized.startsWith('transcoding_')) return `transcoding ${normalized.slice('transcoding_'.length)}`;
+        if (normalized.startsWith('analysis_')) return `analyzing ${normalized.slice('analysis_'.length)}`;
+        return normalized.replace(/_/g, ' ');
     }
 
     private async createCinematicTranscodeJob(blob: Blob, settings: CinematicRecordingSettings, width: number, height: number, durationSec: number) {
@@ -7146,6 +7172,7 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
             await new Promise((resolve) => window.setTimeout(resolve, 1000));
             const job = await this.fetchCinematicTranscodeJob(createdJob.jobId);
             const heartbeatAt = job.progress?.heartbeatAt ? Date.parse(job.progress.heartbeatAt) : Date.now();
+            const phaseLabel = this.describeCinematicTranscodePhase(job.progress?.phase, heartbeatAt);
             const progressEntry: CinematicStoredRecordingEntry = {
                 ...entry,
                 transcodeJobId: createdJob.jobId,
@@ -7161,7 +7188,7 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
                 })
             };
             await this.updateCinematicRecordingResult(progressEntry);
-            this.setCinematicRecordingStatus(`MP4 transcoding ${Math.round(progressEntry.transcodePercent || 0)}% (ETA ${this.formatCinematicRecordingEta(progressEntry.transcodeEtaSec)})...`);
+            this.setCinematicRecordingStatus(`MP4 ${phaseLabel} ${Math.round(progressEntry.transcodePercent || 0)}% (ETA ${this.formatCinematicRecordingEta(progressEntry.transcodeEtaSec)})...`);
             if (job.status === 'done') {
                 const mp4Blob = await this.fetchCinematicTranscodeJobResult(createdJob.jobId);
                 return { mp4Blob, jobId: createdJob.jobId };
@@ -7302,7 +7329,7 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
         const label = entry.status === 'ready'
             ? 'MP4 Ready'
             : entry.status === 'processing'
-                ? `Processing MP4 ${Math.round(entry.transcodePercent || 0)}%`
+                ? `MP4 ${this.describeCinematicTranscodePhase(entry.transcodePhase, entry.transcodeHeartbeatAt)} ${Math.round(entry.transcodePercent || 0)}%`
                 : 'WebM Fallback';
         const className = entry.status === 'ready'
             ? 'otl-cine-record-status'
@@ -7353,10 +7380,10 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
     private async registerCinematicMp4ToTourProducer(name: string, blob: Blob) {
         if (String(blob.type || '').toLowerCase() !== 'video/mp4') return;
         try {
-            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch(`${this.producerApiBase()}/health`).then((res) => res.ok).catch(() => false);
             if (!healthy) return;
             const modelFilename = String(this.modelFilename || '__UNSCOPED__').trim() || '__UNSCOPED__';
-            await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
+            await fetch(`${this.producerApiBase()}/videos/register`, {
                 method: 'POST',
                 headers: {
                     'X-OT-Name': name,
@@ -7375,9 +7402,9 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
         this.cinematicRecordingBackfillInProgress = true;
         this.cinematicRecordingSyncToModelDbBtn.disabled = true;
         try {
-            const healthy = await fetch('http://localhost:3035/api/ot-tour-producer/health').then((res) => res.ok).catch(() => false);
+            const healthy = await fetch(`${this.producerApiBase()}/health`).then((res) => res.ok).catch(() => false);
             if (!healthy) {
-                this.setCinematicRecordingStatus('Sync failed: ot-tour-producer backend is offline (3034).');
+                this.setCinematicRecordingStatus('Sync failed: ot-tour-producer backend is offline (3035).');
                 return;
             }
             const ready = this.cinematicRecordingResults.filter((item) => {
@@ -7396,7 +7423,7 @@ class CinematicWorkspacePanel implements CinematicWorkspaceController {
                 const item = ready[i];
                 this.setCinematicRecordingStatus(`Sync MP4 to Model DB ${i + 1}/${ready.length}...`);
                 try {
-                    const response = await fetch('http://localhost:3035/api/ot-tour-producer/videos/register', {
+                    const response = await fetch(`${this.producerApiBase()}/videos/register`, {
                         method: 'POST',
                         headers: {
                             'X-OT-Name': String(item.name || `tour-recording-${item.createdAt}.mp4`),

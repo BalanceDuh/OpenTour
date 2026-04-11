@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { basename, dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import Database from 'better-sqlite3';
+import { createLiveStreamRepository } from '../../../server/db/repositories/live-stream-repository.mjs';
 
 const port = Number(process.env.OT_LIVE_STREAM_PORT || 3036);
 const __filename = fileURLToPath(import.meta.url);
@@ -12,33 +12,7 @@ const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, '../../../../');
 const dataDir = join(repoRoot, 'data');
 mkdirSync(dataDir, { recursive: true });
-
-const db = new Database(join(dataDir, 'opentour.db'));
-db.exec(`
-CREATE TABLE IF NOT EXISTS ot_live_stream_source_config (
-    Id INTEGER PRIMARY KEY CHECK (Id = 1),
-    SourceMode TEXT NOT NULL CHECK (SourceMode IN ('server','local')),
-    ServerFolderPath TEXT,
-    Confirmed INTEGER NOT NULL CHECK (Confirmed IN (0,1)) DEFAULT 0,
-    UpdatedAt TEXT NOT NULL
-);
-`);
-
-const getSourceConfigStmt = db.prepare(`
-SELECT SourceMode, ServerFolderPath, Confirmed, UpdatedAt
-FROM ot_live_stream_source_config
-WHERE Id = 1
-`);
-
-const upsertSourceConfigStmt = db.prepare(`
-INSERT INTO ot_live_stream_source_config (Id, SourceMode, ServerFolderPath, Confirmed, UpdatedAt)
-VALUES (1, @source_mode, @server_folder_path, @confirmed, @updated_at)
-ON CONFLICT(Id) DO UPDATE SET
-    SourceMode = excluded.SourceMode,
-    ServerFolderPath = excluded.ServerFolderPath,
-    Confirmed = excluded.Confirmed,
-    UpdatedAt = excluded.UpdatedAt
-`);
+const liveStreamRepo = createLiveStreamRepository('ot-live-stream');
 
 const MODEL_EXTS = new Set(['.ply', '.splat', '.ksplat', '.spz', '.sog', '.lcc']);
 const VIDEO_EXTS = new Set(['.mp4', '.webm', '.mov', '.m4v']);
@@ -95,33 +69,11 @@ const fileMime = (filePath) => {
 const safeName = (value) => String(value || '').replace(/\s+/g, ' ').trim();
 
 const readSourceConfig = () => {
-    const row = getSourceConfigStmt.get();
-    if (!row) {
-        return {
-            sourceMode: 'server',
-            serverFolderPath: null,
-            confirmed: false,
-            updatedAt: null
-        };
-    }
-    return {
-        sourceMode: row.SourceMode === 'local' ? 'local' : 'server',
-        serverFolderPath: row.ServerFolderPath ? String(row.ServerFolderPath) : null,
-        confirmed: Number(row.Confirmed) === 1,
-        updatedAt: row.UpdatedAt || null
-    };
+    return liveStreamRepo.readSourceConfig();
 };
 
 const saveSourceConfig = ({ sourceMode, serverFolderPath, confirmed }) => {
-    const normalizedMode = sourceMode === 'local' ? 'local' : 'server';
-    const normalizedPath = String(serverFolderPath || '').trim();
-    upsertSourceConfigStmt.run({
-        source_mode: normalizedMode,
-        server_folder_path: normalizedMode === 'server' ? (normalizedPath || null) : null,
-        confirmed: confirmed ? 1 : 0,
-        updated_at: new Date().toISOString()
-    });
-    return readSourceConfig();
+    return liveStreamRepo.saveSourceConfig({ sourceMode, serverFolderPath, confirmed });
 };
 
 const maybeFile = async (filePath) => {
